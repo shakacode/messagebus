@@ -1,11 +1,11 @@
 [package]
 name = "messagebus"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
 categories = ["network-programming", "asynchronous"]
-description = "MessageBus allows you intercommunicate with messages between modules"
+description = "MessageBus allows intercommunicate with messages between modules"
 license = "MIT OR Apache-2.0"
 exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2018"

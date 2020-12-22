@@ -93,7 +93,13 @@ impl<T> Stream for Receiver<T> {
 
                 Poll::Ready(inner)
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                while let Some(waker) = this.state.send_wakers.pop() {
+                    waker.wake();
+                }
+
+                Poll::Pending
+            },
         }
     }
 }

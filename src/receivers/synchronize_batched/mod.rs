@@ -19,6 +19,7 @@ pub struct SynchronizeBatchedStats {
 pub struct SynchronizeBatchedConfig {
     pub buffer_size: usize,
     pub batch_size: usize,
+    pub when_ready: bool,
 }
 
 impl Default for SynchronizeBatchedConfig {
@@ -26,6 +27,7 @@ impl Default for SynchronizeBatchedConfig {
         Self {
             buffer_size: 4,
             batch_size: 16,
+            when_ready: false,
         }
     }
 }

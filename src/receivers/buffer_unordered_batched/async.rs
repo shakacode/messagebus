@@ -1,6 +1,3 @@
-use super::{SynchronizedConfig, SynchronizedStats};
-use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{executor::block_on, Future, StreamExt};
 use std::{
     any::TypeId,
     marker::PhantomData,
@@ -11,27 +8,30 @@ use std::{
     },
     task::{Context, Poll},
 };
-use tokio::sync::Mutex;
 
+use crate::{receiver::ReceiverStats, receivers::mpsc};
+use futures::{Future, StreamExt};
+
+use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
 use crate::{
     builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
     msgs,
     receiver::{AnyReceiver, ReceiverTrait, SendError, TypedReceiver},
-    Bus, Message, SynchronizedHandler, Untyped,
+    AsyncBatchHandler, Bus, Message, Untyped,
 };
 
-pub struct SynchronizedSyncSubscriber<T, M>
+pub struct BufferUnorderedBatchedAsyncSubscriber<T, M>
 where
-    T: SynchronizedHandler<M> + 'static,
+    T: AsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    cfg: SynchronizedConfig,
-    _m: PhantomData<(M, T)>,
+    cfg: BufferUnorderedBatchedConfig,
+    _m: PhantomData<(T, M)>,
 }
 
-impl<T, M> ReceiverSubscriber<T> for SynchronizedSyncSubscriber<T, M>
+impl<T, M> ReceiverSubscriber<T> for BufferUnorderedBatchedAsyncSubscriber<T, M>
 where
-    T: SynchronizedHandler<M> + 'static,
+    T: AsyncBatchHandler<M> + 'static,
     M: Message,
 {
     fn subscribe(
@@ -43,16 +43,21 @@ where
         >,
     ) {
         let cfg = self.cfg;
-        let (tx, rx) = mpsc::channel(cfg.buffer_size);
-        let stats = Arc::new(SynchronizedStats {
+        let stats = Arc::new(BufferUnorderedBatchedStats {
             buffer: AtomicU64::new(0),
             buffer_total: AtomicU64::new(cfg.buffer_size as _),
+            parallel: AtomicU64::new(0),
+            parallel_total: AtomicU64::new(cfg.max_parallel as _),
+            batch: AtomicU64::new(0),
+            batch_size: AtomicU64::new(cfg.batch_size as _),
         });
 
-        let arc = Arc::new(SynchronizedSync::<M> {
+        let (tx, rx) = mpsc::channel(cfg.buffer_size);
+        let arc = Arc::new(BufferUnorderedBatchedAsync::<M> {
             tx,
             stats: stats.clone(),
         });
+
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
                 Box::pin(buffer_unordered_poller::<T, M>(rx, bus, ut, stats, cfg))
@@ -68,22 +73,39 @@ async fn buffer_unordered_poller<T, M>(
     rx: mpsc::Receiver<M>,
     bus: Bus,
     ut: Untyped,
-    stats: Arc<SynchronizedStats>,
-    _cfg: SynchronizedConfig,
+    stats: Arc<BufferUnorderedBatchedStats>,
+    cfg: BufferUnorderedBatchedConfig,
 ) where
-    T: SynchronizedHandler<M> + 'static,
+    T: AsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
-    let mut x = rx.then(|msg| {
-        let ut = ut.clone();
-        let bus = bus.clone();
+    let ut = ut.downcast::<T>().unwrap();
+    let rx = rx
+        .inspect(|_| { stats.batch.fetch_add(1, Ordering::Relaxed); });
 
-        tokio::task::spawn_blocking(move || block_on(ut.lock()).handle(msg, &bus))
-    });
+    let rx = if cfg.when_ready {
+        rx.ready_chunks(cfg.batch_size)
+            .left_stream()
+    } else {
+        rx.chunks(cfg.batch_size)
+            .right_stream()
+    };
 
-    while let Some(err) = x.next().await {
-        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+    let mut rx = rx
+        .map(|msgs| {
+            stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
+            stats.buffer.fetch_sub(1, Ordering::Relaxed);
+            stats.parallel.fetch_add(1, Ordering::Relaxed);
+
+            let bus_clone = bus.clone();
+            let ut = ut.clone();
+
+            tokio::task::spawn(async move { ut.handle(msgs, &bus_clone).await })
+        })
+        .buffer_unordered(cfg.max_parallel);
+
+    while let Some(err) = rx.next().await {
+        stats.parallel.fetch_sub(1, Ordering::Relaxed);
 
         match err {
             Ok(Err(err)) => {
@@ -95,10 +117,7 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        futures::executor::block_on(ut.lock()).sync(&bus_clone)
-    })
-    .await;
+    let res = tokio::task::spawn(async move { ut.sync(&bus_clone).await }).await;
 
     match res {
         Ok(Err(err)) => {
@@ -108,33 +127,33 @@ async fn buffer_unordered_poller<T, M>(
     }
 
     println!(
-        "[EXIT] BufferUnorderedSync<{}>",
+        "[EXIT] BufferUnorderedBatchedAsync<{}>",
         std::any::type_name::<M>()
     );
 }
 
-pub struct SynchronizedSync<M: Message> {
+pub struct BufferUnorderedBatchedAsync<M: Message> {
     tx: mpsc::Sender<M>,
-    stats: Arc<SynchronizedStats>,
+    stats: Arc<BufferUnorderedBatchedStats>,
 }
 
-impl<T, M> ReceiverSubscriberBuilder<M, T> for SynchronizedSync<M>
+impl<T, M> ReceiverSubscriberBuilder<M, T> for BufferUnorderedBatchedAsync<M>
 where
-    T: SynchronizedHandler<M> + 'static,
+    T: AsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    type Entry = SynchronizedSyncSubscriber<T, M>;
-    type Config = SynchronizedConfig;
+    type Entry = BufferUnorderedBatchedAsyncSubscriber<T, M>;
+    type Config = BufferUnorderedBatchedConfig;
 
     fn build(cfg: Self::Config) -> Self::Entry {
-        SynchronizedSyncSubscriber {
+        BufferUnorderedBatchedAsyncSubscriber {
             cfg,
             _m: Default::default(),
         }
     }
 }
 
-impl<M: Message> TypedReceiver<M> for SynchronizedSync<M> {
+impl<M: Message> TypedReceiver<M> for BufferUnorderedBatchedAsync<M> {
     fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<()> {
         match self.tx.poll_ready(ctx) {
             Poll::Ready(_) => Poll::Ready(()),
@@ -154,13 +173,17 @@ impl<M: Message> TypedReceiver<M> for SynchronizedSync<M> {
     }
 }
 
-impl<M: Message> ReceiverTrait for SynchronizedSync<M> {
+impl<M: Message> ReceiverTrait for BufferUnorderedBatchedAsync<M> {
     fn typed(&self) -> AnyReceiver<'_> {
         AnyReceiver::new(self)
     }
 
     fn type_id(&self) -> TypeId {
-        TypeId::of::<SynchronizedSync<M>>()
+        TypeId::of::<BufferUnorderedBatchedAsync<M>>()
+    }
+
+    fn close(&self) {
+        self.tx.close();
     }
 
     fn stats(&self) -> ReceiverStats {
@@ -172,12 +195,16 @@ impl<M: Message> ReceiverTrait for SynchronizedSync<M> {
                     "buffer_total".into(),
                     self.stats.buffer_total.load(Ordering::SeqCst),
                 ),
+                (
+                    "parallel".into(),
+                    self.stats.parallel.load(Ordering::SeqCst),
+                ),
+                (
+                    "parallel_total".into(),
+                    self.stats.parallel_total.load(Ordering::SeqCst),
+                ),
             ],
         }
-    }
-
-    fn close(&self) {
-        self.tx.close();
     }
 
     fn sync(&self) {

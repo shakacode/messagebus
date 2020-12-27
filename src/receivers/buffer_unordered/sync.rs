@@ -113,7 +113,7 @@ async fn buffer_unordered_poller<T, M>(
     }
 
     println!(
-        "[EXIT] BufferUnorderedAsync<{}>",
+        "[EXIT] BufferUnorderedSync<{}>",
         std::any::type_name::<M>()
     );
 }

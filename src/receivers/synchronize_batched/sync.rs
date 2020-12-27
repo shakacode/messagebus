@@ -66,7 +66,7 @@ where
 }
 
 async fn buffer_unordered_poller<T, M>(
-    mut rx: mpsc::Receiver<M>,
+    rx: mpsc::Receiver<M>,
     bus: Bus,
     ut: Untyped,
     stats: Arc<SynchronizeBatchedStats>,
@@ -75,43 +75,31 @@ async fn buffer_unordered_poller<T, M>(
     T: BatchSynchronizedHandler<M> + 'static,
     M: Message,
 {
-    let mut batch = Vec::with_capacity(cfg.batch_size);
     let ut = ut.downcast::<Mutex<T>>().unwrap();
 
-    while let Some(msg) = rx.next().await {
+    let rx = rx
+        .inspect(|_|{ stats.batch.fetch_add(1, Ordering::Relaxed); });
+
+    let mut rx = if cfg.when_ready {
+        rx.ready_chunks(cfg.batch_size)
+            .left_stream()
+    } else {
+        rx.chunks(cfg.batch_size)
+            .right_stream()
+    };
+
+    while let Some(msgs) = rx.next().await {
+        stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
         stats.buffer.fetch_sub(1, Ordering::Relaxed);
-        batch.push(msg);
-        stats.batch.fetch_add(1, Ordering::Relaxed);
 
-        if batch.len() >= cfg.batch_size {
-            let ut = ut.clone();
-            let bus_clone = bus.clone();
-            let msgs = batch.drain(..).collect::<Vec<_>>();
-            stats.batch.store(0, Ordering::Relaxed);
-
-            let res = tokio::task::spawn_blocking(move || {
-                let mut uut = futures::executor::block_on(ut.lock());
-                uut.handle(msgs, &bus_clone)
-            })
-            .await;
-
-            match res {
-                Ok(Err(err)) => {
-                    let _ = bus.send(msgs::Error(Arc::new(err))).await;
-                }
-                _ => (),
-            }
-        }
-    }
-
-    if !batch.is_empty() {
-        let ut = ut.clone();
         let bus_clone = bus.clone();
-        stats.batch.store(0, Ordering::Relaxed);
+        let ut = ut.clone();
+
         let res = tokio::task::spawn_blocking(move || {
-            futures::executor::block_on(ut.lock()).handle(batch, &bus_clone)
-        })
-        .await;
+            let mut uut = futures::executor::block_on(ut.lock());
+            
+            uut.handle(msgs, &bus_clone)
+        }).await;
 
         match res {
             Ok(Err(err)) => {

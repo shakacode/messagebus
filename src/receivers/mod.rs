@@ -1,4 +1,5 @@
 mod buffer_unordered;
+mod buffer_unordered_batched;
 mod mpsc_futures;
 mod synchronize_batched;
 mod synchronized;

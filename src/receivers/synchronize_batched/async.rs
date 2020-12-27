@@ -81,7 +81,10 @@ async fn buffer_unordered_poller<T, M>(
     let ut = ut.downcast::<Mutex<T>>().unwrap();
 
     let rx = rx
-        .inspect(|_|{ stats.batch.fetch_add(1, Ordering::Relaxed); });
+        .inspect(|_|{ 
+            stats.buffer.fetch_sub(1, Ordering::Relaxed);
+            stats.batch.fetch_add(1, Ordering::Relaxed); 
+        });
 
     let mut rx = if cfg.when_ready {
         rx.ready_chunks(cfg.batch_size)
@@ -93,7 +96,6 @@ async fn buffer_unordered_poller<T, M>(
 
     while let Some(msgs) = rx.next().await {
         stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
-        stats.buffer.fetch_sub(1, Ordering::Relaxed);
 
         let bus_clone = bus.clone();
         let ut = ut.clone();

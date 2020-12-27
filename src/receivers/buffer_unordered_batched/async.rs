@@ -81,7 +81,10 @@ async fn buffer_unordered_poller<T, M>(
 {
     let ut = ut.downcast::<T>().unwrap();
     let rx = rx
-        .inspect(|_| { stats.batch.fetch_add(1, Ordering::Relaxed); });
+        .inspect(|_| {
+            stats.buffer.fetch_sub(1, Ordering::Relaxed);
+            stats.batch.fetch_add(1, Ordering::Relaxed); 
+        });
 
     let rx = if cfg.when_ready {
         rx.ready_chunks(cfg.batch_size)
@@ -94,7 +97,6 @@ async fn buffer_unordered_poller<T, M>(
     let mut rx = rx
         .map(|msgs| {
             stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
             stats.parallel.fetch_add(1, Ordering::Relaxed);
 
             let bus_clone = bus.clone();
@@ -202,6 +204,11 @@ impl<M: Message> ReceiverTrait for BufferUnorderedBatchedAsync<M> {
                 (
                     "parallel_total".into(),
                     self.stats.parallel_total.load(Ordering::SeqCst),
+                ),
+                ("batch".into(), self.stats.batch.load(Ordering::SeqCst)),
+                (
+                    "batch_size".into(),
+                    self.stats.batch_size.load(Ordering::SeqCst),
                 ),
             ],
         }

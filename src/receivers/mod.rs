@@ -13,6 +13,11 @@ pub use buffer_unordered::{
     BufferUnorderedSync, BufferUnorderedSyncSubscriber,
 };
 
+pub use buffer_unordered_batched::{
+    BufferUnorderedBatchedAsync, BufferUnorderedBatchedAsyncSubscriber, BufferUnorderedBatchedConfig,
+    BufferUnorderedBatchedSync, BufferUnorderedBatchedSyncSubscriber,
+};
+
 pub use synchronized::{
     SynchronizedAsync, SynchronizedAsyncSubscriber, SynchronizedConfig, SynchronizedSync,
     SynchronizedSyncSubscriber,

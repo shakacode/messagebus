@@ -1,6 +1,10 @@
 [package]
 name = "messagebus"
+<<<<<<< HEAD
 version = "0.5.0"
+=======
+version = "0.5.1"
+>>>>>>> db1727b (Local Handlers)
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]

@@ -1,5 +1,5 @@
 use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{Future, StreamExt};
+use futures::{executor::block_on, Future, StreamExt};
 use std::{
     any::TypeId,
     marker::PhantomData,
@@ -76,7 +76,7 @@ async fn buffer_unordered_poller<T, M>(
     T: Handler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<T>().unwrap();
+    let ut = ut.downcast_sync::<T>().unwrap();
 
     let mut x = rx
         .map(|msg| {
@@ -86,7 +86,9 @@ async fn buffer_unordered_poller<T, M>(
             let bus = bus.clone();
             let ut = ut.clone();
 
-            tokio::task::spawn_blocking(move || ut.handle(msg, &bus))
+            tokio::task::spawn_blocking(move || {
+                block_on(ut.lock_read()).get_ref().handle(msg, &bus)
+            })
         })
         .buffer_unordered(cfg.max_parallel);
 
@@ -103,7 +105,9 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || ut.sync(&bus_clone)).await;
+    let res =
+        tokio::task::spawn_blocking(move || block_on(ut.lock_read()).get_ref().sync(&bus_clone))
+            .await;
 
     match res {
         Ok(Err(err)) => {
@@ -112,10 +116,7 @@ async fn buffer_unordered_poller<T, M>(
         _ => (),
     }
 
-    println!(
-        "[EXIT] BufferUnorderedSync<{}>",
-        std::any::type_name::<M>()
-    );
+    println!("[EXIT] BufferUnorderedSync<{}>", std::any::type_name::<M>());
 }
 
 pub struct BufferUnorderedSync<M: Message> {

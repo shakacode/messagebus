@@ -79,19 +79,16 @@ async fn buffer_unordered_poller<T, M>(
     T: AsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<T>().unwrap();
-    let rx = rx
-        .inspect(|_| {
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.batch.fetch_add(1, Ordering::Relaxed); 
-        });
+    let ut = ut.downcast_sync::<T>().unwrap();
+    let rx = rx.inspect(|_| {
+        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+        stats.batch.fetch_add(1, Ordering::Relaxed);
+    });
 
     let rx = if cfg.when_ready {
-        rx.ready_chunks(cfg.batch_size)
-            .left_stream()
+        rx.ready_chunks(cfg.batch_size).left_stream()
     } else {
-        rx.chunks(cfg.batch_size)
-            .right_stream()
+        rx.chunks(cfg.batch_size).right_stream()
     };
 
     let mut rx = rx
@@ -102,7 +99,13 @@ async fn buffer_unordered_poller<T, M>(
             let bus_clone = bus.clone();
             let ut = ut.clone();
 
-            tokio::task::spawn(async move { ut.handle(msgs, &bus_clone).await })
+            tokio::task::spawn(async move {
+                ut.lock_read()
+                    .await
+                    .get_ref()
+                    .handle(msgs, &bus_clone)
+                    .await
+            })
         })
         .buffer_unordered(cfg.max_parallel);
 
@@ -119,7 +122,9 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn(async move { ut.sync(&bus_clone).await }).await;
+    let res =
+        tokio::task::spawn(async move { ut.lock_read().await.get_ref().sync(&bus_clone).await })
+            .await;
 
     match res {
         Ok(Err(err)) => {

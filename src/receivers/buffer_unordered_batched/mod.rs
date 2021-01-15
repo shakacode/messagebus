@@ -27,9 +27,9 @@ pub struct BufferUnorderedBatchedConfig {
 impl Default for BufferUnorderedBatchedConfig {
     fn default() -> Self {
         Self {
-            buffer_size:  8,
+            buffer_size: 8,
             max_parallel: 2,
-            batch_size:   8,
+            batch_size: 8,
             when_ready: false,
         }
     }

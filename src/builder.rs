@@ -2,7 +2,6 @@ use std::{any::TypeId, collections::HashMap, marker::PhantomData, pin::Pin, sync
 
 use futures::{Future, FutureExt};
 use receiver::ReceiverTrait;
-use tokio::sync::Mutex;
 
 use crate::{
     receiver::{self, Receiver},
@@ -29,6 +28,8 @@ pub trait ReceiverSubscriberBuilder<M, T: 'static> {
 
 pub struct SyncEntry;
 pub struct UnsyncEntry;
+
+pub struct LocalEntry;
 
 #[must_use]
 pub struct RegisterEntry<K, T> {
@@ -64,6 +65,27 @@ impl<K, T: 'static> RegisterEntry<K, T> {
         builder
     }
 }
+
+
+impl<T: 'static> RegisterEntry<LocalEntry, T> {
+    pub fn subscribe<M, R>(mut self, cfg: R::Config) -> Self
+    where
+        T: 'static,
+        M: Message + 'static,
+        R: ReceiverSubscriberBuilder<M, T> + 'static,
+    {
+        let (inner, poller) = R::build(cfg).subscribe();
+
+        let receiver = Receiver::new(inner);
+        self.receivers
+            .entry(TypeId::of::<M>())
+            .or_insert_with(Vec::new)
+            .push((receiver, poller));
+
+        self
+    }
+}
+
 
 impl<T: Send + 'static> RegisterEntry<UnsyncEntry, T> {
     pub fn subscribe<M, R>(mut self, cfg: R::Config) -> Self
@@ -118,7 +140,7 @@ impl BusBuilder {
 
     pub fn register<T: Send + Sync + 'static>(self, item: T) -> RegisterEntry<SyncEntry, T> {
         RegisterEntry {
-            item: Arc::new(item) as Untyped,
+            item: Untyped::new_rwlock(item),
             builder: self,
             receivers: HashMap::new(),
             _m: Default::default(),
@@ -127,7 +149,19 @@ impl BusBuilder {
 
     pub fn register_unsync<T: Send + 'static>(self, item: T) -> RegisterEntry<UnsyncEntry, T> {
         RegisterEntry {
-            item: Arc::new(Mutex::new(item)) as Untyped,
+            item: Untyped::new_mutex(item),
+            builder: self,
+            receivers: HashMap::new(),
+            _m: Default::default(),
+        }
+    }
+
+    pub fn register_local<T: 'static>(
+        self,
+        item: impl FnOnce() -> T + Send + 'static,
+    ) -> RegisterEntry<LocalEntry, T> {
+        RegisterEntry {
+            item: Untyped::new_local(item),
             builder: self,
             receivers: HashMap::new(),
             _m: Default::default(),

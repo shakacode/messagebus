@@ -12,26 +12,25 @@ use std::{
 use crate::{receiver::ReceiverStats, receivers::mpsc};
 use futures::{Future, StreamExt};
 
-use super::{SynchronizedConfig, SynchronizedStats};
+use super::{LocalBatchedConfig, LocalBatchedStats};
 use crate::{
     builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
-    msgs,
     receiver::{AnyReceiver, ReceiverTrait, SendError, TypedReceiver},
-    AsyncSynchronizedHandler, Bus, Message, Untyped,
+    Bus, LocalAsyncBatchHandler, Message, Untyped,
 };
 
-pub struct SynchronizedAsyncSubscriber<T, M>
+pub struct LocalBatchedAsyncSubscriber<T, M>
 where
-    T: AsyncSynchronizedHandler<M> + 'static,
+    T: LocalAsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    cfg: SynchronizedConfig,
+    cfg: LocalBatchedConfig,
     _m: PhantomData<(T, M)>,
 }
 
-impl<T, M> ReceiverSubscriber<T> for SynchronizedAsyncSubscriber<T, M>
+impl<T, M> ReceiverSubscriber<T> for LocalBatchedAsyncSubscriber<T, M>
 where
-    T: AsyncSynchronizedHandler<M> + 'static,
+    T: LocalAsyncBatchHandler<M> + 'static,
     M: Message,
 {
     fn subscribe(
@@ -44,12 +43,14 @@ where
     ) {
         let cfg = self.cfg;
         let (tx, rx) = mpsc::channel(cfg.buffer_size);
-        let stats = Arc::new(SynchronizedStats {
+        let stats = Arc::new(LocalBatchedStats {
             buffer: AtomicU64::new(0),
             buffer_total: AtomicU64::new(cfg.buffer_size as _),
+            batch: AtomicU64::new(0),
+            batch_size: AtomicU64::new(cfg.batch_size as _),
         });
 
-        let arc = Arc::new(SynchronizedAsync::<M> {
+        let arc = Arc::new(LocalBatchedAsync::<M> {
             tx,
             stats: stats.clone(),
         });
@@ -69,70 +70,72 @@ async fn buffer_unordered_poller<T, M>(
     rx: mpsc::Receiver<M>,
     bus: Bus,
     ut: Untyped,
-    stats: Arc<SynchronizedStats>,
-    _cfg: SynchronizedConfig,
+    stats: Arc<LocalBatchedStats>,
+    cfg: LocalBatchedConfig,
 ) where
-    T: AsyncSynchronizedHandler<M> + 'static,
+    T: LocalAsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast_send::<T>().unwrap();
-    let ut1 = ut.clone();
-    let bus1 = bus.clone();
+    let ut = ut.downcast_local::<T>().unwrap();
 
-    let mut x = rx.then(move |msg| {
-        let bus = bus1.clone();
-        let ut = ut1.clone();
-
-        tokio::task::spawn(async move { ut.lock().await.handle(msg, &bus).await })
+    let rx = rx.inspect(|_| {
+        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+        stats.batch.fetch_add(1, Ordering::Relaxed);
     });
 
-    while let Some(err) = x.next().await {
-        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+    let mut rx = if cfg.when_ready {
+        rx.ready_chunks(cfg.batch_size).left_stream()
+    } else {
+        rx.chunks(cfg.batch_size).right_stream()
+    };
 
-        match err {
-            Ok(Err(err)) => {
-                let _ = bus.send(msgs::Error(Arc::new(err))).await;
-            }
-            _ => (),
-        }
+    while let Some(msgs) = rx.next().await {
+        stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
+
+        let bus_clone = bus.clone();
+        let ut = ut.clone();
+
+        ut.spawn_local(move |item| {
+            Box::pin(async move {
+                let _ = item.handle(msgs, &bus_clone).await;
+            })
+        })
+        .await;
     }
 
-    let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn(async move { ut.lock().await.sync(&bus_clone).await }).await;
+    ut.spawn_local(move |item| {
+        Box::pin(async move {
+            let _ = item.sync(&bus_clone).await;
+        })
+    })
+    .await;
 
-    match res {
-        Ok(Err(err)) => {
-            let _ = bus.send(msgs::Error(Arc::new(err))).await;
-        }
-        _ => (),
-    }
-
-    println!("[EXIT] SynchronizedAsync<{}>", std::any::type_name::<M>());
+    println!("[EXIT] LocalBatchedAsync<{}>", std::any::type_name::<M>());
 }
 
-pub struct SynchronizedAsync<M: Message> {
+pub struct LocalBatchedAsync<M: Message> {
     tx: mpsc::Sender<M>,
-    stats: Arc<SynchronizedStats>,
+    stats: Arc<LocalBatchedStats>,
 }
 
-impl<T, M> ReceiverSubscriberBuilder<M, T> for SynchronizedAsync<M>
+impl<T, M> ReceiverSubscriberBuilder<M, T> for LocalBatchedAsync<M>
 where
-    T: AsyncSynchronizedHandler<M> + 'static,
+    T: LocalAsyncBatchHandler<M> + 'static,
     M: Message,
 {
-    type Entry = SynchronizedAsyncSubscriber<T, M>;
-    type Config = SynchronizedConfig;
+    type Entry = LocalBatchedAsyncSubscriber<T, M>;
+    type Config = LocalBatchedConfig;
 
     fn build(cfg: Self::Config) -> Self::Entry {
-        SynchronizedAsyncSubscriber {
+        LocalBatchedAsyncSubscriber {
             cfg,
             _m: Default::default(),
         }
     }
 }
 
-impl<M: Message> TypedReceiver<M> for SynchronizedAsync<M> {
+impl<M: Message> TypedReceiver<M> for LocalBatchedAsync<M> {
     fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<()> {
         match self.tx.poll_ready(ctx) {
             Poll::Ready(_) => Poll::Ready(()),
@@ -152,13 +155,17 @@ impl<M: Message> TypedReceiver<M> for SynchronizedAsync<M> {
     }
 }
 
-impl<M: Message> ReceiverTrait for SynchronizedAsync<M> {
+impl<M: Message> ReceiverTrait for LocalBatchedAsync<M> {
     fn typed(&self) -> AnyReceiver<'_> {
         AnyReceiver::new(self)
     }
 
     fn type_id(&self) -> TypeId {
-        TypeId::of::<SynchronizedAsync<M>>()
+        TypeId::of::<Self>()
+    }
+
+    fn close(&self) {
+        self.tx.close();
     }
 
     fn stats(&self) -> ReceiverStats {
@@ -170,12 +177,13 @@ impl<M: Message> ReceiverTrait for SynchronizedAsync<M> {
                     "buffer_total".into(),
                     self.stats.buffer_total.load(Ordering::SeqCst),
                 ),
+                ("batch".into(), self.stats.batch.load(Ordering::SeqCst)),
+                (
+                    "batch_size".into(),
+                    self.stats.batch_size.load(Ordering::SeqCst),
+                ),
             ],
         }
-    }
-
-    fn close(&self) {
-        self.tx.close();
     }
 
     fn sync(&self) {

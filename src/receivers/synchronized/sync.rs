@@ -11,7 +11,6 @@ use std::{
     },
     task::{Context, Poll},
 };
-use tokio::sync::Mutex;
 
 use crate::{
     builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
@@ -74,12 +73,15 @@ async fn buffer_unordered_poller<T, M>(
     T: SynchronizedHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
+    let ut = ut.downcast_send::<T>().unwrap();
     let mut x = rx.then(|msg| {
         let ut = ut.clone();
         let bus = bus.clone();
 
-        tokio::task::spawn_blocking(move || block_on(ut.lock()).handle(msg, &bus))
+        tokio::task::spawn_blocking(move || {
+            let mut uut = block_on(ut.lock());
+            uut.handle(msg, &bus)
+        })
     });
 
     while let Some(err) = x.next().await {
@@ -95,10 +97,7 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        futures::executor::block_on(ut.lock()).sync(&bus_clone)
-    })
-    .await;
+    let res = tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus_clone)).await;
 
     match res {
         Ok(Err(err)) => {
@@ -107,10 +106,7 @@ async fn buffer_unordered_poller<T, M>(
         _ => (),
     }
 
-    println!(
-        "[EXIT] BufferUnorderedSync<{}>",
-        std::any::type_name::<M>()
-    );
+    println!("[EXIT] BufferUnorderedSync<{}>", std::any::type_name::<M>());
 }
 
 pub struct SynchronizedSync<M: Message> {

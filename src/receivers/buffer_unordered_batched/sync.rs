@@ -1,5 +1,5 @@
 use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{Future, StreamExt};
+use futures::{executor::block_on, Future, StreamExt};
 use std::{
     any::TypeId,
     marker::PhantomData,
@@ -16,7 +16,7 @@ use crate::{
     builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
     msgs,
     receiver::{AnyReceiver, ReceiverTrait, SendError, TypedReceiver},
-    Bus, BatchHandler, Message, Untyped,
+    BatchHandler, Bus, Message, Untyped,
 };
 
 pub struct BufferUnorderedBatchedSyncSubscriber<T, M>
@@ -78,19 +78,16 @@ async fn buffer_unordered_poller<T, M>(
     T: BatchHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<T>().unwrap();
-    let rx = rx
-        .inspect(|_| { 
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.batch.fetch_add(1, Ordering::Relaxed); 
-        });
+    let ut = ut.downcast_sync::<T>().unwrap();
+    let rx = rx.inspect(|_| {
+        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+        stats.batch.fetch_add(1, Ordering::Relaxed);
+    });
 
     let rx = if cfg.when_ready {
-        rx.ready_chunks(cfg.batch_size)
-            .left_stream()
+        rx.ready_chunks(cfg.batch_size).left_stream()
     } else {
-        rx.chunks(cfg.batch_size)
-            .right_stream()
+        rx.chunks(cfg.batch_size).right_stream()
     };
 
     let mut rx = rx
@@ -101,7 +98,9 @@ async fn buffer_unordered_poller<T, M>(
             let bus = bus.clone();
             let ut = ut.clone();
 
-            tokio::task::spawn_blocking(move || ut.handle(msgs, &bus))
+            tokio::task::spawn_blocking(move || {
+                block_on(ut.lock_read()).get_ref().handle(msgs, &bus)
+            })
         })
         .buffer_unordered(cfg.max_parallel);
 
@@ -118,7 +117,9 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || ut.sync(&bus_clone)).await;
+    let res =
+        tokio::task::spawn_blocking(move || block_on(ut.lock_read()).get_ref().sync(&bus_clone))
+            .await;
 
     match res {
         Ok(Err(err)) => {

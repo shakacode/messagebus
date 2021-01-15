@@ -1,6 +1,6 @@
 [package]
 name = "messagebus"
-version = "0.4.6"
+version = "0.5.0"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
@@ -11,12 +11,12 @@ exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2018"
 
 [dependencies]
-tokio = { version = "0.2", features = ["parking_lot", "rt-threaded", "sync", "stream", "blocking"] }
-parking_lot = "0.11.1"
-async-trait = "0.1.42"
-futures = "0.3.8"
-anyhow = "1.0.34"
+tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync"] }
+parking_lot = "0.11"
+async-trait = "0.1"
+futures = "0.3"
+anyhow = "1.0"
 crossbeam = "0.8.0"
 
 [dev-dependencies]
-tokio = { version = "0.2", features = ["parking_lot", "rt-threaded", "sync", "stream", "macros"] }
+tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "macros"] }

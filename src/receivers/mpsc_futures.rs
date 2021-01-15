@@ -99,7 +99,7 @@ impl<T> Stream for Receiver<T> {
                 }
 
                 Poll::Pending
-            },
+            }
         }
     }
 }

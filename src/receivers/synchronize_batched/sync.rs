@@ -6,7 +6,7 @@ use crate::{
     BatchSynchronizedHandler, Bus, Message, Untyped,
 };
 use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{Future, StreamExt};
+use futures::{executor::block_on, Future, StreamExt};
 use std::{
     any::TypeId,
     marker::PhantomData,
@@ -17,7 +17,6 @@ use std::{
     },
     task::{Context, Poll},
 };
-use tokio::sync::Mutex;
 
 pub struct SynchronizeBatchedSyncSubscriber<T, M>
 where
@@ -75,20 +74,17 @@ async fn buffer_unordered_poller<T, M>(
     T: BatchSynchronizedHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
+    let ut = ut.downcast_send::<T>().unwrap();
 
-    let rx = rx
-        .inspect(|_|{ 
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.batch.fetch_add(1, Ordering::Relaxed); 
-        });
+    let rx = rx.inspect(|_| {
+        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+        stats.batch.fetch_add(1, Ordering::Relaxed);
+    });
 
     let mut rx = if cfg.when_ready {
-        rx.ready_chunks(cfg.batch_size)
-            .left_stream()
+        rx.ready_chunks(cfg.batch_size).left_stream()
     } else {
-        rx.chunks(cfg.batch_size)
-            .right_stream()
+        rx.chunks(cfg.batch_size).right_stream()
     };
 
     while let Some(msgs) = rx.next().await {
@@ -98,10 +94,10 @@ async fn buffer_unordered_poller<T, M>(
         let ut = ut.clone();
 
         let res = tokio::task::spawn_blocking(move || {
-            let mut uut = futures::executor::block_on(ut.lock());
-            
+            let mut uut = block_on(ut.lock());
             uut.handle(msgs, &bus_clone)
-        }).await;
+        })
+        .await;
 
         match res {
             Ok(Err(err)) => {
@@ -113,10 +109,7 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        futures::executor::block_on(ut.lock()).sync(&bus_clone)
-    })
-    .await;
+    let res = tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus_clone)).await;
 
     match res {
         Ok(Err(err)) => {

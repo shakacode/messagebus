@@ -11,7 +11,6 @@ use std::{
 
 use crate::{receiver::ReceiverStats, receivers::mpsc};
 use futures::{Future, StreamExt};
-use tokio::sync::Mutex;
 
 use super::{SynchronizeBatchedConfig, SynchronizeBatchedStats};
 use crate::{
@@ -78,20 +77,17 @@ async fn buffer_unordered_poller<T, M>(
     T: AsyncBatchSynchronizedHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
+    let ut = ut.downcast_send::<T>().unwrap();
 
-    let rx = rx
-        .inspect(|_|{ 
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.batch.fetch_add(1, Ordering::Relaxed); 
-        });
+    let rx = rx.inspect(|_| {
+        stats.buffer.fetch_sub(1, Ordering::Relaxed);
+        stats.batch.fetch_add(1, Ordering::Relaxed);
+    });
 
     let mut rx = if cfg.when_ready {
-        rx.ready_chunks(cfg.batch_size)
-            .left_stream()
+        rx.ready_chunks(cfg.batch_size).left_stream()
     } else {
-        rx.chunks(cfg.batch_size)
-            .right_stream()
+        rx.chunks(cfg.batch_size).right_stream()
     };
 
     while let Some(msgs) = rx.next().await {
@@ -101,8 +97,7 @@ async fn buffer_unordered_poller<T, M>(
         let ut = ut.clone();
 
         let res =
-            tokio::task::spawn(async move { ut.lock().await.handle(msgs, &bus_clone).await })
-                .await;
+            tokio::task::spawn(async move { ut.lock().await.handle(msgs, &bus_clone).await }).await;
 
         match res {
             Ok(Err(err)) => {

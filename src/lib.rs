@@ -5,6 +5,7 @@ pub mod msgs;
 mod receiver;
 pub mod receivers;
 mod trait_object;
+mod untyped;
 mod utils;
 
 use builder::BusBuilder;
@@ -14,13 +15,13 @@ pub use receiver::SendError;
 use receiver::{Receiver, ReceiverStats};
 use utils::binary_search_range_by_key;
 
-use core::any::{Any, TypeId};
+use core::any::TypeId;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-pub type Untyped = Arc<dyn Any + Send + Sync>;
+pub use untyped::Untyped;
 pub type Result = anyhow::Result<()>;
 
 pub struct BusInner {

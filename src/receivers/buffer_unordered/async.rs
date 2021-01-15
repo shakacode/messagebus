@@ -77,7 +77,7 @@ async fn buffer_unordered_poller<T, M>(
     T: AsyncHandler<M> + 'static,
     M: Message,
 {
-    let ut = ut.downcast::<T>().unwrap();
+    let ut = ut.downcast_sync::<T>().unwrap();
 
     let mut x = rx
         .map(|msg| {
@@ -86,7 +86,9 @@ async fn buffer_unordered_poller<T, M>(
             let bus = bus.clone();
             let ut = ut.clone();
 
-            tokio::task::spawn(async move { ut.handle(msg, &bus).await })
+            tokio::task::spawn(
+                async move { ut.lock_read().await.get_ref().handle(msg, &bus).await },
+            )
         })
         .buffer_unordered(cfg.max_parallel);
 
@@ -103,7 +105,9 @@ async fn buffer_unordered_poller<T, M>(
 
     let ut = ut.clone();
     let bus_clone = bus.clone();
-    let res = tokio::task::spawn(async move { ut.sync(&bus_clone).await }).await;
+    let res =
+        tokio::task::spawn(async move { ut.lock_read().await.get_ref().sync(&bus_clone).await })
+            .await;
 
     match res {
         Ok(Err(err)) => {

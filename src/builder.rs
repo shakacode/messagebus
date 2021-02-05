@@ -140,7 +140,7 @@ impl BusBuilder {
 
     pub fn register<T: Send + Sync + 'static>(self, item: T) -> RegisterEntry<SyncEntry, T> {
         RegisterEntry {
-            item: Untyped::new_rwlock(item),
+            item: Untyped::new_readonly(item),
             builder: self,
             receivers: HashMap::new(),
             _m: Default::default(),

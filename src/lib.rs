@@ -59,8 +59,7 @@ impl BusInner {
 
     pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
-            println!("Bus closed. Skipping send!");
-            return Ok(());
+            return Err(SendError::Closed(msg));
         }
 
         let tid = TypeId::of::<M>();
@@ -71,7 +70,7 @@ impl BusInner {
         }
 
         if let Some((_, r)) = self.receivers.get(range.start) {
-            r.try_broadcast(msg.clone())?;
+            r.try_broadcast(msg)?;
         } else {
             println!("Unhandled message {:?}", core::any::type_name::<M>());
         }
@@ -97,7 +96,7 @@ impl BusInner {
         }
 
         if let Some((_, r)) = self.receivers.get(range.start) {
-            r.broadcast(msg.clone()).await?;
+            r.broadcast(msg).await?;
         } else {
             println!("Unhandled message {:?}", core::any::type_name::<M>());
         }

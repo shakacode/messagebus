@@ -83,11 +83,13 @@ impl<T> Stream for Receiver<T> {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(inner) => {
-                let val = this.state.counter.fetch_sub(1, Ordering::SeqCst);
+                let val = this.state.buffer - this.state.counter.fetch_sub(1, Ordering::SeqCst) + 1;
 
-                if val <= this.state.buffer {
+                for _ in 0..val {
                     if let Some(waker) = this.state.send_wakers.pop() {
                         waker.wake();
+                    } else {
+                        break;
                     }
                 }
 

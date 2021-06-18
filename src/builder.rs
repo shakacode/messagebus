@@ -20,7 +20,13 @@ pub trait ReceiverSubscriber<T: 'static> {
     );
 }
 
-pub trait ReceiverSubscriberBuilder<M, T: 'static> {
+pub trait ReceiverSubscriberBuilder<T, M, R, E> 
+    where
+        T: 'static,
+        M: Message,
+        R: Message,
+        E: crate::Error
+{
     type Entry: ReceiverSubscriber<T>;
     type Config: Default;
 
@@ -44,6 +50,7 @@ pub struct RegisterEntry<K, T> {
                 )
                     -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             >,
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         )>,
     >,
     _m: PhantomData<(K, T)>,
@@ -54,10 +61,10 @@ impl<K, T: 'static> RegisterEntry<K, T> {
         let mut builder = self.builder;
 
         for (tid, v) in self.receivers {
-            for (r, poller) in v {
+            for (r, poller, poller2) in v {
                 let poller = poller(self.item.clone());
 
-                builder.add_recevier((tid, r), poller);
+                builder.add_recevier((tid, r), poller, poller2);
             }
         }
 
@@ -65,39 +72,45 @@ impl<K, T: 'static> RegisterEntry<K, T> {
     }
 }
 
-impl<T: Send + 'static> RegisterEntry<UnsyncEntry, T> {
-    pub fn subscribe<M, R>(mut self, cfg: R::Config) -> Self
+impl<T> RegisterEntry<UnsyncEntry, T> {
+    pub fn subscribe<M, S, R, E>(mut self, queue: u64, cfg: S::Config) -> Self
     where
         T: Send + 'static,
-        M: Message + 'static,
-        R: ReceiverSubscriberBuilder<M, T> + 'static,
+        M: Message,
+        R: Message,
+        E: crate::Error,
+        S: ReceiverSubscriberBuilder<T, M, R, E> + 'static,
     {
-        let (inner, poller) = R::build(cfg).subscribe();
+        let (inner, poller) = S::build(cfg).subscribe();
 
-        let receiver = Receiver::new(inner);
+        let receiver = Receiver::new(queue, inner);
+        let poller2 = receiver.start_polling_events::<R, E>();
         self.receivers
             .entry(TypeId::of::<M>())
             .or_insert_with(Vec::new)
-            .push((receiver, poller));
+            .push((receiver, poller, poller2));
 
         self
     }
 }
 
-impl<T: Send + Sync + 'static> RegisterEntry<SyncEntry, T> {
-    pub fn subscribe<M, R>(mut self, cfg: R::Config) -> Self
+impl<T> RegisterEntry<SyncEntry, T> {
+    pub fn subscribe<M, S, R, E>(mut self, queue: u64, cfg: S::Config) -> Self
     where
-        T: Send + 'static,
-        M: Message + 'static,
-        R: ReceiverSubscriberBuilder<M, T> + 'static,
+        T: Send + Sync + 'static,
+        M: Message,
+        R: Message,
+        E: crate::Error,
+        S: ReceiverSubscriberBuilder<T, M, R, E> + 'static,
     {
-        let (inner, poller) = R::build(cfg).subscribe();
+        let (inner, poller) = S::build(cfg).subscribe();
 
-        let receiver = Receiver::new(inner);
+        let receiver = Receiver::new(queue, inner);
+        let poller2 = receiver.start_polling_events::<R, E>();
         self.receivers
             .entry(TypeId::of::<M>())
             .or_insert_with(Vec::new)
-            .push((receiver, poller));
+            .push((receiver, poller, poller2));
 
         self
     }
@@ -138,9 +151,11 @@ impl BusBuilder {
         &mut self,
         val: (TypeId, Receiver),
         poller: Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        poller2: Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
     ) {
         self.receivers.push(val);
         self.pollings.push(poller);
+        self.pollings.push(poller2);
     }
 
     pub fn build(self) -> (Bus, impl Future<Output = ()>) {
@@ -148,7 +163,7 @@ impl BusBuilder {
             inner: Arc::new(BusInner::new(self.receivers)),
         };
 
-        let mut futs = Vec::with_capacity(self.pollings.len());
+        let mut futs = Vec::with_capacity(self.pollings.len() * 2);
         for poller in self.pollings {
             futs.push(tokio::task::spawn(poller(bus.clone())));
         }

@@ -1,9 +1,14 @@
-use messagebus::{receivers, Bus, Handler, Result as MbusResult};
+use async_trait::async_trait;
+use messagebus::{receivers, Bus, AsyncHandler};
 
 struct TmpReceiver;
 
-impl Handler<f32> for TmpReceiver {
-    fn handle(&self, msg: f32, _bus: &Bus) -> MbusResult {
+#[async_trait]
+impl AsyncHandler<f32> for TmpReceiver {
+    type Error = anyhow::Error;
+    type Response = ();
+
+    async fn handle(&self, msg: f32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
         println!("---> f32 {}", msg);
 
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -17,7 +22,7 @@ impl Handler<f32> for TmpReceiver {
 async fn main() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
-        .subscribe::<f32, receivers::BufferUnorderedSync<_>>(receivers::BufferUnorderedConfig {
+        .subscribe::<f32, receivers::BufferUnorderedAsync<_>, _, _>(1, receivers::BufferUnorderedConfig {
             buffer_size: 1,
             max_parallel: 1,
         })
@@ -57,7 +62,12 @@ async fn main() {
     println!("sending 11");
     b.send(32f32).await.unwrap();
 
-    println!("finish");
+    println!("flush");
+    b.flush().await;
+
+    println!("close");
+    b.close().await;
 
     poller.await;
+    println!("[done]");
 }

@@ -17,6 +17,11 @@ async-trait = "0.1.42"
 futures = "0.3.8"
 anyhow = "1.0.34"
 crossbeam = "0.8.1"
+uuid = "0.8.2"
+tokio-util = "0.6.7"
+async-stream = "0.3.2"
+smallvec = "1.6.1"
+log = "0.4.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "parking_lot", "rt-multi-thread", "io-util", "sync"] }

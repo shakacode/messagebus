@@ -5,32 +5,44 @@ pub mod msgs;
 mod receiver;
 pub mod receivers;
 mod trait_object;
-mod utils;
+
+#[macro_use]
+extern crate log;
 
 use builder::BusBuilder;
 pub use envelop::Message;
 pub use handler::*;
 pub use receiver::SendError;
 use receiver::{Receiver, ReceiverStats};
-use utils::binary_search_range_by_key;
+use smallvec::SmallVec;
 
 use core::any::{Any, TypeId};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}};
+
+use crate::receivers::Permit;
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
-pub type Result = anyhow::Result<()>;
+
+// pub trait ErrorTrait: std::error::Error + Send + Sync + 'static {}
+pub trait Error: Into<anyhow::Error> + Send + Sync + 'static {}
+impl <T: Into<anyhow::Error> + Send + Sync + 'static> Error for T {}
+
+static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct BusInner {
-    receivers: Vec<(TypeId, Receiver)>,
+    receivers: HashMap<TypeId, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
 }
 
 impl BusInner {
-    pub(crate) fn new(mut receivers: Vec<(TypeId, Receiver)>) -> Self {
-        receivers.sort_unstable_by_key(|(k, _)| *k);
+    pub(crate) fn new(input: Vec<(TypeId, Receiver)>) -> Self {
+        let mut receivers = HashMap::new();
+
+        for (key, value) in input {
+            receivers.entry(key)
+                .or_insert_with(SmallVec::new)
+                .push(value);
+        }
 
         Self {
             receivers,
@@ -38,42 +50,101 @@ impl BusInner {
         }
     }
 
-    pub fn close(&self) {
+    pub async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
 
-        for (_, r) in &self.receivers {
-            r.close();
+        for (_, rs) in &self.receivers {
+            for r in rs {
+                r.close().await;
+            }
         }
     }
 
-    pub async fn sync(&self) {
-        for (_, r) in &self.receivers {
-            r.sync().await;
+    pub async fn flush(&self) {
+        let fuse_count = 32i32;
+        let mut breaked = false;
+        let mut iters = 0usize;
+        for _ in 0..fuse_count {
+            iters += 1;
+            let mut flushed = false;
+            for (_, rs) in &self.receivers {
+                
+                for r in rs {
+                    if r.need_flush() {
+                        flushed = true; 
+                        r.flush().await;
+                    }
+                }
+            }
+
+            if !flushed {
+                breaked = true;
+                break;
+            }
+        }
+
+        if !breaked {
+            warn!("!!! WARNING: unable to reach equilibrium in {} iterations !!!", fuse_count);
+        } else {
+            info!("flushed in {} iterations !!!", iters);
+        }
+    } 
+
+    pub async fn flash_and_sync(&self) {
+        self.flush().await;
+
+        for (_, rs) in &self.receivers {
+            for r in rs {
+                r.sync().await;
+            }
         }
     }
 
-    pub fn stats(&self) -> impl Iterator<Item = ReceiverStats> + '_ {
-        self.receivers.iter().map(|(_, r)| r.stats())
-    }
+    // pub fn stats(&self) -> impl Iterator<Item = ReceiverStats> + '_ {
+    //     self.receivers.iter()
+    //         .map(|(_, i)|i.iter())
+    //         .flatten()
+    //         .map(|r| r.stats())
+    // }
 
     pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
-            println!("Bus closed. Skipping send!");
+            warn!("Bus closed. Skipping send!");
             return Ok(());
         }
 
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tid = TypeId::of::<M>();
-        let range = binary_search_range_by_key(&self.receivers, &tid, |(k, _)| *k);
 
-        for i in (range.start + 1)..range.end {
-            self.receivers[i].1.try_broadcast(msg.clone())?;
+        if let Some(rs) = self.receivers.get(&tid) {
+            let mut permits = SmallVec::<[Permit; 32]>::new();
+
+            for r in rs {
+                if let Some(prmt) = r.try_reserve() {
+                    permits.push(prmt);
+                } else {
+                    return Err(SendError::Full(msg));
+                };
+            }
+
+            let mut iter = permits.into_iter().zip(rs.iter());
+            let mut counter = 1;
+            let total = rs.len();
+
+            while counter < total {
+                let (p, r) = iter.next().unwrap();
+                let _ = r.send(mid, p, msg.clone());
+
+                counter += 1;
+            }
+
+            if let Some((p, r)) = iter.next() {
+                let _ = r.send(mid, p, msg);
+                return Ok(());
+            }
         }
 
-        if let Some((_, r)) = self.receivers.get(range.start) {
-            r.try_broadcast(msg.clone())?;
-        } else {
-            println!("Unhandled message {:?}", core::any::type_name::<M>());
-        }
+        warn!("Unhandled message {:?}: no receivers", core::any::type_name::<M>());
 
         Ok(())
     }
@@ -88,18 +159,47 @@ impl BusInner {
             return Err(SendError::Closed(msg));
         }
 
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tid = TypeId::of::<M>();
-        let range = binary_search_range_by_key(&self.receivers, &tid, |(k, _)| *k);
 
-        for i in (range.start + 1)..range.end {
-            self.receivers[i].1.broadcast(msg.clone()).await?;
+        if let Some(rs) = self.receivers.get(&tid) {
+            if let Some((last, head)) = rs.split_last() {
+                for r in head {
+                    let _ = r.send(mid, r.reserve().await, msg.clone());
+                }
+
+                let _ = last.send(mid, last.reserve().await, msg.clone());
+
+                return Ok(());
+            }
         }
 
-        if let Some((_, r)) = self.receivers.get(range.start) {
-            r.broadcast(msg.clone()).await?;
-        } else {
-            println!("Unhandled message {:?}", core::any::type_name::<M>());
+        warn!("Unhandled message {:?}: no receivers", core::any::type_name::<M>());
+
+        Ok(())
+    }
+
+    pub async fn force_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(msg));
         }
+
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = TypeId::of::<M>();
+
+        if let Some(rs) = self.receivers.get(&tid) {
+            if let Some((last, head)) = rs.split_last() {
+                for r in head {
+                    let _ = r.force_send(mid, msg.clone());
+                }
+
+                let _ = last.force_send(mid, msg.clone());
+
+                return Ok(());
+            }
+        }
+
+        warn!("Unhandled message {:?}: no receivers", core::any::type_name::<M>());
 
         Ok(())
     }

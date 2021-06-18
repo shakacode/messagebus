@@ -1,5 +1,3 @@
-use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{Future, StreamExt};
 use std::{
     any::TypeId,
     marker::PhantomData,
@@ -11,27 +9,37 @@ use std::{
     task::{Context, Poll},
 };
 
+use crate::{receiver::{AnyPoller, ReceiverStats, ReciveTypedReceiver}, receivers::{Action, Event}};
+use anyhow::Result;
+use futures::{Future, StreamExt, stream::FuturesUnordered};
+
 use super::{BufferUnorderedConfig, BufferUnorderedStats};
 use crate::{
     builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
-    msgs,
-    receiver::{AnyReceiver, ReceiverTrait, SendError, TypedReceiver},
-    Bus, Handler, Message, Untyped,
+    receiver::{AnyReceiver, ReceiverTrait, SendError, SendTypedReceiver},
+    Handler, Bus, Message, Untyped,
 };
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
-pub struct BufferUnorderedSyncSubscriber<T, M>
+
+pub struct BufferUnorderedSyncSubscriber<T, M, R, E>
 where
-    T: Handler<M> + 'static,
+    T: Handler<M, Response = R, Error = E> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error
 {
     cfg: BufferUnorderedConfig,
-    _m: PhantomData<(M, T)>,
+    _m: PhantomData<(T, M)>,
 }
 
-impl<T, M> ReceiverSubscriber<T> for BufferUnorderedSyncSubscriber<T, M>
+impl<T, M, R, E> ReceiverSubscriber<T> for BufferUnorderedSyncSubscriber<T, M, R, E>
 where
-    T: Handler<M> + 'static,
+    T: Handler<M, Response = R, Error = E> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error
 {
     fn subscribe(
         self,
@@ -42,7 +50,6 @@ where
         >,
     ) {
         let cfg = self.cfg;
-        let (tx, rx) = mpsc::channel(cfg.buffer_size);
         let stats = Arc::new(BufferUnorderedStats {
             buffer: AtomicU64::new(0),
             buffer_total: AtomicU64::new(cfg.buffer_size as _),
@@ -50,14 +57,17 @@ where
             parallel_total: AtomicU64::new(cfg.max_parallel as _),
         });
 
-        let arc = Arc::new(BufferUnorderedSync::<M> {
+        let (stx, srx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let arc = Arc::new(BufferUnorderedSync::<M, R, E> {
             tx,
             stats: stats.clone(),
+            srx: Mutex::new(srx),
         });
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(buffer_unordered_poller::<T, M>(rx, bus, ut, stats, cfg))
+                Box::pin(buffer_unordered_poller::<T, M, R, E>(rx, bus, ut, stats, cfg, stx))
                     as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
@@ -66,69 +76,129 @@ where
     }
 }
 
-async fn buffer_unordered_poller<T, M>(
-    rx: mpsc::Receiver<M>,
+fn buffer_unordered_poller<T, M, R, E>(
+    mut rx: mpsc::UnboundedReceiver<Action<M>>,
     bus: Bus,
     ut: Untyped,
     stats: Arc<BufferUnorderedStats>,
     cfg: BufferUnorderedConfig,
-) where
-    T: Handler<M> + 'static,
+    stx: mpsc::UnboundedSender<Event<R, E>>,
+) -> impl Future<Output = ()>
+where
+    T: Handler<M, Response = R, Error = E> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error
 {
     let ut = ut.downcast::<T>().unwrap();
+    let mut queue = FuturesUnordered::new();
+    let mut sync_future: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send>>> = None;
+    let mut need_sync = false;
+    let mut rx_closed = false;
+    let mut need_flush = false;
 
-    let mut x = rx
-        .map(|msg| {
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.parallel.fetch_add(1, Ordering::Relaxed);
+    futures::future::poll_fn(move |cx| loop {
+        if !rx_closed && !need_flush && !need_sync {
+            while queue.len() < cfg.max_parallel {
+                match rx.poll_recv(cx) {
+                    Poll::Ready(Some(a)) => {
+                        match a {
+                            Action::Request(mid, msg) => {
+                                stats.buffer.fetch_sub(1, Ordering::Relaxed);
+                                stats.parallel.fetch_add(1, Ordering::Relaxed);
 
-            let bus = bus.clone();
-            let ut = ut.clone();
-
-            tokio::task::spawn_blocking(move || ut.handle(msg, &bus))
-        })
-        .buffer_unordered(cfg.max_parallel);
-
-    while let Some(err) = x.next().await {
-        stats.parallel.fetch_sub(1, Ordering::Relaxed);
-
-        match err {
-            Ok(Err(err)) => {
-                let _ = bus.send(msgs::Error(Arc::new(err))).await;
+                                let bus = bus.clone();
+                                let ut = ut.clone();
+                                queue.push( tokio::task::spawn_blocking(move || (mid, ut.handle(msg, &bus))));
+                            },
+                            Action::Flush => need_flush = true,
+                            Action::Sync => need_sync = true,
+                            Action::Close => rx.close(),
+                            _ => unimplemented!()
+                        }
+                    },
+                    Poll::Ready(None) => {
+                        need_sync = true;
+                        rx_closed = true;
+                    },
+                    Poll::Pending => break,
+                }
             }
-            _ => (),
         }
-    }
 
-    let ut = ut.clone();
-    let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || ut.sync(&bus_clone)).await;
+        let queue_len = queue.len();
+        
+        loop {
+            if queue_len != 0 {
+                loop {
+                    match queue.poll_next_unpin(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Some(Ok((mid, res)))) => {
+                            stx.send(Event::Response(mid, res)).ok();
+                        },
+                        Poll::Ready(None) => break,
+                        _ => {}
+                    }
+                }
+            }
 
-    match res {
-        Ok(Err(err)) => {
-            let _ = bus.send(msgs::Error(Arc::new(err))).await;
+            if need_flush {
+                need_flush = false;
+                stx.send(Event::Flushed).ok();
+            }
+
+            if need_sync {
+                if let Some(mut fut) = sync_future.take() {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Pending => {
+                            sync_future = Some(fut);
+                            return Poll::Pending;
+                        },
+                        Poll::Ready(res) => {
+                            need_sync = false;
+
+                            if let Err(err) = res {
+                                stx.send(Event::SyncResponse(err)).ok();
+                            }
+                        }
+                    }
+                } else {
+                    let ut = ut.clone();
+                    let bus_clone = bus.clone();
+                    sync_future.replace(Box::pin(async move {
+                        tokio::task::spawn_blocking(move || ut.sync(&bus_clone)).await.unwrap()
+                    }));
+                }
+            } else {
+                break;
+            }
         }
-        _ => (),
-    }
 
-    println!(
-        "[EXIT] BufferUnorderedSync<{}>",
-        std::any::type_name::<M>()
-    );
+        if queue_len == queue.len() {
+            return if rx_closed { Poll::Ready(()) } else { Poll::Pending };
+        }
+    })
 }
 
-pub struct BufferUnorderedSync<M: Message> {
-    tx: mpsc::Sender<M>,
-    stats: Arc<BufferUnorderedStats>,
-}
-
-impl<T, M> ReceiverSubscriberBuilder<M, T> for BufferUnorderedSync<M>
-where
-    T: Handler<M> + 'static,
-    M: Message,
+pub struct BufferUnorderedSync<M, R = (), E = anyhow::Error> 
+    where 
+        M: Message,
+        R: Message,
+        E: crate::Error
 {
-    type Entry = BufferUnorderedSyncSubscriber<T, M>;
+    tx: mpsc::UnboundedSender<Action<M>>,
+    stats: Arc<BufferUnorderedStats>,
+    srx: Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
+}
+
+impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for BufferUnorderedSync<M, R, E>
+    where
+        T: Handler<M, Response = R, Error = E> + 'static,
+        R: Message,
+        M: Message,
+        E: crate::Error
+{
+    type Entry = BufferUnorderedSyncSubscriber<T, M, R, E>;
     type Config = BufferUnorderedConfig;
 
     fn build(cfg: Self::Config) -> Self::Entry {
@@ -139,65 +209,102 @@ where
     }
 }
 
-impl<M: Message> TypedReceiver<M> for BufferUnorderedSync<M> {
-    fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<()> {
-        match self.tx.poll_ready(ctx) {
-            Poll::Ready(_) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn try_send(&self, m: M) -> Result<(), SendError<M>> {
-        match self.tx.try_send(m) {
+impl<M, R, E> SendTypedReceiver<M> for BufferUnorderedSync<M, R, E> 
+    where
+        M: Message,
+        R: Message,
+        E: crate::Error
+{
+    fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
+        match self.tx.send(Action::Request(mid, m)) {
             Ok(_) => {
                 self.stats.buffer.fetch_add(1, Ordering::Relaxed);
 
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(mpsc::error::SendError(Action::Request(_, msg))) => Err(SendError::Closed(msg)),
+            _ => unimplemented!()
         }
     }
 }
 
-impl<M: Message> ReceiverTrait for BufferUnorderedSync<M> {
+impl<M, R, E> ReciveTypedReceiver<R, E> for BufferUnorderedSync<M, R, E> 
+    where
+        M: Message,
+        R: Message,
+        E: crate::Error
+{
+    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
+        let poll = self.srx.lock().poll_recv(ctx);
+        match poll {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(event)) => Poll::Ready(event),
+            Poll::Ready(None) => Poll::Ready(Event::Exited),
+        }
+    }
+}
+
+impl<M, R, E> ReceiverTrait for BufferUnorderedSync<M, R, E> 
+    where
+        M: Message,
+        R: Message,
+        E: crate::Error
+{
     fn typed(&self) -> AnyReceiver<'_> {
         AnyReceiver::new(self)
     }
 
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<BufferUnorderedSync<M>>()
+    fn poller(&self) -> AnyPoller<'_> {
+        AnyPoller::new(self)
     }
 
-    fn stats(&self) -> ReceiverStats {
-        ReceiverStats {
-            name: std::any::type_name::<M>().into(),
-            fields: vec![
-                ("buffer".into(), self.stats.buffer.load(Ordering::SeqCst)),
-                (
-                    "buffer_total".into(),
-                    self.stats.buffer_total.load(Ordering::SeqCst),
-                ),
-                (
-                    "parallel".into(),
-                    self.stats.parallel.load(Ordering::SeqCst),
-                ),
-                (
-                    "parallel_total".into(),
-                    self.stats.parallel_total.load(Ordering::SeqCst),
-                ),
-            ],
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<BufferUnorderedSync<M, R, E>>()
+    }
+
+    fn stats(&self) -> Result<(), SendError<()>> {
+        match self.tx.send(Action::Stats) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(SendError::Closed(()))
+        }
+        // ReceiverStats {
+        //     name: std::any::type_name::<M>().into(),
+        //     fields: vec![
+        //         ("buffer".into(), self.stats.buffer.load(Ordering::SeqCst)),
+        //         (
+        //             "buffer_total".into(),
+        //             self.stats.buffer_total.load(Ordering::SeqCst),
+        //         ),
+        //         (
+        //             "parallel".into(),
+        //             self.stats.parallel.load(Ordering::SeqCst),
+        //         ),
+        //         (
+        //             "parallel_total".into(),
+        //             self.stats.parallel_total.load(Ordering::SeqCst),
+        //         ),
+        //     ],
+        // }
+    }
+
+    fn close(&self) -> Result<(), SendError<()>> {
+        match self.tx.send(Action::Close) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(SendError::Closed(()))
         }
     }
 
-    fn close(&self) {
-        self.tx.close();
+    fn sync(&self) -> Result<(), SendError<()>> {
+        match self.tx.send(Action::Sync) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(SendError::Closed(()))
+        }
     }
 
-    fn sync(&self) {
-        self.tx.flush();
-    }
-
-    fn poll_synchronized(&self, _ctx: &mut Context<'_>) -> Poll<()> {
-        Poll::Ready(())
+    fn flush(&self) -> Result<(), SendError<()>> {
+        match self.tx.send(Action::Flush) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(SendError::Closed(()))
+        }
     }
 }

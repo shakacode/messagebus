@@ -1,36 +1,21 @@
 use std::{any::TypeId, collections::HashMap, marker::PhantomData, pin::Pin, sync::Arc};
 
 use futures::{Future, FutureExt};
-use receiver::ReceiverTrait;
 use tokio::sync::Mutex;
 
-use crate::{
-    receiver::{self, Receiver},
-    Bus, BusInner, Message, Untyped,
-};
+use crate::{Bus, BusInner, Message, Untyped, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}};
 
-pub trait ReceiverSubscriber<T: 'static> {
-    fn subscribe(
-        self,
-    ) -> (
-        Arc<dyn ReceiverTrait>,
-        Box<
-            dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-        >,
-    );
-}
 
-pub trait ReceiverSubscriberBuilder<T, M, R, E> 
+pub trait ReceiverSubscriberBuilder<T, M, R, E>: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
     where
         T: 'static,
         M: Message,
         R: Message,
         E: crate::Error
 {
-    type Entry: ReceiverSubscriber<T>;
     type Config: Default;
 
-    fn build(cfg: Self::Config) -> Self::Entry;
+    fn build(cfg: Self::Config) -> (Self, Box<dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>) where Self: Sized;
 }
 
 pub struct SyncEntry;
@@ -81,7 +66,7 @@ impl<T> RegisterEntry<UnsyncEntry, T> {
         E: crate::Error,
         S: ReceiverSubscriberBuilder<T, M, R, E> + 'static,
     {
-        let (inner, poller) = S::build(cfg).subscribe();
+        let (inner, poller) = S::build(cfg);
 
         let receiver = Receiver::new(queue, inner);
         let poller2 = receiver.start_polling_events::<R, E>();
@@ -103,7 +88,7 @@ impl<T> RegisterEntry<SyncEntry, T> {
         E: crate::Error,
         S: ReceiverSubscriberBuilder<T, M, R, E> + 'static,
     {
-        let (inner, poller) = S::build(cfg).subscribe();
+        let (inner, poller) = S::build(cfg);
 
         let receiver = Receiver::new(queue, inner);
         let poller2 = receiver.start_polling_events::<R, E>();

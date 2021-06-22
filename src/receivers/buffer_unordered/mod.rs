@@ -3,8 +3,8 @@ mod sync;
 
 use std::sync::atomic::AtomicU64;
 
-pub use r#async::{BufferUnorderedAsync, BufferUnorderedAsyncSubscriber};
-pub use sync::{BufferUnorderedSync, BufferUnorderedSyncSubscriber};
+pub use r#async::BufferUnorderedAsync;
+pub use sync::BufferUnorderedSync;
 
 #[derive(Debug)]
 pub struct BufferUnorderedStats {

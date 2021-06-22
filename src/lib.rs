@@ -11,15 +11,16 @@ extern crate log;
 
 use builder::BusBuilder;
 pub use envelop::Message;
+use futures::{Future, FutureExt, future::poll_fn};
 pub use handler::*;
 pub use receiver::SendError;
 use receiver::{Receiver, ReceiverStats};
 use smallvec::SmallVec;
+use tokio::sync::{mpsc, oneshot};
 
 use core::any::{Any, TypeId};
 use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}};
-
-use crate::receivers::Permit;
+use crate::receiver::Permit;
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
@@ -28,6 +29,20 @@ pub trait Error: Into<anyhow::Error> + Send + Sync + 'static {}
 impl <T: Into<anyhow::Error> + Send + Sync + 'static> Error for T {}
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SendOptions {
+    Broadcast,
+    Direct(u64),
+    Random,
+    Balanced,
+}
+
+impl Default for SendOptions {
+    fn default() -> Self {
+        Self::Broadcast
+    }
+}
 
 pub struct BusInner {
     receivers: HashMap<TypeId, SmallVec<[Receiver; 4]>>,
@@ -107,7 +122,26 @@ impl BusInner {
     //         .map(|r| r.stats())
     // }
 
+    fn try_reserve(&self, rs: &[Receiver]) -> Option<SmallVec::<[Permit; 32]>> {
+        let mut permits = SmallVec::<[Permit; 32]>::new();
+
+        for r in rs {
+            if let Some(prmt) = r.try_reserve() {
+                permits.push(prmt);
+            } else {
+                return None;
+            };
+        }
+
+        Some(permits)
+    }
+ 
+    #[inline]
     pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+        self.try_send_ext(msg, SendOptions::Broadcast)
+    }
+
+    pub fn try_send_ext<M: Message>(&self, msg: M, _options: SendOptions) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
             warn!("Bus closed. Skipping send!");
             return Ok(());
@@ -117,15 +151,11 @@ impl BusInner {
         let tid = TypeId::of::<M>();
 
         if let Some(rs) = self.receivers.get(&tid) {
-            let mut permits = SmallVec::<[Permit; 32]>::new();
-
-            for r in rs {
-                if let Some(prmt) = r.try_reserve() {
-                    permits.push(prmt);
-                } else {
-                    return Err(SendError::Full(msg));
-                };
-            }
+            let permits = if let Some(x) = self.try_reserve(rs) {
+                x
+            } else {
+                return Err(SendError::Full(msg));
+            };
 
             let mut iter = permits.into_iter().zip(rs.iter());
             let mut counter = 1;
@@ -151,10 +181,20 @@ impl BusInner {
 
     #[inline]
     pub fn send_blocking<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
-        futures::executor::block_on(self.send(msg))
+        self.send_blocking_ext(msg, SendOptions::Broadcast)
     }
 
-    pub async fn send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+    #[inline]
+    pub fn send_blocking_ext<M: Message>(&self, msg: M, options: SendOptions) -> core::result::Result<(), SendError<M>> {
+        futures::executor::block_on(self.send_ext(msg, options))
+    }
+
+    #[inline]
+    pub async fn send<M: Message>(&self, msg: M, ) -> core::result::Result<(), SendError<M>> {
+        self.send_ext(msg, SendOptions::Broadcast).await
+    }
+
+    pub async fn send_ext<M: Message>(&self, msg: M, _options: SendOptions) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg));
         }
@@ -168,7 +208,7 @@ impl BusInner {
                     let _ = r.send(mid, r.reserve().await, msg.clone());
                 }
 
-                let _ = last.send(mid, last.reserve().await, msg.clone());
+                let _ = last.send(mid, last.reserve().await, msg);
 
                 return Ok(());
             }
@@ -179,7 +219,12 @@ impl BusInner {
         Ok(())
     }
 
-    pub async fn force_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+    #[inline]
+    pub fn force_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+        self.force_send_ext(msg, SendOptions::Broadcast)
+    }
+
+    pub fn force_send_ext<M: Message>(&self, msg: M, _options: SendOptions) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg));
         }
@@ -193,7 +238,7 @@ impl BusInner {
                     let _ = r.force_send(mid, msg.clone());
                 }
 
-                let _ = last.force_send(mid, msg.clone());
+                let _ = last.force_send(mid, msg);
 
                 return Ok(());
             }
@@ -203,6 +248,28 @@ impl BusInner {
 
         Ok(())
     }
+
+    // pub fn request<M: Message, R: Message>(&self, req: M, options: SendOptions) -> impl Future<Output = anyhow::Result<R>> {
+    //     let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    //     let tid = TypeId::of::<M>();
+    //     let rid = TypeId::of::<R>();
+
+    //     let mut iter = self.select_receivers(options, Some(rid));
+    //     let first = iter.next();
+
+    //     for rs in iter {
+    //         let _ = rs.send(mid, rs.reserve().await, req.clone());
+    //     }
+        
+    //     first.send(mid, first.reserve().await, req);
+
+    //     let (tx, rx) = tokio::sync::oneshot::channel();
+    //     self.response_waiters.insert(mid, tx);
+
+    //     poll_fn(move |cx| {
+    //         rx.poll_unpin(cx)
+    //     })
+    // }
 }
 
 #[derive(Clone)]

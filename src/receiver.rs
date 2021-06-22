@@ -1,10 +1,136 @@
-use crate::{Bus, Message, msgs, receivers::{Event, Permit, PermitDrop}, trait_object::TraitObject};
+use crate::{Bus, Error, Message, msgs, trait_object::TraitObject};
 use core::{any::TypeId, fmt, marker::PhantomData, mem, pin::Pin, task::{Context, Poll}};
 use futures::future::poll_fn;
 use tokio::sync::Notify;
 use std::{borrow::Cow, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}};
 use futures::Future;
 
+
+pub trait SendUntypedReceiver: Send + Sync {
+    fn send(&self, msg: Action) -> Result<(), SendError<Action>>;
+}
+
+pub trait SendTypedReceiver<M: Message>: Sync {
+    fn send(&self, mid: u64, msg: M) -> Result<(), SendError<M>>;
+}
+
+pub trait ReciveTypedReceiver<M, E>: Sync 
+    where M: Message,
+          E: crate::Error
+{
+    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<M, E>>;
+}
+
+pub trait ReceiverTrait: Send + Sync {
+    fn typed(&self) -> AnyReceiver<'_>;
+    fn poller(&self) -> AnyPoller<'_>;
+    fn type_id(&self) -> TypeId;
+    fn stats(&self) -> Result<(), SendError<()>>;
+    fn close(&self) -> Result<(), SendError<()>>;
+    fn sync(&self) -> Result<(), SendError<()>>;
+    fn flush(&self) -> Result<(), SendError<()>>;
+}
+
+pub trait ReceiverPollerBuilder {
+    fn build(bus: Bus) -> Box<dyn Future<Output = ()>>;
+}
+
+pub trait PermitDrop {
+    fn permit_drop(&self);
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Stats {
+    pub has_queue: bool,
+    pub queue_capacity: u64,
+    pub queue_size: u64,
+
+    pub has_parallel: bool,
+    pub parallel_capacity: u64,
+    pub parallel_size: u64,
+
+    pub has_batch: bool,
+    pub batch_capacity: u64,
+    pub batch_size: u64,
+}
+
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum Action {
+    Flush,
+    Sync,
+    Close,
+    Stats,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum Event<M, E> {
+    Response(u64, Result<M, E>),
+    Synchronized(Result<(), E>),
+    Stats(Stats),
+    Flushed,
+    Exited,
+}
+
+struct ReceiverWrapper<M, R, E, S>
+    where M: Message,
+          R: Message,
+          E: Error,
+          S: 'static
+{ 
+    inner: S, 
+    _m: PhantomData<(M, R, E)> 
+}
+
+impl<M, R, E, S> ReceiverTrait for ReceiverWrapper<M, R, E, S> 
+    where M: Message,
+          R: Message,
+          E: Error,
+          S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static
+{
+    fn typed(&self) -> AnyReceiver<'_> {
+        AnyReceiver::new(&self.inner)
+    }
+
+    fn poller(&self) -> AnyPoller<'_> {
+        AnyPoller::new(&self.inner)
+    }
+
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<S>()
+    }
+
+    fn stats(&self) -> Result<(), SendError<()>> {
+        SendUntypedReceiver::send(&self.inner, Action::Stats).map_err(|_|SendError::Closed(()))
+    }
+
+    fn close(&self) -> Result<(), SendError<()>> {
+        SendUntypedReceiver::send(&self.inner, Action::Close).map_err(|_|SendError::Closed(()))
+    }
+
+    fn sync(&self) -> Result<(), SendError<()>> {
+        SendUntypedReceiver::send(&self.inner, Action::Sync).map_err(|_|SendError::Closed(()))
+    }
+
+    fn flush(&self) -> Result<(), SendError<()>> {
+        SendUntypedReceiver::send(&self.inner, Action::Flush).map_err(|_|SendError::Closed(()))
+    }
+}
+
+pub struct Permit {
+    pub(crate) fuse: bool,
+    pub(crate) inner: Arc<dyn PermitDrop>
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        if !self.fuse {
+            self.inner.permit_drop();
+        }
+    }
+}
 
 pub struct AnyReceiver<'a> {
     dyn_typed_receiver_trait_object: TraitObject,
@@ -115,31 +241,6 @@ impl fmt::Display for ReceiverStats {
     }
 }
 
-pub trait SendTypedReceiver<M: Message>: Sync {
-    fn send(&self, mid: u64, msg: M) -> Result<(), SendError<M>>;
-}
-
-pub trait ReciveTypedReceiver<M, E>: Sync 
-    where M: Message,
-          E: crate::Error
-{
-    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<M, E>>;
-}
-
-pub trait ReceiverTrait: Send + Sync {
-    fn typed(&self) -> AnyReceiver<'_>;
-    fn poller(&self) -> AnyPoller<'_>;
-    fn type_id(&self) -> TypeId;
-    fn stats(&self) -> Result<(), SendError<()>>;
-    fn close(&self) -> Result<(), SendError<()>>;
-    fn sync(&self) -> Result<(), SendError<()>>;
-    fn flush(&self) -> Result<(), SendError<()>>;
-}
-
-pub trait ReceiverPollerBuilder {
-    fn build(bus: Bus) -> Box<dyn Future<Output = ()>>;
-}
-
 struct ReceiverContext {
     limit: u64,
     processing: AtomicU64,
@@ -179,7 +280,12 @@ impl core::cmp::Eq for Receiver {}
 
 impl Receiver {
     #[inline]
-    pub(crate) fn new(limit: u64, inner: Arc<dyn ReceiverTrait>) -> Self {
+    pub(crate) fn new<M, R, E, S>(limit: u64, inner: S) -> Self 
+    where M: Message,
+          R: Message,
+          E: Error,
+          S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static
+    {
         let context = Arc::new(ReceiverContext {
             limit,
             processing: AtomicU64::new(0),
@@ -191,7 +297,10 @@ impl Receiver {
             statistics: Notify::new(),
         });
 
-        Self { inner, context }
+        Self { inner: Arc::new(ReceiverWrapper{
+            inner,
+            _m: Default::default()
+        }), context }
     }
 
     #[inline]
@@ -296,7 +405,7 @@ impl Receiver {
                     },
 
                     Event::Flushed => ctx_clone.flushed.notify_waiters(),
-                    Event::Synchronized => ctx_clone.synchronized.notify_waiters(),
+                    Event::Synchronized(_res) => ctx_clone.synchronized.notify_waiters(),
                     Event::Response(_mid, resp) => {
                         ctx_clone.processing.fetch_sub(1, Ordering::SeqCst);
                         ctx_clone.response.notify_one();

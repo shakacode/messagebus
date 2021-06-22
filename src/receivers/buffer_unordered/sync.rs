@@ -59,14 +59,21 @@ where
                                 (mid, ut.handle(msg, &bus))
                             }));
                         }
-                        Request::Action(Action::Flush) => need_flush = true,
-                        Request::Action(Action::Sync) => need_sync = true,
+                        Request::Action(Action::Flush) => {
+                            need_flush = true;
+                            break;
+                        }
+                        Request::Action(Action::Sync) => {
+                            need_sync = true;
+                            break;
+                        }
                         Request::Action(Action::Close) => rx.close(),
                         _ => unimplemented!(),
                     },
                     Poll::Ready(None) => {
                         need_sync = true;
                         rx_closed = true;
+                        break;
                     }
                     Poll::Pending => break,
                 }

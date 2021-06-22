@@ -3,9 +3,8 @@ mod sync;
 
 use std::sync::atomic::AtomicU64;
 
-pub use sync::{SynchronizedSync, SynchronizedSyncSubscriber};
-
-pub use r#async::{SynchronizedAsync, SynchronizedAsyncSubscriber};
+pub use r#async::SynchronizedAsync;
+pub use sync::SynchronizedSync;
 
 #[derive(Debug)]
 pub struct SynchronizedStats {

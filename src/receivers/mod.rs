@@ -1,8 +1,8 @@
 mod buffer_unordered;
+mod synchronized;
 // mod buffer_unordered_batched;
 // mod mpsc_futures;
 // mod synchronize_batched;
-// mod synchronized;
 
 // mod mpsc;
 // mod mpsc {
@@ -10,6 +10,7 @@ mod buffer_unordered;
 // }
 
 pub use buffer_unordered::{BufferUnorderedAsync, BufferUnorderedConfig, BufferUnorderedSync};
+pub use synchronized::{SynchronizedAsync, SynchronizedConfig, SynchronizedSync};
 
 use crate::receiver::Action;
 
@@ -21,11 +22,6 @@ pub(crate) enum Request<M> {
 // pub use buffer_unordered_batched::{
 //     BufferUnorderedBatchedAsync, BufferUnorderedBatchedAsyncSubscriber, BufferUnorderedBatchedConfig,
 //     BufferUnorderedBatchedSync, BufferUnorderedBatchedSyncSubscriber,
-// };
-
-// pub use synchronized::{
-//     SynchronizedAsync, SynchronizedAsyncSubscriber, SynchronizedConfig, SynchronizedSync,
-//     SynchronizedSyncSubscriber,
 // };
 
 // pub use synchronize_batched::{

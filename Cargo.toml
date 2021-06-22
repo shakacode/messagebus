@@ -11,17 +11,16 @@ exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2018"
 
 [dependencies]
-tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "io-util", "sync"] }
+tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync"] }
 parking_lot = "0.11.1"
 async-trait = "0.1.42"
 futures = "0.3.8"
 anyhow = "1.0.34"
-crossbeam = "0.8.1"
-uuid = "0.8.2"
 tokio-util = "0.6.7"
 async-stream = "0.3.2"
 smallvec = "1.6.1"
 log = "0.4.14"
+sharded-slab = "0.1.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "parking_lot", "rt-multi-thread", "io-util", "sync"] }

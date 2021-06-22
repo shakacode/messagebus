@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use messagebus::{receivers, Bus, AsyncHandler};
+use messagebus::{receivers, AsyncHandler, Bus};
 
 struct TmpReceiver;
 
@@ -22,10 +22,13 @@ impl AsyncHandler<f32> for TmpReceiver {
 async fn main() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
-        .subscribe::<f32, receivers::BufferUnorderedAsync<_>, _, _>(1, receivers::BufferUnorderedConfig {
-            buffer_size: 1,
-            max_parallel: 1,
-        })
+        .subscribe::<f32, receivers::BufferUnorderedAsync<_>, _, _>(
+            1,
+            receivers::BufferUnorderedConfig {
+                buffer_size: 1,
+                max_parallel: 1,
+            },
+        )
         .done()
         .build();
 

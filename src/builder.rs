@@ -3,19 +3,31 @@ use std::{any::TypeId, collections::HashMap, marker::PhantomData, pin::Pin, sync
 use futures::{Future, FutureExt};
 use tokio::sync::Mutex;
 
-use crate::{Bus, BusInner, Message, Untyped, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}};
+use crate::{
+    receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    Bus, BusInner, Message, Untyped,
+};
 
-
-pub trait ReceiverSubscriberBuilder<T, M, R, E>: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
-    where
-        T: 'static,
-        M: Message,
-        R: Message,
-        E: crate::Error
+pub trait ReceiverSubscriberBuilder<T, M, R, E>:
+    SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
+where
+    T: 'static,
+    M: Message,
+    R: Message,
+    E: crate::Error,
 {
     type Config: Default;
 
-    fn build(cfg: Self::Config) -> (Self, Box<dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>) where Self: Sized;
+    fn build(
+        cfg: Self::Config,
+    ) -> (
+        Self,
+        Box<
+            dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        >,
+    )
+    where
+        Self: Sized;
 }
 
 pub struct SyncEntry;
@@ -35,7 +47,7 @@ pub struct RegisterEntry<K, T> {
                 )
                     -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             >,
-            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         )>,
     >,
     _m: PhantomData<(K, T)>,
@@ -68,7 +80,7 @@ impl<T> RegisterEntry<UnsyncEntry, T> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new(queue, inner);
+        let receiver = Receiver::new::<M, R, E, S>(queue, inner);
         let poller2 = receiver.start_polling_events::<R, E>();
         self.receivers
             .entry(TypeId::of::<M>())
@@ -90,7 +102,7 @@ impl<T> RegisterEntry<SyncEntry, T> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new(queue, inner);
+        let receiver = Receiver::new::<M, R, E, S>(queue, inner);
         let poller2 = receiver.start_polling_events::<R, E>();
         self.receivers
             .entry(TypeId::of::<M>())

@@ -4,24 +4,19 @@ mod buffer_unordered;
 // mod synchronize_batched;
 // mod synchronized;
 
-
 // mod mpsc;
 // mod mpsc {
 //     pub use super::mpsc_futures::*;
 // }
 
-pub use buffer_unordered::{
-    BufferUnorderedAsync, BufferUnorderedConfig,
-    BufferUnorderedSync,
-};
+pub use buffer_unordered::{BufferUnorderedAsync, BufferUnorderedConfig, BufferUnorderedSync};
 
 use crate::receiver::Action;
 
 pub(crate) enum Request<M> {
     Action(Action),
-    Request(u64, M)
+    Request(u64, M),
 }
-
 
 // pub use buffer_unordered_batched::{
 //     BufferUnorderedBatchedAsync, BufferUnorderedBatchedAsyncSubscriber, BufferUnorderedBatchedConfig,

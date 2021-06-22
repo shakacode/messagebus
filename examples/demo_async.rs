@@ -144,10 +144,10 @@ async fn main() {
         .subscribe::<i16, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
         .done()
         .register(TmpReceiver2)
-            .subscribe::<i32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
-            .subscribe::<i16, receivers::BufferUnorderedSync<_>, _, _>(8, Default::default())
+        .subscribe::<i32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
+        .subscribe::<i16, receivers::BufferUnorderedSync<_>, _, _>(8, Default::default())
         .done()
-    .build();
+        .build();
 
     b.send(0f32).await.unwrap();
 

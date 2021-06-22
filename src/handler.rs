@@ -106,7 +106,6 @@ pub trait LocalAsyncHandler<M: Message> {
     }
 }
 
-
 pub trait LocalBatchHandler<M: Message> {
     type Error: crate::Error;
     type Response: Message;

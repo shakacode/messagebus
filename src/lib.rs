@@ -9,24 +9,30 @@ mod trait_object;
 #[macro_use]
 extern crate log;
 
+use anyhow::bail;
 use builder::BusBuilder;
 pub use envelop::Message;
-use futures::{Future, FutureExt, future::poll_fn};
 pub use handler::*;
 pub use receiver::SendError;
 use receiver::{Receiver, ReceiverStats};
 use smallvec::SmallVec;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
-use core::any::{Any, TypeId};
-use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}};
 use crate::receiver::Permit;
+use core::any::{Any, TypeId};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
 // pub trait ErrorTrait: std::error::Error + Send + Sync + 'static {}
 pub trait Error: Into<anyhow::Error> + Send + Sync + 'static {}
-impl <T: Into<anyhow::Error> + Send + Sync + 'static> Error for T {}
+impl<T: Into<anyhow::Error> + Send + Sync + 'static> Error for T {}
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -54,7 +60,8 @@ impl BusInner {
         let mut receivers = HashMap::new();
 
         for (key, value) in input {
-            receivers.entry(key)
+            receivers
+                .entry(key)
                 .or_insert_with(SmallVec::new)
                 .push(value);
         }
@@ -83,10 +90,9 @@ impl BusInner {
             iters += 1;
             let mut flushed = false;
             for (_, rs) in &self.receivers {
-                
                 for r in rs {
                     if r.need_flush() {
-                        flushed = true; 
+                        flushed = true;
                         r.flush().await;
                     }
                 }
@@ -99,11 +105,14 @@ impl BusInner {
         }
 
         if !breaked {
-            warn!("!!! WARNING: unable to reach equilibrium in {} iterations !!!", fuse_count);
+            warn!(
+                "!!! WARNING: unable to reach equilibrium in {} iterations !!!",
+                fuse_count
+            );
         } else {
             info!("flushed in {} iterations !!!", iters);
         }
-    } 
+    }
 
     pub async fn flash_and_sync(&self) {
         self.flush().await;
@@ -122,7 +131,7 @@ impl BusInner {
     //         .map(|r| r.stats())
     // }
 
-    fn try_reserve(&self, rs: &[Receiver]) -> Option<SmallVec::<[Permit; 32]>> {
+    fn try_reserve(&self, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
 
         for r in rs {
@@ -135,13 +144,17 @@ impl BusInner {
 
         Some(permits)
     }
- 
+
     #[inline]
     pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
         self.try_send_ext(msg, SendOptions::Broadcast)
     }
 
-    pub fn try_send_ext<M: Message>(&self, msg: M, _options: SendOptions) -> core::result::Result<(), SendError<M>> {
+    pub fn try_send_ext<M: Message>(
+        &self,
+        msg: M,
+        _options: SendOptions,
+    ) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
             warn!("Bus closed. Skipping send!");
             return Ok(());
@@ -174,7 +187,10 @@ impl BusInner {
             }
         }
 
-        warn!("Unhandled message {:?}: no receivers", core::any::type_name::<M>());
+        warn!(
+            "Unhandled message {:?}: no receivers",
+            core::any::type_name::<M>()
+        );
 
         Ok(())
     }
@@ -185,16 +201,24 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn send_blocking_ext<M: Message>(&self, msg: M, options: SendOptions) -> core::result::Result<(), SendError<M>> {
+    pub fn send_blocking_ext<M: Message>(
+        &self,
+        msg: M,
+        options: SendOptions,
+    ) -> core::result::Result<(), SendError<M>> {
         futures::executor::block_on(self.send_ext(msg, options))
     }
 
     #[inline]
-    pub async fn send<M: Message>(&self, msg: M, ) -> core::result::Result<(), SendError<M>> {
+    pub async fn send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
         self.send_ext(msg, SendOptions::Broadcast).await
     }
 
-    pub async fn send_ext<M: Message>(&self, msg: M, _options: SendOptions) -> core::result::Result<(), SendError<M>> {
+    pub async fn send_ext<M: Message>(
+        &self,
+        msg: M,
+        _options: SendOptions,
+    ) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg));
         }
@@ -214,7 +238,10 @@ impl BusInner {
             }
         }
 
-        warn!("Unhandled message {:?}: no receivers", core::any::type_name::<M>());
+        warn!(
+            "Unhandled message {:?}: no receivers",
+            core::any::type_name::<M>()
+        );
 
         Ok(())
     }
@@ -224,7 +251,11 @@ impl BusInner {
         self.force_send_ext(msg, SendOptions::Broadcast)
     }
 
-    pub fn force_send_ext<M: Message>(&self, msg: M, _options: SendOptions) -> core::result::Result<(), SendError<M>> {
+    pub fn force_send_ext<M: Message>(
+        &self,
+        msg: M,
+        _options: SendOptions,
+    ) -> core::result::Result<(), SendError<M>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg));
         }
@@ -244,32 +275,56 @@ impl BusInner {
             }
         }
 
-        warn!("Unhandled message {:?}: no receivers", core::any::type_name::<M>());
+        warn!(
+            "Unhandled message {:?}: no receivers",
+            core::any::type_name::<M>()
+        );
 
         Ok(())
     }
 
-    // pub fn request<M: Message, R: Message>(&self, req: M, options: SendOptions) -> impl Future<Output = anyhow::Result<R>> {
-    //     let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    //     let tid = TypeId::of::<M>();
-    //     let rid = TypeId::of::<R>();
+    pub async fn request<M: Message, R: Message>(
+        &self,
+        req: M,
+        options: SendOptions,
+    ) -> anyhow::Result<R> {
+        let tid = TypeId::of::<M>();
+        let rid = TypeId::of::<R>();
 
-    //     let mut iter = self.select_receivers(options, Some(rid));
-    //     let first = iter.next();
+        let mut iter = self.select_receivers(tid, options, Some(rid));
+        if let Some(rc) = iter.next() {
+            let (tx, rx) = oneshot::channel();
+            let mid = (rc.add_response_waiter(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
+            rc.send(mid, rc.reserve().await, req)?;
 
-    //     for rs in iter {
-    //         let _ = rs.send(mid, rs.reserve().await, req.clone());
-    //     }
-        
-    //     first.send(mid, first.reserve().await, req);
+            Ok(rx.await?)
+        } else {
+            bail!("No Receivers!");
+        }
+    }
 
-    //     let (tx, rx) = tokio::sync::oneshot::channel();
-    //     self.response_waiters.insert(mid, tx);
+    #[inline]
+    fn select_receivers(
+        &self,
+        tid: TypeId,
+        _options: SendOptions,
+        rid: Option<TypeId>,
+    ) -> impl Iterator<Item = &Receiver> + '_ {
+        self.receivers
+            .get(&tid)
+            .into_iter()
+            .map(|item| item.iter())
+            .flatten()
+            .filter(move |x| {
+                let ret_ty = if let Some(rid) = rid {
+                    x.resp_type_id() == rid
+                } else {
+                    true
+                };
 
-    //     poll_fn(move |cx| {
-    //         rx.poll_unpin(cx)
-    //     })
-    // }
+                ret_ty
+            })
+    }
 }
 
 #[derive(Clone)]

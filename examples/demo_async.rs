@@ -135,6 +135,8 @@ impl Handler<i16> for TmpReceiver2 {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
         .subscribe::<f32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
@@ -156,6 +158,8 @@ async fn main() {
 
     println!("close");
     b.close().await;
+
+    println!("closed");
 
     poller.await;
     println!("[done]");

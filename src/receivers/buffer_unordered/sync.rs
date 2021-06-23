@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::{
-    receiver::{Action, Event, ReceiverStats, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::Request,
+    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type2, Request},
 };
 use anyhow::Result;
 use futures::{stream::FuturesUnordered, Future, StreamExt};
@@ -39,7 +39,7 @@ where
 {
     let ut = ut.downcast::<T>().unwrap();
     let mut queue = FuturesUnordered::new();
-    let mut sync_future: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send>>> = None;
+    let mut sync_future = None;
     let mut need_sync = false;
     let mut rx_closed = false;
     let mut need_flush = false;
@@ -59,15 +59,12 @@ where
                                 (mid, ut.handle(msg, &bus))
                             }));
                         }
-                        Request::Action(Action::Flush) => {
-                            need_flush = true;
-                            break;
-                        }
+                        Request::Action(Action::Flush) => need_flush = true,
+                        Request::Action(Action::Close) => rx.close(),
                         Request::Action(Action::Sync) => {
                             need_sync = true;
                             break;
                         }
-                        Request::Action(Action::Close) => rx.close(),
                         _ => unimplemented!(),
                     },
                     Poll::Ready(None) => {
@@ -102,25 +99,26 @@ where
             }
 
             if need_sync {
-                if let Some(mut fut) = sync_future.take() {
-                    match fut.as_mut().poll(cx) {
-                        Poll::Pending => {
-                            sync_future = Some(fut);
-                            return Poll::Pending;
-                        }
+                if let Some(fut) = sync_future.as_mut() {
+                    // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
+                    match unsafe { fix_type2(fut) }.poll(cx) {
+                        Poll::Pending => return Poll::Pending,
                         Poll::Ready(res) => {
-                            need_sync = false;
                             stx.send(Event::Synchronized(res)).ok();
                         }
                     }
+
+                    need_sync = false;
+                    sync_future = None;
+                    continue;
                 } else {
                     let ut = ut.clone();
                     let bus_clone = bus.clone();
-                    sync_future.replace(Box::pin(async move {
+                    sync_future.replace(async move {
                         tokio::task::spawn_blocking(move || ut.sync(&bus_clone))
                             .await
                             .unwrap()
-                    }));
+                    });
                 }
             } else {
                 break;

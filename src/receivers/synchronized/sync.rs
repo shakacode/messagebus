@@ -1,27 +1,22 @@
 use std::{
     pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
     task::{Context, Poll},
 };
 
 use crate::{
-    receiver::{Action, Event, ReceiverStats, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::Request,
+    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type1, fix_type2, Request},
 };
 use anyhow::Result;
-use futures::{Future, executor::block_on};
+use futures::{executor::block_on, Future};
 
-use super::{SynchronizedConfig, SynchronizedStats};
+use super::SynchronizedConfig;
 use crate::{
     builder::ReceiverSubscriberBuilder,
     receiver::{SendError, SendTypedReceiver},
     Bus, Message, SynchronizedHandler, Untyped,
 };
 use tokio::sync::{mpsc, Mutex};
-
 
 fn synchronized_poller<T, M, R, E>(
     mut rx: mpsc::UnboundedReceiver<Request<M>>,
@@ -36,24 +31,22 @@ where
     E: crate::Error,
 {
     let ut = ut.downcast::<Mutex<T>>().unwrap();
-    let mut handle_future: Option<Pin<Box<dyn Future<Output = (u64, Result<R, E>)> + Send>>> = None;
-    let mut sync_future: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send>>> = None;
+    let mut handle_future = None;
+    let mut sync_future = None;
     let mut need_sync = false;
     let mut rx_closed = false;
 
     futures::future::poll_fn(move |cx| loop {
-        if let Some(mut fut) = handle_future.take() {
-            match fut.as_mut().poll(cx) {
-                Poll::Pending => {
-                    handle_future = Some(fut);
-                    return Poll::Pending;
-                }
-
+        if let Some(fut) = handle_future.as_mut() {
+            // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
+            match unsafe { fix_type1(fut) }.poll(cx) {
+                Poll::Pending => return Poll::Pending,
                 Poll::Ready((mid, resp)) => {
                     stx.send(Event::Response(mid, resp)).ok();
                 }
             }
         }
+        handle_future = None;
 
         if !rx_closed && !need_sync {
             match rx.poll_recv(cx) {
@@ -61,45 +54,57 @@ where
                     Request::Request(mid, msg) => {
                         let bus = bus.clone();
                         let ut = ut.clone();
-                        handle_future.replace(Box::pin(async move {
-                            (mid, tokio::task::spawn_blocking(move || block_on(ut.lock()).handle(msg, &bus)).await.unwrap())
-                        }));
+                        handle_future.replace(async move {
+                            (
+                                mid,
+                                tokio::task::spawn_blocking(move || {
+                                    block_on(ut.lock()).handle(msg, &bus)
+                                })
+                                .await
+                                .unwrap(),
+                            )
+                        });
+
                         continue;
                     }
-                    Request::Action(Action::Flush) => {stx.send(Event::Flushed).ok();}
+                    Request::Action(Action::Flush) => {
+                        stx.send(Event::Flushed).ok();
+                        continue;
+                    }
                     Request::Action(Action::Sync) => need_sync = true,
                     Request::Action(Action::Close) => {
                         rx.close();
                         continue;
-                    },
+                    }
                     _ => unimplemented!(),
                 },
                 Poll::Ready(None) => {
                     need_sync = true;
                     rx_closed = true;
                 }
-                Poll::Pending => {},
+                Poll::Pending => {}
             }
         }
 
         if need_sync {
-            if let Some(mut fut) = sync_future.take() {
-                match fut.as_mut().poll(cx) {
-                    Poll::Pending => {
-                        sync_future = Some(fut);
-                        return Poll::Pending;
-                    }
+            if let Some(fut) = sync_future.as_mut() {
+                // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
+                match unsafe { fix_type2(fut) }.poll(cx) {
+                    Poll::Pending => return Poll::Pending,
                     Poll::Ready(res) => {
                         need_sync = false;
                         stx.send(Event::Synchronized(res)).ok();
                     }
                 }
+                sync_future = None;
             } else {
                 let ut = ut.clone();
                 let bus_clone = bus.clone();
-                sync_future.replace(Box::pin(async move {
-                    tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus_clone)).await.unwrap()
-                }));
+                sync_future.replace(async move {
+                    tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus_clone))
+                        .await
+                        .unwrap()
+                });
             }
         }
 
@@ -118,7 +123,6 @@ where
     E: crate::Error,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
-    stats: Arc<SynchronizedStats>,
     srx: parking_lot::Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
@@ -132,37 +136,26 @@ where
     type Config = SynchronizedConfig;
 
     fn build(
-        cfg: Self::Config,
+        _cfg: Self::Config,
     ) -> (
         Self,
         Box<
             dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         >,
     ) {
-        let stats = Arc::new(SynchronizedStats {
-            buffer: AtomicU64::new(0),
-            buffer_total: AtomicU64::new(cfg.buffer_size as _),
-        });
-
         let (stx, srx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::unbounded_channel();
-        let stats_clone = stats.clone();
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(synchronized_poller::<T, M, R, E>(
-                    rx,
-                    bus,
-                    ut,
-                    stx,
-                )) as Pin<Box<dyn Future<Output = ()> + Send>>
+                Box::pin(synchronized_poller::<T, M, R, E>(rx, bus, ut, stx))
+                    as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
 
         (
             SynchronizedSync::<M, R, E> {
                 tx,
-                stats,
                 srx: parking_lot::Mutex::new(srx),
             },
             poller,
@@ -193,11 +186,7 @@ where
 {
     fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
         match self.tx.send(Request::Request(mid, m)) {
-            Ok(_) => {
-                self.stats.buffer.fetch_add(1, Ordering::Relaxed);
-
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
             _ => unimplemented!(),
         }

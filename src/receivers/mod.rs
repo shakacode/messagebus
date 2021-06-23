@@ -9,10 +9,33 @@ mod synchronized;
 //     pub use super::mpsc_futures::*;
 // }
 
+use std::pin::Pin;
+
 pub use buffer_unordered::{BufferUnorderedAsync, BufferUnorderedConfig, BufferUnorderedSync};
+use futures::Future;
 pub use synchronized::{SynchronizedAsync, SynchronizedConfig, SynchronizedSync};
 
 use crate::receiver::Action;
+
+#[inline(always)]
+pub(crate) unsafe fn fix_type1<'a, F, R, E>(
+    x: &'a mut F,
+) -> Pin<&'a mut (impl Future<Output = (u64, Result<R, E>)> + Send)>
+where
+    F: Future<Output = (u64, Result<R, E>)> + Send,
+{
+    Pin::new_unchecked(x)
+}
+
+#[inline(always)]
+pub(crate) unsafe fn fix_type2<'a, F, E>(
+    x: &'a mut F,
+) -> Pin<&'a mut (impl Future<Output = Result<(), E>> + Send)>
+where
+    F: Future<Output = Result<(), E>> + Send,
+{
+    Pin::new_unchecked(x)
+}
 
 pub(crate) enum Request<M> {
     Action(Action),

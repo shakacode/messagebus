@@ -21,6 +21,8 @@ async-stream = "0.3.2"
 smallvec = "1.6.1"
 log = "0.4.14"
 sharded-slab = "0.1.1"
+empty-box = "0.1.1"
 
 [dev-dependencies]
+env_logger = "0.8.4"
 tokio = { version = "1", features = ["macros", "parking_lot", "rt-multi-thread", "io-util", "sync"] }

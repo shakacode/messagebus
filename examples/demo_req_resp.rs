@@ -167,6 +167,8 @@ async fn main() {
     println!("close");
     b.close().await;
 
+    println!("closed");
+
     poller.await;
     println!("[done]");
 }

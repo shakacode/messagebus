@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::Request,
+    receivers::{fix_type1, fix_type2, Request},
 };
 use anyhow::Result;
 use futures::Future;
@@ -31,24 +31,22 @@ where
     E: crate::Error,
 {
     let ut = ut.downcast::<Mutex<T>>().unwrap();
-    let mut handle_future: Option<Pin<Box<dyn Future<Output = (u64, Result<R, E>)> + Send>>> = None;
-    let mut sync_future: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send>>> = None;
+    let mut handle_future = None;
+    let mut sync_future = None;
     let mut need_sync = false;
     let mut rx_closed = false;
 
     futures::future::poll_fn(move |cx| loop {
-        if let Some(mut fut) = handle_future.take() {
-            match fut.as_mut().poll(cx) {
-                Poll::Pending => {
-                    handle_future = Some(fut);
-                    return Poll::Pending;
-                }
-
+        if let Some(fut) = handle_future.as_mut() {
+            // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
+            match unsafe { fix_type1(fut) }.poll(cx) {
+                Poll::Pending => return Poll::Pending,
                 Poll::Ready((mid, resp)) => {
                     stx.send(Event::Response(mid, resp)).ok();
                 }
             }
         }
+        handle_future = None;
 
         if !rx_closed && !need_sync {
             match rx.poll_recv(cx) {
@@ -56,13 +54,13 @@ where
                     Request::Request(mid, msg) => {
                         let bus = bus.clone();
                         let ut = ut.clone();
-                        handle_future.replace(Box::pin(async move {
-                            (mid, ut.lock().await.handle(msg, &bus).await)
-                        }));
+                        handle_future
+                            .replace(async move { (mid, ut.lock().await.handle(msg, &bus).await) });
                         continue;
                     }
                     Request::Action(Action::Flush) => {
                         stx.send(Event::Flushed).ok();
+                        continue;
                     }
                     Request::Action(Action::Sync) => need_sync = true,
                     Request::Action(Action::Close) => {
@@ -74,30 +72,26 @@ where
                 Poll::Ready(None) => {
                     need_sync = true;
                     rx_closed = true;
-                    
                 }
-                Poll::Pending => {},
+                Poll::Pending => {}
             }
         }
 
         if need_sync {
-            if let Some(mut fut) = sync_future.take() {
-                match fut.as_mut().poll(cx) {
-                    Poll::Pending => {
-                        sync_future = Some(fut);
-                        return Poll::Pending;
-                    }
+            if let Some(fut) = sync_future.as_mut() {
+                // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
+                match unsafe { fix_type2(fut) }.poll(cx) {
+                    Poll::Pending => return Poll::Pending,
                     Poll::Ready(res) => {
                         need_sync = false;
                         stx.send(Event::Synchronized(res)).ok();
                     }
                 }
+                sync_future = None;
             } else {
                 let ut = ut.clone();
                 let bus_clone = bus.clone();
-                sync_future.replace(Box::pin(
-                    async move { ut.lock().await.sync(&bus_clone).await },
-                ));
+                sync_future.replace(async move { ut.lock().await.sync(&bus_clone).await });
             }
         }
 

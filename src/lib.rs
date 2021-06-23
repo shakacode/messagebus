@@ -14,7 +14,7 @@ use builder::BusBuilder;
 pub use envelop::Message;
 pub use handler::*;
 pub use receiver::SendError;
-use receiver::{Receiver, ReceiverStats};
+use receiver::Receiver;
 use smallvec::SmallVec;
 use tokio::sync::oneshot;
 

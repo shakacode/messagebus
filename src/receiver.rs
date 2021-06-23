@@ -45,6 +45,7 @@ where
 pub trait ReceiverTrait: Send + Sync {
     fn typed(&self) -> AnyReceiver<'_>;
     fn poller(&self) -> AnyPoller<'_>;
+    fn name(&self) -> &str;
     fn stats(&self) -> Result<(), SendError<()>>;
     fn close(&self) -> Result<(), SendError<()>>;
     fn sync(&self) -> Result<(), SendError<()>>;
@@ -111,6 +112,10 @@ where
     E: Error,
     S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
 {
+    fn name(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+
     fn typed(&self) -> AnyReceiver<'_> {
         AnyReceiver::new(&self.inner)
     }
@@ -269,7 +274,6 @@ struct ReceiverContext {
     synchronized: Notify,
     closed: Notify,
     response: Notify,
-    statistics: Notify,
 }
 
 impl PermitDrop for ReceiverContext {
@@ -318,7 +322,6 @@ impl Receiver {
                 synchronized: Notify::new(),
                 closed: Notify::new(),
                 response: Notify::new(),
-                statistics: Notify::new(),
             }),
             inner: Arc::new(ReceiverWrapper {
                 inner,
@@ -444,7 +447,6 @@ impl Receiver {
 
                 loop {
                     let event = poll_fn(move |ctx| receiver.poll_events(ctx)).await;
-
                     match event {
                         Event::Exited => {
                             ctx_clone.closed.notify_waiters();
@@ -493,20 +495,11 @@ impl Receiver {
         Some(idx)
     }
 
-    // #[inline]
-    // pub fn stats(&self) -> ReceiverStats {
-    //     if self.inner.stats().is_ok() {
-    //         self.context.stats.notified()
-    //             .await
-    //     } else {
-    //         warn!("close failed!");
-    //     }
-    // }
-
     #[inline]
     pub async fn close(&self) {
+        let notified = self.context.closed.notified();
         if self.inner.close().is_ok() {
-            self.context.closed.notified().await
+            notified.await;
         } else {
             warn!("close failed!");
         }
@@ -514,8 +507,9 @@ impl Receiver {
 
     #[inline]
     pub async fn sync(&self) {
+        let notified = self.context.synchronized.notified();
         if self.inner.sync().is_ok() {
-            self.context.synchronized.notified().await
+            notified.await
         } else {
             warn!("sync failed!");
         }
@@ -523,9 +517,9 @@ impl Receiver {
 
     #[inline]
     pub async fn flush(&self) {
+        let notified = self.context.flushed.notified();
         if self.inner.flush().is_ok() {
-            self.context.flushed.notified().await;
-
+            notified.await;
             self.context.need_flush.store(false, Ordering::SeqCst);
         } else {
             warn!("flush failed!");

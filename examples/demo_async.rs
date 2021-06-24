@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use messagebus::{receivers, AsyncHandler, Bus, Handler};
+use messagebus::{error::Error, receivers, AsyncHandler, Bus, Handler};
 
 struct TmpReceiver;
 struct TmpReceiver2;
 
 #[async_trait]
 impl AsyncHandler<f32> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: f32, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -26,7 +26,7 @@ impl AsyncHandler<f32> for TmpReceiver {
 
 #[async_trait]
 impl AsyncHandler<u16> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: u16, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -45,7 +45,7 @@ impl AsyncHandler<u16> for TmpReceiver {
 
 #[async_trait]
 impl AsyncHandler<u32> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: u32, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -63,7 +63,7 @@ impl AsyncHandler<u32> for TmpReceiver {
 
 #[async_trait]
 impl AsyncHandler<i32> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: i32, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -82,7 +82,7 @@ impl AsyncHandler<i32> for TmpReceiver {
 
 #[async_trait]
 impl AsyncHandler<i16> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: i16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -99,7 +99,7 @@ impl AsyncHandler<i16> for TmpReceiver {
 
 #[async_trait]
 impl AsyncHandler<i32> for TmpReceiver2 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: i32, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -117,7 +117,7 @@ impl AsyncHandler<i32> for TmpReceiver2 {
 }
 
 impl Handler<i16> for TmpReceiver2 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     fn handle(&self, msg: i16, _bus: &Bus) -> Result<Self::Response, Self::Error> {

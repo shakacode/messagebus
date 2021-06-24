@@ -1,6 +1,4 @@
 use std::{
-    any::TypeId,
-    marker::PhantomData,
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -9,40 +7,64 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{Future, StreamExt};
+use crate::{
+    buffer_unordered_batch_poller_macro,
+    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type, Request},
+};
+use futures::{stream::FuturesUnordered, Future, StreamExt};
 
 use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
 use crate::{
-    builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
-    msgs,
-    receiver::{AnyReceiver, ReceiverTrait, SendError, TypedReceiver},
+    builder::ReceiverSubscriberBuilder,
+    receiver::{SendError, SendTypedReceiver},
     AsyncBatchHandler, Bus, Message, Untyped,
 };
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
-pub struct BufferUnorderedBatchedAsyncSubscriber<T, M>
+buffer_unordered_batch_poller_macro!(
+    T,
+    AsyncBatchHandler,
+    |buffer_clone, bus, ut: Arc<T>, stats: Arc<BufferUnorderedBatchedStats>, buffer_mid_clone| {
+        async move {
+            let resp = ut.handle(buffer_clone, &bus).await;
+            stats.parallel.fetch_sub(1, Ordering::Relaxed);
+
+            (buffer_mid_clone, resp)
+        }
+    },
+    |bus, ut: Arc<T>| { async move { ut.sync(&bus).await } }
+);
+
+pub struct BufferUnorderedBatchedAsync<M, R = (), E = crate::error::Error>
 where
-    T: AsyncBatchHandler<M> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error,
 {
-    cfg: BufferUnorderedBatchedConfig,
-    _m: PhantomData<(T, M)>,
+    tx: mpsc::UnboundedSender<Request<M>>,
+    stats: Arc<BufferUnorderedBatchedStats>,
+    srx: Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
-impl<T, M> ReceiverSubscriber<T> for BufferUnorderedBatchedAsyncSubscriber<T, M>
+impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for BufferUnorderedBatchedAsync<M, R, E>
 where
-    T: AsyncBatchHandler<M> + 'static,
+    T: AsyncBatchHandler<M, Response = R, Error = E> + 'static,
+    R: Message,
     M: Message,
+    E: crate::Error,
 {
-    fn subscribe(
-        self,
+    type Config = BufferUnorderedBatchedConfig;
+
+    fn build(
+        cfg: Self::Config,
     ) -> (
-        Arc<dyn ReceiverTrait>,
+        Self,
         Box<
             dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         >,
     ) {
-        let cfg = self.cfg;
         let stats = Arc::new(BufferUnorderedBatchedStats {
             buffer: AtomicU64::new(0),
             buffer_total: AtomicU64::new(cfg.buffer_size as _),
@@ -52,173 +74,80 @@ where
             batch_size: AtomicU64::new(cfg.batch_size as _),
         });
 
-        let (tx, rx) = mpsc::channel(cfg.buffer_size);
-        let arc = Arc::new(BufferUnorderedBatchedAsync::<M> {
-            tx,
-            stats: stats.clone(),
-        });
+        let (stx, srx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let stats_clone = stats.clone();
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(buffer_unordered_poller::<T, M>(rx, bus, ut, stats, cfg))
-                    as Pin<Box<dyn Future<Output = ()> + Send>>
+                Box::pin(buffer_unordered_batch_poller::<T, M, R, E>(
+                    rx,
+                    bus,
+                    ut,
+                    stats_clone,
+                    cfg,
+                    stx,
+                )) as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
 
-        (arc, poller)
+        (
+            BufferUnorderedBatchedAsync::<M, R, E> {
+                tx,
+                stats,
+                srx: Mutex::new(srx),
+            },
+            poller,
+        )
     }
 }
 
-async fn buffer_unordered_poller<T, M>(
-    rx: mpsc::Receiver<M>,
-    bus: Bus,
-    ut: Untyped,
-    stats: Arc<BufferUnorderedBatchedStats>,
-    cfg: BufferUnorderedBatchedConfig,
-) where
-    T: AsyncBatchHandler<M> + 'static,
-    M: Message,
-{
-    let ut = ut.downcast::<T>().unwrap();
-    let rx = rx
-        .inspect(|_| {
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.batch.fetch_add(1, Ordering::Relaxed); 
-        });
-
-    let rx = if cfg.when_ready {
-        rx.ready_chunks(cfg.batch_size)
-            .left_stream()
-    } else {
-        rx.chunks(cfg.batch_size)
-            .right_stream()
-    };
-
-    let mut rx = rx
-        .map(|msgs| {
-            stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
-            stats.parallel.fetch_add(1, Ordering::Relaxed);
-
-            let bus_clone = bus.clone();
-            let ut = ut.clone();
-
-            tokio::task::spawn(async move { ut.handle(msgs, &bus_clone).await })
-        })
-        .buffer_unordered(cfg.max_parallel);
-
-    while let Some(err) = rx.next().await {
-        stats.parallel.fetch_sub(1, Ordering::Relaxed);
-
-        match err {
-            Ok(Err(err)) => {
-                let _ = bus.send(msgs::Error(Arc::new(err))).await;
-            }
-            _ => (),
-        }
-    }
-
-    let ut = ut.clone();
-    let bus_clone = bus.clone();
-    let res = tokio::task::spawn(async move { ut.sync(&bus_clone).await }).await;
-
-    match res {
-        Ok(Err(err)) => {
-            let _ = bus.send(msgs::Error(Arc::new(err))).await;
-        }
-        _ => (),
-    }
-
-    println!(
-        "[EXIT] BufferUnorderedBatchedAsync<{}>",
-        std::any::type_name::<M>()
-    );
-}
-
-pub struct BufferUnorderedBatchedAsync<M: Message> {
-    tx: mpsc::Sender<M>,
-    stats: Arc<BufferUnorderedBatchedStats>,
-}
-
-impl<T, M> ReceiverSubscriberBuilder<M, T> for BufferUnorderedBatchedAsync<M>
+impl<M, R, E> SendUntypedReceiver for BufferUnorderedBatchedAsync<M, R, E>
 where
-    T: AsyncBatchHandler<M> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error,
 {
-    type Entry = BufferUnorderedBatchedAsyncSubscriber<T, M>;
-    type Config = BufferUnorderedBatchedConfig;
-
-    fn build(cfg: Self::Config) -> Self::Entry {
-        BufferUnorderedBatchedAsyncSubscriber {
-            cfg,
-            _m: Default::default(),
+    fn send(&self, m: Action) -> Result<(), SendError<Action>> {
+        match self.tx.send(Request::Action(m)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::SendError(Request::Action(msg))) => Err(SendError::Closed(msg)),
+            _ => unimplemented!(),
         }
     }
 }
 
-impl<M: Message> TypedReceiver<M> for BufferUnorderedBatchedAsync<M> {
-    fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<()> {
-        match self.tx.poll_ready(ctx) {
-            Poll::Ready(_) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn try_send(&self, m: M) -> Result<(), SendError<M>> {
-        match self.tx.try_send(m) {
+impl<M, R, E> SendTypedReceiver<M> for BufferUnorderedBatchedAsync<M, R, E>
+where
+    M: Message,
+    R: Message,
+    E: crate::Error,
+{
+    fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
+        match self.tx.send(Request::Request(mid, m)) {
             Ok(_) => {
                 self.stats.buffer.fetch_add(1, Ordering::Relaxed);
 
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
+            _ => unimplemented!(),
         }
     }
 }
 
-impl<M: Message> ReceiverTrait for BufferUnorderedBatchedAsync<M> {
-    fn typed(&self) -> AnyReceiver<'_> {
-        AnyReceiver::new(self)
-    }
-
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<BufferUnorderedBatchedAsync<M>>()
-    }
-
-    fn close(&self) {
-        self.tx.close();
-    }
-
-    fn stats(&self) -> ReceiverStats {
-        ReceiverStats {
-            name: std::any::type_name::<M>().into(),
-            fields: vec![
-                ("buffer".into(), self.stats.buffer.load(Ordering::SeqCst)),
-                (
-                    "buffer_total".into(),
-                    self.stats.buffer_total.load(Ordering::SeqCst),
-                ),
-                (
-                    "parallel".into(),
-                    self.stats.parallel.load(Ordering::SeqCst),
-                ),
-                (
-                    "parallel_total".into(),
-                    self.stats.parallel_total.load(Ordering::SeqCst),
-                ),
-                ("batch".into(), self.stats.batch.load(Ordering::SeqCst)),
-                (
-                    "batch_size".into(),
-                    self.stats.batch_size.load(Ordering::SeqCst),
-                ),
-            ],
+impl<M, R, E> ReciveTypedReceiver<R, E> for BufferUnorderedBatchedAsync<M, R, E>
+where
+    M: Message,
+    R: Message,
+    E: crate::Error,
+{
+    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
+        let poll = self.srx.lock().poll_recv(ctx);
+        match poll {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(event)) => Poll::Ready(event),
+            Poll::Ready(None) => Poll::Ready(Event::Exited),
         }
-    }
-
-    fn sync(&self) {
-        self.tx.flush();
-    }
-
-    fn poll_synchronized(&self, _ctx: &mut Context<'_>) -> Poll<()> {
-        Poll::Ready(())
     }
 }

@@ -1,9 +1,9 @@
-use messagebus::{receivers, Bus, Handler};
+use messagebus::{error::Error, receivers, Bus, Handler};
 
 struct TmpReceiver;
 
 impl Handler<f32> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     fn handle(&self, msg: f32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -18,7 +18,7 @@ impl Handler<f32> for TmpReceiver {
 }
 
 impl Handler<u16> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     fn handle(&self, msg: u16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -28,7 +28,7 @@ impl Handler<u16> for TmpReceiver {
 }
 
 impl Handler<u32> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     fn handle(&self, msg: u32, _bus: &Bus) -> Result<Self::Response, Self::Error> {

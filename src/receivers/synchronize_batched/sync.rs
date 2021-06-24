@@ -1,213 +1,132 @@
-use super::{SynchronizeBatchedConfig, SynchronizeBatchedStats};
-use crate::{
-    builder::{ReceiverSubscriber, ReceiverSubscriberBuilder},
-    msgs,
-    receiver::{AnyReceiver, ReceiverTrait, SendError, TypedReceiver},
-    BatchSynchronizedHandler, Bus, Message, Untyped,
-};
-use crate::{receiver::ReceiverStats, receivers::mpsc};
-use futures::{Future, StreamExt};
 use std::{
-    any::TypeId,
-    marker::PhantomData,
     pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll},
 };
-use tokio::sync::Mutex;
 
-pub struct SynchronizeBatchedSyncSubscriber<T, M>
-where
-    T: BatchSynchronizedHandler<M> + 'static,
-    M: Message,
-{
-    cfg: SynchronizeBatchedConfig,
-    _m: PhantomData<(M, T)>,
+use crate::{
+    batch_synchronized_poller_macro,
+    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type, Request},
+};
+use anyhow::Result;
+use futures::{executor::block_on, Future};
+
+use super::SynchronizedBatchedConfig;
+use crate::{
+    builder::ReceiverSubscriberBuilder,
+    receiver::{SendError, SendTypedReceiver},
+    BatchSynchronizedHandler, Bus, Message, Untyped,
+};
+use tokio::sync::{mpsc, Mutex};
+
+batch_synchronized_poller_macro! {
+    T,
+    BatchSynchronizedHandler,
+    |mids, buffer, bus, ut: Arc<Mutex<T>>| async move  {
+        (mids, tokio::task::spawn_blocking(move || {
+            block_on(ut.lock()).handle(buffer, &bus)
+        })
+        .await
+        .unwrap())
+    },
+    |bus, ut: Arc<Mutex<T>>| async move {
+        tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus))
+                        .await
+                        .unwrap()
+    }
 }
 
-impl<T, M> ReceiverSubscriber<T> for SynchronizeBatchedSyncSubscriber<T, M>
+pub struct SynchronizedBatchedSync<M, R = (), E = crate::error::Error>
 where
-    T: BatchSynchronizedHandler<M> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error,
 {
-    fn subscribe(
-        self,
+    tx: mpsc::UnboundedSender<Request<M>>,
+    srx: parking_lot::Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
+}
+
+impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for SynchronizedBatchedSync<M, R, E>
+where
+    T: BatchSynchronizedHandler<M, Response = R, Error = E> + 'static,
+    R: Message,
+    M: Message,
+    E: crate::Error,
+{
+    type Config = SynchronizedBatchedConfig;
+
+    fn build(
+        cfg: Self::Config,
     ) -> (
-        Arc<dyn ReceiverTrait>,
+        Self,
         Box<
             dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         >,
     ) {
-        let cfg = self.cfg;
-        let (tx, rx) = mpsc::channel(cfg.buffer_size);
-        let stats = Arc::new(SynchronizeBatchedStats {
-            buffer: AtomicU64::new(0),
-            buffer_total: AtomicU64::new(cfg.buffer_size as _),
-            batch: AtomicU64::new(0),
-            batch_size: AtomicU64::new(cfg.batch_size as _),
-        });
+        let (stx, srx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
 
-        let arc = Arc::new(SynchronizeBatchedSync::<M> {
-            tx,
-            stats: stats.clone(),
-        });
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(buffer_unordered_poller::<T, M>(rx, bus, ut, stats, cfg))
-                    as Pin<Box<dyn Future<Output = ()> + Send>>
+                Box::pin(batch_synchronized_poller::<T, M, R, E>(
+                    rx, bus, ut, cfg, stx,
+                )) as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
 
-        (arc, poller)
+        (
+            SynchronizedBatchedSync::<M, R, E> {
+                tx,
+                srx: parking_lot::Mutex::new(srx),
+            },
+            poller,
+        )
     }
 }
 
-async fn buffer_unordered_poller<T, M>(
-    rx: mpsc::Receiver<M>,
-    bus: Bus,
-    ut: Untyped,
-    stats: Arc<SynchronizeBatchedStats>,
-    cfg: SynchronizeBatchedConfig,
-) where
-    T: BatchSynchronizedHandler<M> + 'static,
-    M: Message,
-{
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
-
-    let rx = rx
-        .inspect(|_|{ 
-            stats.buffer.fetch_sub(1, Ordering::Relaxed);
-            stats.batch.fetch_add(1, Ordering::Relaxed); 
-        });
-
-    let mut rx = if cfg.when_ready {
-        rx.ready_chunks(cfg.batch_size)
-            .left_stream()
-    } else {
-        rx.chunks(cfg.batch_size)
-            .right_stream()
-    };
-
-    while let Some(msgs) = rx.next().await {
-        stats.batch.fetch_sub(msgs.len() as _, Ordering::Relaxed);
-
-        let bus_clone = bus.clone();
-        let ut = ut.clone();
-
-        let res = tokio::task::spawn_blocking(move || {
-            let mut uut = futures::executor::block_on(ut.lock());
-            
-            uut.handle(msgs, &bus_clone)
-        }).await;
-
-        match res {
-            Ok(Err(err)) => {
-                let _ = bus.send(msgs::Error(Arc::new(err))).await;
-            }
-            _ => (),
-        }
-    }
-
-    let ut = ut.clone();
-    let bus_clone = bus.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        futures::executor::block_on(ut.lock()).sync(&bus_clone)
-    })
-    .await;
-
-    match res {
-        Ok(Err(err)) => {
-            let _ = bus.send(msgs::Error(Arc::new(err))).await;
-        }
-        _ => (),
-    }
-
-    println!(
-        "[EXIT] SynchronizeBatchedSync<{}>",
-        std::any::type_name::<M>()
-    );
-}
-
-pub struct SynchronizeBatchedSync<M: Message> {
-    tx: mpsc::Sender<M>,
-    stats: Arc<SynchronizeBatchedStats>,
-}
-
-impl<T, M> ReceiverSubscriberBuilder<M, T> for SynchronizeBatchedSync<M>
+impl<M, R, E> SendUntypedReceiver for SynchronizedBatchedSync<M, R, E>
 where
-    T: BatchSynchronizedHandler<M> + 'static,
     M: Message,
+    R: Message,
+    E: crate::Error,
 {
-    type Entry = SynchronizeBatchedSyncSubscriber<T, M>;
-    type Config = SynchronizeBatchedConfig;
-
-    fn build(cfg: Self::Config) -> Self::Entry {
-        SynchronizeBatchedSyncSubscriber {
-            cfg,
-            _m: Default::default(),
+    fn send(&self, msg: Action) -> Result<(), SendError<Action>> {
+        match self.tx.send(Request::Action(msg)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::SendError(Request::Action(msg))) => Err(SendError::Closed(msg)),
+            _ => unimplemented!(),
         }
     }
 }
 
-impl<M: Message> TypedReceiver<M> for SynchronizeBatchedSync<M> {
-    fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<()> {
-        match self.tx.poll_ready(ctx) {
-            Poll::Ready(_) => Poll::Ready(()),
+impl<M, R, E> SendTypedReceiver<M> for SynchronizedBatchedSync<M, R, E>
+where
+    M: Message,
+    R: Message,
+    E: crate::Error,
+{
+    fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
+        match self.tx.send(Request::Request(mid, m)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
+            _ => unimplemented!(),
+        }
+    }
+}
+
+impl<M, R, E> ReciveTypedReceiver<R, E> for SynchronizedBatchedSync<M, R, E>
+where
+    M: Message,
+    R: Message,
+    E: crate::Error,
+{
+    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
+        let poll = self.srx.lock().poll_recv(ctx);
+        match poll {
             Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(event)) => Poll::Ready(event),
+            Poll::Ready(None) => Poll::Ready(Event::Exited),
         }
-    }
-
-    fn try_send(&self, m: M) -> Result<(), SendError<M>> {
-        match self.tx.try_send(m) {
-            Ok(_) => {
-                self.stats.buffer.fetch_add(1, Ordering::Relaxed);
-
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
-}
-
-impl<M: Message> ReceiverTrait for SynchronizeBatchedSync<M> {
-    fn typed(&self) -> AnyReceiver<'_> {
-        AnyReceiver::new(self)
-    }
-
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<Self>()
-    }
-
-    fn stats(&self) -> ReceiverStats {
-        ReceiverStats {
-            name: std::any::type_name::<M>().into(),
-            fields: vec![
-                ("buffer".into(), self.stats.buffer.load(Ordering::SeqCst)),
-                (
-                    "buffer_total".into(),
-                    self.stats.buffer_total.load(Ordering::SeqCst),
-                ),
-                ("batch".into(), self.stats.batch.load(Ordering::SeqCst)),
-                (
-                    "batch_size".into(),
-                    self.stats.batch_size.load(Ordering::SeqCst),
-                ),
-            ],
-        }
-    }
-
-    fn close(&self) {
-        self.tx.close();
-    }
-
-    fn sync(&self) {
-        self.tx.flush();
-    }
-
-    fn poll_synchronized(&self, _ctx: &mut Context<'_>) -> Poll<()> {
-        Poll::Ready(())
     }
 }

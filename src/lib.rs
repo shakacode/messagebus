@@ -1,5 +1,6 @@
 mod builder;
 mod envelop;
+pub mod error;
 mod handler;
 pub mod msgs;
 mod receiver;
@@ -9,17 +10,15 @@ mod trait_object;
 #[macro_use]
 extern crate log;
 
+use crate::receiver::Permit;
 use anyhow::bail;
 use builder::BusBuilder;
+use core::any::{Any, TypeId};
 pub use envelop::Message;
 pub use handler::*;
-pub use receiver::SendError;
 use receiver::Receiver;
+pub use receiver::SendError;
 use smallvec::SmallVec;
-use tokio::sync::oneshot;
-
-use crate::receiver::Permit;
-use core::any::{Any, TypeId};
 use std::{
     collections::HashMap,
     sync::{
@@ -27,12 +26,13 @@ use std::{
         Arc,
     },
 };
+use tokio::sync::oneshot;
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
 // pub trait ErrorTrait: std::error::Error + Send + Sync + 'static {}
-pub trait Error: Into<anyhow::Error> + Send + Sync + 'static {}
-impl<T: Into<anyhow::Error> + Send + Sync + 'static> Error for T {}
+pub trait Error: From<anyhow::Error> + std::error::Error + Clone + Send + Sync + 'static {}
+impl<T: From<anyhow::Error> + std::error::Error + Clone + Send + Sync + 'static> Error for T {}
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 

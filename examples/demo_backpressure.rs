@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use messagebus::{receivers, AsyncHandler, Bus};
+use messagebus::{error::Error, receivers, AsyncHandler, Bus};
 
 struct TmpReceiver;
 
 #[async_trait]
 impl AsyncHandler<f32> for TmpReceiver {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: f32, _bus: &Bus) -> Result<Self::Response, Self::Error> {

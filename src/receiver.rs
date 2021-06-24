@@ -452,7 +452,6 @@ impl Receiver {
                             ctx_clone.closed.notify_waiters();
                             break;
                         }
-
                         Event::Flushed => ctx_clone.flushed.notify_waiters(),
                         Event::Synchronized(_res) => ctx_clone.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {

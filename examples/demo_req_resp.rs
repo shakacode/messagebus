@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use messagebus::{receivers, AsyncHandler, Bus};
+use messagebus::{error::Error, receivers, AsyncHandler, Bus};
 
 struct TmpReceiver1;
 struct TmpReceiver2;
 
 #[async_trait]
 impl AsyncHandler<i32> for TmpReceiver1 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: i32, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -25,7 +25,7 @@ impl AsyncHandler<i32> for TmpReceiver1 {
 
 #[async_trait]
 impl AsyncHandler<u32> for TmpReceiver1 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: u32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -40,7 +40,7 @@ impl AsyncHandler<u32> for TmpReceiver1 {
 
 #[async_trait]
 impl AsyncHandler<i16> for TmpReceiver1 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: i16, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -59,7 +59,7 @@ impl AsyncHandler<i16> for TmpReceiver1 {
 
 #[async_trait]
 impl AsyncHandler<u16> for TmpReceiver1 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: u16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -75,7 +75,7 @@ impl AsyncHandler<u16> for TmpReceiver1 {
 
 #[async_trait]
 impl AsyncHandler<i8> for TmpReceiver1 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: i8, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -91,7 +91,7 @@ impl AsyncHandler<i8> for TmpReceiver1 {
 
 #[async_trait]
 impl AsyncHandler<u8> for TmpReceiver1 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: u8, _bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -106,7 +106,7 @@ impl AsyncHandler<u8> for TmpReceiver1 {
 
 #[async_trait]
 impl AsyncHandler<f64> for TmpReceiver2 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f64;
 
     async fn handle(&self, msg: f64, bus: &Bus) -> Result<Self::Response, Self::Error> {
@@ -126,7 +126,7 @@ impl AsyncHandler<f64> for TmpReceiver2 {
 
 #[async_trait]
 impl AsyncHandler<f32> for TmpReceiver2 {
-    type Error = anyhow::Error;
+    type Error = Error;
     type Response = f32;
 
     async fn handle(&self, msg: f32, _bus: &Bus) -> Result<Self::Response, Self::Error> {

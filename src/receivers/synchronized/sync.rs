@@ -1,11 +1,13 @@
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use crate::{
     receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type1, fix_type2, Request},
+    receivers::{fix_type, Request},
+    synchronized_poller_macro,
 };
 use anyhow::Result;
 use futures::{executor::block_on, Future};
@@ -18,105 +20,24 @@ use crate::{
 };
 use tokio::sync::{mpsc, Mutex};
 
-fn synchronized_poller<T, M, R, E>(
-    mut rx: mpsc::UnboundedReceiver<Request<M>>,
-    bus: Bus,
-    ut: Untyped,
-    stx: mpsc::UnboundedSender<Event<R, E>>,
-) -> impl Future<Output = ()>
-where
-    T: SynchronizedHandler<M, Response = R, Error = E> + 'static,
-    M: Message,
-    R: Message,
-    E: crate::Error,
-{
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
-    let mut handle_future = None;
-    let mut sync_future = None;
-    let mut need_sync = false;
-    let mut rx_closed = false;
-
-    futures::future::poll_fn(move |cx| loop {
-        if let Some(fut) = handle_future.as_mut() {
-            // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
-            match unsafe { fix_type1(fut) }.poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready((mid, resp)) => {
-                    stx.send(Event::Response(mid, resp)).ok();
-                }
-            }
-        }
-        handle_future = None;
-
-        if !rx_closed && !need_sync {
-            match rx.poll_recv(cx) {
-                Poll::Ready(Some(a)) => match a {
-                    Request::Request(mid, msg) => {
-                        let bus = bus.clone();
-                        let ut = ut.clone();
-                        handle_future.replace(async move {
-                            (
-                                mid,
-                                tokio::task::spawn_blocking(move || {
-                                    block_on(ut.lock()).handle(msg, &bus)
-                                })
-                                .await
-                                .unwrap(),
-                            )
-                        });
-
-                        continue;
-                    }
-                    Request::Action(Action::Flush) => {
-                        stx.send(Event::Flushed).ok();
-                        continue;
-                    }
-                    Request::Action(Action::Sync) => need_sync = true,
-                    Request::Action(Action::Close) => {
-                        rx.close();
-                        continue;
-                    }
-                    _ => unimplemented!(),
-                },
-                Poll::Ready(None) => {
-                    need_sync = true;
-                    rx_closed = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        if need_sync {
-            if let Some(fut) = sync_future.as_mut() {
-                // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
-                match unsafe { fix_type2(fut) }.poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(res) => {
-                        need_sync = false;
-                        stx.send(Event::Synchronized(res)).ok();
-                    }
-                }
-                sync_future = None;
-            } else {
-                let ut = ut.clone();
-                let bus_clone = bus.clone();
-                sync_future.replace(async move {
-                    tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus_clone))
+synchronized_poller_macro! {
+    T,
+    SynchronizedHandler,
+    |mid, msg, bus, ut: Arc<Mutex<T>>| async move {
+        (mid, tokio::task::spawn_blocking(move || {
+            block_on(ut.lock()).handle(msg, &bus)
+        })
+        .await
+        .unwrap())
+    },
+    |bus, ut: Arc<Mutex<T>>| async move {
+        tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus))
                         .await
                         .unwrap()
-                });
-            }
-        }
-
-        return if rx_closed {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        };
-    })
+    }
 }
 
-pub struct SynchronizedSync<M, R = (), E = anyhow::Error>
+pub struct SynchronizedSync<M, R = (), E = crate::error::Error>
 where
     M: Message,
     R: Message,

@@ -1,4 +1,4 @@
-use messagebus::{receivers, Bus, Message, error, Handler};
+use messagebus::{Bus, Handler, Message, Module, error, receivers};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -50,14 +50,19 @@ impl Handler<u32> for TmpReceiver {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let (b, poller) = Bus::build()
-        .register(TmpReceiver)
+fn module() -> Module {
+    Module::new()
+    .register(TmpReceiver)
         .subscribe::<f32, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
         .subscribe::<u16, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
         .subscribe::<u32, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
-        .done()
+    .done()
+}
+
+#[tokio::main]
+async fn main() {
+    let (b, poller) = Bus::build()
+        .add_module(module())
         .build();
 
     b.send(32f32).await.unwrap();

@@ -10,8 +10,9 @@ mod trait_object;
 extern crate log;
 
 use crate::receiver::Permit;
-pub use builder::BusBuilder;
+use builder::BusBuilder;
 use core::any::{Any, TypeId};
+pub use builder::Module;
 pub use envelop::Message;
 pub use handler::*;
 use receiver::Receiver;

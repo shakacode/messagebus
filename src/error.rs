@@ -78,9 +78,3 @@ impl<M: Message, E: StdSyncSendError> From<oneshot::error::RecvError> for Error<
         Error::NoResponse
     }
 }
-
-// impl<M: Message, E: StdSyncSendError, U: StdSyncSendError> From<oneshot::error::RecvError> for Error<M, E> {
-//     fn from(_: oneshot::error::RecvError) -> Self {
-//         Error::NoResponse
-//     }
-// }

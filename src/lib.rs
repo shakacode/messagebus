@@ -133,7 +133,7 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+    pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
         self.try_send_ext(msg, SendOptions::Broadcast)
     }
 
@@ -141,10 +141,9 @@ impl BusInner {
         &self,
         msg: M,
         _options: SendOptions,
-    ) -> core::result::Result<(), SendError<M>> {
+    ) -> core::result::Result<(), Error<M>> {
         if self.closed.load(Ordering::SeqCst) {
-            warn!("Bus closed. Skipping send!");
-            return Ok(());
+            return Err(SendError::Closed(msg).into());
         }
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -154,7 +153,7 @@ impl BusInner {
             let permits = if let Some(x) = self.try_reserve(rs) {
                 x
             } else {
-                return Err(SendError::Full(msg));
+                return Err(SendError::Full(msg).into());
             };
 
             let mut iter = permits.into_iter().zip(rs.iter());
@@ -183,7 +182,7 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn send_blocking<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+    pub fn send_blocking<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
         self.send_blocking_ext(msg, SendOptions::Broadcast)
     }
 
@@ -192,7 +191,7 @@ impl BusInner {
         &self,
         msg: M,
         options: SendOptions,
-    ) -> core::result::Result<(), SendError<M>> {
+    ) -> core::result::Result<(), Error<M>> {
         futures::executor::block_on(self.send_ext(msg, options))
     }
 
@@ -205,9 +204,9 @@ impl BusInner {
         &self,
         msg: M,
         _options: SendOptions,
-    ) -> core::result::Result<(), SendError<M>> {
+    ) -> core::result::Result<(), Error<M>> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(SendError::Closed(msg));
+            return Err(SendError::Closed(msg).into());
         }
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -234,7 +233,7 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn force_send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
+    pub fn force_send<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
         self.force_send_ext(msg, SendOptions::Broadcast)
     }
 
@@ -242,9 +241,9 @@ impl BusInner {
         &self,
         msg: M,
         _options: SendOptions,
-    ) -> core::result::Result<(), SendError<M>> {
+    ) -> core::result::Result<(), Error<M>> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(SendError::Closed(msg));
+            return Err(SendError::Closed(msg).into());
         }
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);

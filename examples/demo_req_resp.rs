@@ -1,5 +1,21 @@
+use core::f32;
+
 use async_trait::async_trait;
-use messagebus::{error::Error, receivers, AsyncHandler, Bus};
+use messagebus::{AsyncHandler, Bus, Message, error::{self, StdSyncSendError}, receivers};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+enum Error {
+    #[error("Error({0})")]
+    Error(anyhow::Error)
+}
+
+impl<M: Message, E: StdSyncSendError> From<error::Error<M, E>> for Error {
+    fn from(err: error::Error<M, E>) -> Self {
+        Self::Error(err.into())
+    }
+}
+
 
 struct TmpReceiver1;
 struct TmpReceiver2;
@@ -143,22 +159,22 @@ impl AsyncHandler<f32> for TmpReceiver2 {
 async fn main() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver1)
-        .subscribe::<i32, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
-        .subscribe::<u32, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
-        .subscribe::<i16, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
-        .subscribe::<u16, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
-        .subscribe::<i8, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
-        .subscribe::<u8, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
+        .subscribe::<i32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<i16, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u16, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<i8, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u8, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
         .done()
         .register(TmpReceiver2)
-        .subscribe::<f32, receivers::BufferUnorderedAsync<_, f32>, _, _>(8, Default::default())
-        .subscribe::<f64, receivers::BufferUnorderedAsync<_, f64>, _, _>(8, Default::default())
+        .subscribe::<f32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<f64, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
         .done()
         .build();
 
     println!(
         "{:?}",
-        b.request::<_, f64>(1000f64, Default::default()).await
+        b.request_we::<_, f64, Error>(1000f64, Default::default()).await
     );
 
     println!("flush");

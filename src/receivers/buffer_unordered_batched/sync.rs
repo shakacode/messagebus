@@ -7,21 +7,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{
-    buffer_unordered_batch_poller_macro,
-    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
-    BatchHandler,
-};
-use anyhow::Result;
-use futures::{stream::FuturesUnordered, Future, StreamExt};
-
+use crate::{BatchHandler, Bus, Message, Untyped, buffer_unordered_batch_poller_macro, builder::ReceiverSubscriberBuilder, error::{Error, SendError, StdSyncSendError}, receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, receivers::{fix_type, Request}};
 use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
-use crate::{
-    builder::ReceiverSubscriberBuilder,
-    receiver::{SendError, SendTypedReceiver},
-    Bus, Message, Untyped,
-};
+
+use futures::{stream::FuturesUnordered, Future, StreamExt};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -48,23 +37,23 @@ buffer_unordered_batch_poller_macro!(
     }
 );
 
-pub struct BufferUnorderedBatchedSync<M, R = (), E = crate::error::Error>
+pub struct BufferUnorderedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
     stats: Arc<BufferUnorderedBatchedStats>,
     srx: Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
-impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for BufferUnorderedBatchedSync<M, R, E>
+impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error> for BufferUnorderedBatchedSync<M, R, T::Error>
 where
-    T: BatchHandler<M, Response = R, Error = E> + 'static,
+    T: BatchHandler<M, Response = R> + 'static,
+    T::Error: StdSyncSendError,
     R: Message,
     M: Message,
-    E: crate::Error,
 {
     type Config = BufferUnorderedBatchedConfig;
 
@@ -91,7 +80,7 @@ where
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(buffer_unordered_batch_poller::<T, M, R, E>(
+                Box::pin(buffer_unordered_batch_poller::<T, M, R>(
                     rx,
                     bus,
                     ut,
@@ -103,7 +92,7 @@ where
         });
 
         (
-            BufferUnorderedBatchedSync::<M, R, E> {
+            BufferUnorderedBatchedSync::<M, R, T::Error> {
                 tx,
                 stats,
                 srx: Mutex::new(srx),
@@ -117,7 +106,7 @@ impl<M, R, E> SendUntypedReceiver for BufferUnorderedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, msg: Action) -> Result<(), SendError<Action>> {
         match self.tx.send(Request::Action(msg)) {
@@ -132,7 +121,7 @@ impl<M, R, E> SendTypedReceiver<M> for BufferUnorderedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
         match self.tx.send(Request::Request(mid, m)) {
@@ -151,7 +140,7 @@ impl<M, R, E> ReciveTypedReceiver<R, E> for BufferUnorderedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
         let poll = self.srx.lock().poll_recv(ctx);

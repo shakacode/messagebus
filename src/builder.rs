@@ -3,10 +3,7 @@ use std::{any::TypeId, collections::HashMap, marker::PhantomData, pin::Pin, sync
 use futures::{Future, FutureExt};
 use tokio::sync::Mutex;
 
-use crate::{
-    receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    Bus, BusInner, Message, Untyped,
-};
+use crate::{Bus, BusInner, Message, Untyped, error::StdSyncSendError, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}};
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
     SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
@@ -14,7 +11,7 @@ where
     T: 'static,
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     type Config: Default;
 
@@ -75,7 +72,7 @@ impl<T> RegisterEntry<UnsyncEntry, T> {
         T: Send + 'static,
         M: Message,
         R: Message,
-        E: crate::Error,
+        E: StdSyncSendError,
         S: ReceiverSubscriberBuilder<T, M, R, E> + 'static,
     {
         let (inner, poller) = S::build(cfg);
@@ -97,7 +94,7 @@ impl<T> RegisterEntry<SyncEntry, T> {
         T: Send + Sync + 'static,
         M: Message,
         R: Message,
-        E: crate::Error,
+        E: StdSyncSendError,
         S: ReceiverSubscriberBuilder<T, M, R, E> + 'static,
     {
         let (inner, poller) = S::build(cfg);

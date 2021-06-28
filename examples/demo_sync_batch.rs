@@ -1,5 +1,20 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use messagebus::{error::Error, receivers, AsyncBatchSynchronizedHandler, BatchSynchronizedHandler, Bus};
+use messagebus::{receivers, AsyncBatchSynchronizedHandler, BatchSynchronizedHandler, Message, error, Bus};
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone)]
+enum Error {
+    #[error("Error({0})")]
+    Error(Arc<anyhow::Error>)
+}
+
+impl<M: Message> From<error::Error<M>> for Error {
+    fn from(err: error::Error<M>) -> Self {
+        Self::Error(Arc::new(err.into()))
+    }
+}
 
 struct TmpReceiver;
 
@@ -29,12 +44,12 @@ impl BatchSynchronizedHandler<i16> for TmpReceiver {
 async fn main() {
     let (b, poller) = Bus::build()
         .register_unsync(TmpReceiver)
-        .subscribe::<i32, receivers::SynchronizedBatchedAsync<_>, _, _>(16, Default::default())
-        .subscribe::<i16, receivers::SynchronizedBatchedSync<_>, _, _>(16, Default::default())
+        .subscribe::<i32, receivers::SynchronizedBatchedAsync<_, _, _>, _, _>(16, Default::default())
+        .subscribe::<i16, receivers::SynchronizedBatchedSync<_, _, _>, _, _>(16, Default::default())
         .done()
         .build();
 
-    for i in 1..100 {
+    for i in 1..100i32 {
         b.send(i).await.unwrap();
     }
 

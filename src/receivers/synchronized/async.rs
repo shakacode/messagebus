@@ -4,18 +4,15 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{
-    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
-    synchronized_poller_macro,
-};
-use anyhow::Result;
+use crate::synchronized_poller_macro;
 use futures::Future;
 
 use super::SynchronizedConfig;
 use crate::{
+    error::{Error, StdSyncSendError, SendError},
     builder::ReceiverSubscriberBuilder,
-    receiver::{SendError, SendTypedReceiver},
+    receiver::{SendTypedReceiver, Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type, Request},
     AsyncSynchronizedHandler, Bus, Message, Untyped,
 };
 use tokio::sync::{mpsc, Mutex};
@@ -31,11 +28,11 @@ synchronized_poller_macro! {
     }
 }
 
-pub struct SynchronizedAsync<M, R = (), E = crate::error::Error>
+pub struct SynchronizedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
     srx: parking_lot::Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
@@ -46,7 +43,7 @@ where
     T: AsyncSynchronizedHandler<M, Response = R, Error = E> + 'static,
     R: Message,
     M: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     type Config = SynchronizedConfig;
 
@@ -63,7 +60,7 @@ where
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(synchronized_poller::<T, M, R, E>(rx, bus, ut, stx))
+                Box::pin(synchronized_poller::<T, M, R>(rx, bus, ut, stx))
                     as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
@@ -82,7 +79,7 @@ impl<M, R, E> SendUntypedReceiver for SynchronizedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, m: Action) -> Result<(), SendError<Action>> {
         match self.tx.send(Request::Action(m)) {
@@ -97,7 +94,7 @@ impl<M, R, E> SendTypedReceiver<M> for SynchronizedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
         match self.tx.send(Request::Request(mid, m)) {
@@ -112,7 +109,7 @@ impl<M, R, E> ReciveTypedReceiver<R, E> for SynchronizedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
         let poll = self.srx.lock().poll_recv(ctx);

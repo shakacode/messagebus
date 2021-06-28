@@ -1,5 +1,18 @@
 use async_trait::async_trait;
-use messagebus::{error::Error, receivers, AsyncHandler, Bus, Handler};
+use messagebus::{AsyncHandler, Bus, Handler, Message, error, receivers};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+enum Error {
+    #[error("Error({0})")]
+    Error(anyhow::Error)
+}
+
+impl<M: Message> From<error::Error<M>> for Error {
+    fn from(err: error::Error<M>) -> Self {
+        Self::Error(err.into())
+    }
+}
 
 struct TmpReceiver;
 struct TmpReceiver2;
@@ -139,15 +152,15 @@ async fn main() {
 
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
-        .subscribe::<f32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
-        .subscribe::<u16, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
-        .subscribe::<u32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
-        .subscribe::<i32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
-        .subscribe::<i16, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
+        .subscribe::<f32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u16, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<i32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<i16, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
         .done()
         .register(TmpReceiver2)
-        .subscribe::<i32, receivers::BufferUnorderedAsync<_>, _, _>(8, Default::default())
-        .subscribe::<i16, receivers::BufferUnorderedSync<_>, _, _>(8, Default::default())
+        .subscribe::<i32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<i16, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
         .done()
         .build();
 

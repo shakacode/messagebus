@@ -8,19 +8,17 @@ use std::{
 };
 
 use crate::{
-    buffer_unordered_poller_macro,
-    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
-};
-use anyhow::Result;
-use futures::{stream::FuturesUnordered, Future, StreamExt};
-
-use super::{BufferUnorderedConfig, BufferUnorderedStats};
-use crate::{
+    buffer_unordered_poller_macro, 
     builder::ReceiverSubscriberBuilder,
-    receiver::{SendError, SendTypedReceiver},
+    error::{Error, StdSyncSendError, SendError}, 
+    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, 
+    receivers::{fix_type, Request},
     AsyncHandler, Bus, Message, Untyped,
 };
+
+use super::{BufferUnorderedConfig, BufferUnorderedStats};
+
+use futures::{stream::FuturesUnordered, Future, StreamExt};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -33,11 +31,11 @@ buffer_unordered_poller_macro!(
     |bus, ut: Arc<T>| { async move { ut.sync(&bus).await } }
 );
 
-pub struct BufferUnorderedAsync<M, R = (), E = crate::error::Error>
+pub struct BufferUnorderedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
     stats: Arc<BufferUnorderedStats>,
@@ -49,7 +47,7 @@ where
     T: AsyncHandler<M, Response = R, Error = E> + 'static,
     R: Message,
     M: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     type Config = BufferUnorderedConfig;
 
@@ -100,7 +98,7 @@ impl<M, R, E> SendUntypedReceiver for BufferUnorderedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, m: Action) -> Result<(), SendError<Action>> {
         match self.tx.send(Request::Action(m)) {
@@ -115,7 +113,7 @@ impl<M, R, E> SendTypedReceiver<M> for BufferUnorderedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
         match self.tx.send(Request::Request(mid, m)) {
@@ -134,7 +132,7 @@ impl<M, R, E> ReciveTypedReceiver<R, E> for BufferUnorderedAsync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
         let poll = self.srx.lock().poll_recv(ctx);

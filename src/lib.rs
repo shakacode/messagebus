@@ -2,7 +2,6 @@ mod builder;
 mod envelop;
 pub mod error;
 mod handler;
-pub mod msgs;
 mod receiver;
 pub mod receivers;
 mod trait_object;
@@ -11,13 +10,11 @@ mod trait_object;
 extern crate log;
 
 use crate::receiver::Permit;
-use anyhow::bail;
-use builder::BusBuilder;
+pub use builder::BusBuilder;
 use core::any::{Any, TypeId};
 pub use envelop::Message;
 pub use handler::*;
 use receiver::Receiver;
-pub use receiver::SendError;
 use smallvec::SmallVec;
 use std::{
     collections::HashMap,
@@ -27,12 +24,9 @@ use std::{
     },
 };
 use tokio::sync::oneshot;
+use error::{Error, SendError, StdSyncSendError};
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
-
-// pub trait ErrorTrait: std::error::Error + Send + Sync + 'static {}
-pub trait Error: From<anyhow::Error> + std::error::Error + Clone + Send + Sync + 'static {}
-impl<T: From<anyhow::Error> + std::error::Error + Clone + Send + Sync + 'static> Error for T {}
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -114,7 +108,7 @@ impl BusInner {
         }
     }
 
-    pub async fn flash_and_sync(&self) {
+    pub async fn flush_and_sync(&self) {
         self.flush().await;
 
         for (_, rs) in &self.receivers {
@@ -123,13 +117,6 @@ impl BusInner {
             }
         }
     }
-
-    // pub fn stats(&self) -> impl Iterator<Item = ReceiverStats> + '_ {
-    //     self.receivers.iter()
-    //         .map(|(_, i)|i.iter())
-    //         .flatten()
-    //         .map(|r| r.stats())
-    // }
 
     fn try_reserve(&self, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
@@ -210,8 +197,8 @@ impl BusInner {
     }
 
     #[inline]
-    pub async fn send<M: Message>(&self, msg: M) -> core::result::Result<(), SendError<M>> {
-        self.send_ext(msg, SendOptions::Broadcast).await
+    pub async fn send<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
+        Ok(self.send_ext(msg, SendOptions::Broadcast).await?)
     }
 
     pub async fn send_ext<M: Message>(
@@ -287,19 +274,46 @@ impl BusInner {
         &self,
         req: M,
         options: SendOptions,
-    ) -> anyhow::Result<R> {
+    ) -> Result<R, Error<M>> {
         let tid = TypeId::of::<M>();
         let rid = TypeId::of::<R>();
 
-        let mut iter = self.select_receivers(tid, options, Some(rid));
+        let mut iter = self.select_receivers(tid, options, Some(rid), None);
         if let Some(rc) = iter.next() {
             let (tx, rx) = oneshot::channel();
             let mid = (rc.add_response_waiter(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
             rc.send(mid, rc.reserve().await, req)?;
 
-            Ok(rx.await?)
+            rx.await?.map_err(|x|x.specify::<M>())
         } else {
-            bail!("No Receivers!");
+            Err(Error::NoReceivers)
+        }
+    }
+
+    pub async fn request_we<M, R, E>(
+        &self,
+        req: M,
+        options: SendOptions,
+    ) -> Result<R, Error<M, E>> 
+        where 
+            M: Message,
+            R: Message,
+            E: StdSyncSendError
+    {
+        let tid = TypeId::of::<M>();
+        let rid = TypeId::of::<R>();
+        let eid = TypeId::of::<E>();
+
+        let mut iter = self.select_receivers(tid, options, Some(rid), Some(eid));
+        if let Some(rc) = iter.next() {
+            let (tx, rx) = oneshot::channel();
+            let mid = (rc.add_response_waiter_we(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
+            rc.send(mid, rc.reserve().await, req)?;
+
+            rx.await?
+                .map_err(|x|x.specify::<M>())
+        } else {
+            Err(Error::NoReceivers)
         }
     }
 
@@ -309,20 +323,18 @@ impl BusInner {
         tid: TypeId,
         _options: SendOptions,
         rid: Option<TypeId>,
+        eid: Option<TypeId>,
     ) -> impl Iterator<Item = &Receiver> + '_ {
         self.receivers
             .get(&tid)
             .into_iter()
             .map(|item| item.iter())
             .flatten()
-            .filter(move |x| {
-                let ret_ty = if let Some(rid) = rid {
-                    x.resp_type_id() == rid
-                } else {
-                    true
-                };
-
-                ret_ty
+            .filter(move |x| match (rid, eid) {
+                (Some(r), Some(e)) => x.resp_type_id() == r && x.err_type_id() == e,
+                (Some(r), None) => x.resp_type_id() == r,
+                (None, Some(e)) => x.err_type_id() == e,
+                (None, None) => true,
             })
     }
 }

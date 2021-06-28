@@ -1,6 +1,6 @@
 [package]
 name = "messagebus"
-version = "0.6.0"
+version = "0.6.2"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
@@ -15,13 +15,14 @@ tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync"] }
 parking_lot = "0.11.1"
 async-trait = "0.1.42"
 futures = "0.3.8"
-anyhow = "1.0.34"
 tokio-util = "0.6.7"
 async-stream = "0.3.2"
 smallvec = "1.6.1"
 log = "0.4.14"
 sharded-slab = "0.1.1"
+thiserror = "1.0.25"
 
 [dev-dependencies]
+anyhow = "1.0.41"
 env_logger = "0.8.4"
 tokio = { version = "1", features = ["macros", "parking_lot", "rt-multi-thread", "io-util", "sync"] }

@@ -38,19 +38,18 @@ impl Default for BufferUnorderedBatchedConfig {
 #[macro_export]
 macro_rules! buffer_unordered_batch_poller_macro {
     ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        fn buffer_unordered_batch_poller<$t, M, R, E>(
+        fn buffer_unordered_batch_poller<$t, M, R>(
             mut rx: mpsc::UnboundedReceiver<Request<M>>,
             bus: Bus,
             ut: Untyped,
             stats: Arc<BufferUnorderedBatchedStats>,
             cfg: BufferUnorderedBatchedConfig,
-            stx: mpsc::UnboundedSender<Event<R, E>>,
+            stx: mpsc::UnboundedSender<Event<R, $t::Error>>,
         ) -> impl Future<Output = ()>
         where
-            $t: $h<M, Response = R, Error = E> + 'static,
+            $t: $h<M, Response = R> + 'static,
             M: Message,
             R: Message,
-            E: crate::Error,
         {
             let ut = ut.downcast::<$t>().unwrap();
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
@@ -138,8 +137,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                             } else {
                                                 stx.send(Event::Response(
                                                     mid,
-                                                    Err(anyhow::anyhow!("no response from batch!")
-                                                        .into()),
+                                                    Err(Error::NoResponse),
                                                 ))
                                                 .ok();
                                             }
@@ -147,7 +145,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                     }
                                     Err(er) => {
                                         for mid in mids {
-                                            stx.send(Event::Response(mid, Err(er.clone()))).ok();
+                                            stx.send(Event::Response(mid, Err(Error::Other(er.clone())))).ok();
                                         }
                                     }
                                 },
@@ -165,8 +163,9 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         if let Some(fut) = sync_future.as_mut() {
                             match unsafe { fix_type(fut) }.poll(cx) {
                                 Poll::Pending => return Poll::Pending,
-                                Poll::Ready(res) => {
-                                    stx.send(Event::Synchronized(res)).ok();
+                                Poll::Ready(resp) => {
+                                    let resp: Result<_, $t::Error> = resp;
+                                    stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
                                 }
                             }
                             need_sync = false;

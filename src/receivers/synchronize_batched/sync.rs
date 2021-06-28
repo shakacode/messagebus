@@ -5,19 +5,16 @@ use std::{
 };
 
 use crate::{
-    batch_synchronized_poller_macro,
-    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
-};
-use anyhow::Result;
-use futures::{executor::block_on, Future};
-
-use super::SynchronizedBatchedConfig;
-use crate::{
+    batch_synchronized_poller_macro, 
     builder::ReceiverSubscriberBuilder,
-    receiver::{SendError, SendTypedReceiver},
+    error::{Error, StdSyncSendError, SendError}, 
+    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, 
+    receivers::{fix_type, Request},
     BatchSynchronizedHandler, Bus, Message, Untyped,
 };
+
+use super::SynchronizedBatchedConfig;
+use futures::{executor::block_on, Future};
 use tokio::sync::{mpsc, Mutex};
 
 batch_synchronized_poller_macro! {
@@ -37,22 +34,22 @@ batch_synchronized_poller_macro! {
     }
 }
 
-pub struct SynchronizedBatchedSync<M, R = (), E = crate::error::Error>
+pub struct SynchronizedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
     srx: parking_lot::Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
-impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for SynchronizedBatchedSync<M, R, E>
+impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error> for SynchronizedBatchedSync<M, R, T::Error>
 where
-    T: BatchSynchronizedHandler<M, Response = R, Error = E> + 'static,
+    T: BatchSynchronizedHandler<M, Response = R> + 'static,
+    T::Error: StdSyncSendError,
     R: Message,
     M: Message,
-    E: crate::Error,
 {
     type Config = SynchronizedBatchedConfig;
 
@@ -69,14 +66,14 @@ where
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(batch_synchronized_poller::<T, M, R, E>(
+                Box::pin(batch_synchronized_poller::<T, M, R>(
                     rx, bus, ut, cfg, stx,
                 )) as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
 
         (
-            SynchronizedBatchedSync::<M, R, E> {
+            SynchronizedBatchedSync::<M, R, T::Error> {
                 tx,
                 srx: parking_lot::Mutex::new(srx),
             },
@@ -89,7 +86,7 @@ impl<M, R, E> SendUntypedReceiver for SynchronizedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, msg: Action) -> Result<(), SendError<Action>> {
         match self.tx.send(Request::Action(msg)) {
@@ -104,7 +101,7 @@ impl<M, R, E> SendTypedReceiver<M> for SynchronizedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
         match self.tx.send(Request::Request(mid, m)) {
@@ -119,7 +116,7 @@ impl<M, R, E> ReciveTypedReceiver<R, E> for SynchronizedBatchedSync<M, R, E>
 where
     M: Message,
     R: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
         let poll = self.srx.lock().poll_recv(ctx);

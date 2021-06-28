@@ -34,19 +34,19 @@ impl Default for SynchronizedBatchedConfig {
 #[macro_export]
 macro_rules! batch_synchronized_poller_macro {
     ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        fn batch_synchronized_poller<$t, M, R, E>(
+        fn batch_synchronized_poller<$t, M, R>(
             mut rx: mpsc::UnboundedReceiver<Request<M>>,
             bus: Bus,
             ut: Untyped,
             // stats: Arc<SynchronizedBatchedStats>,
             cfg: SynchronizedBatchedConfig,
-            stx: mpsc::UnboundedSender<Event<R, E>>,
+            stx: mpsc::UnboundedSender<Event<R, $t::Error>>,
         ) -> impl Future<Output = ()>
         where
-            $t: $h<M, Response = R, Error = E> + 'static,
+            $t: $h<M, Response = R> + 'static,
+            $t::Error: StdSyncSendError + Clone,
             M: Message,
             R: Message,
-            E: crate::Error,
         {
             let ut = ut.downcast::<Mutex<T>>().unwrap();
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
@@ -76,8 +76,7 @@ macro_rules! batch_synchronized_poller_macro {
                                     } else {
                                         stx.send(Event::Response(
                                             mid,
-                                            Err(anyhow::anyhow!("no response from batch!")
-                                                .into()),
+                                            Err(Error::NoResponse),
                                         ))
                                         .ok();
                                     }
@@ -85,9 +84,9 @@ macro_rules! batch_synchronized_poller_macro {
                             }
 
                             Err(er) => {
-                                let er: E = er;
+                                let er: $t::Error = er;
                                 for mid in mids {
-                                    stx.send(Event::Response(mid, Err(er.clone()))).ok();
+                                    stx.send(Event::Response(mid, Err(Error::Other(er.clone())))).ok();
                                 }
                             }
                         }
@@ -157,9 +156,10 @@ macro_rules! batch_synchronized_poller_macro {
                         // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
                         match unsafe { fix_type(fut) }.poll(cx) {
                             Poll::Pending => return Poll::Pending,
-                            Poll::Ready(res) => {
+                            Poll::Ready(resp) => {
                                 need_sync = false;
-                                stx.send(Event::Synchronized(res)).ok();
+                                let resp: Result<_, $t::Error> = resp;
+                                stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
                             }
                         }
                         sync_future = None;

@@ -1,8 +1,8 @@
-use crate::{Bus, Message};
+use crate::{Bus, Message, error::StdSyncSendError};
 use async_trait::async_trait;
 
 pub trait Handler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     fn handle(&self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -13,7 +13,7 @@ pub trait Handler<M: Message>: Send + Sync {
 
 #[async_trait]
 pub trait AsyncHandler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     async fn handle(&self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -23,7 +23,7 @@ pub trait AsyncHandler<M: Message>: Send + Sync {
 }
 
 pub trait SynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     fn handle(&mut self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -34,7 +34,7 @@ pub trait SynchronizedHandler<M: Message>: Send {
 
 #[async_trait]
 pub trait AsyncSynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     async fn handle(&mut self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -44,7 +44,7 @@ pub trait AsyncSynchronizedHandler<M: Message>: Send {
 }
 
 pub trait BatchHandler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
 
     fn handle(&self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
@@ -55,7 +55,7 @@ pub trait BatchHandler<M: Message>: Send + Sync {
 
 #[async_trait]
 pub trait AsyncBatchHandler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
 
     async fn handle(&self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
@@ -65,7 +65,7 @@ pub trait AsyncBatchHandler<M: Message>: Send + Sync {
 }
 
 pub trait BatchSynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
 
     fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
@@ -76,7 +76,7 @@ pub trait BatchSynchronizedHandler<M: Message>: Send {
 
 #[async_trait]
 pub trait AsyncBatchSynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
 
     async fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
@@ -86,7 +86,7 @@ pub trait AsyncBatchSynchronizedHandler<M: Message>: Send {
 }
 
 pub trait LocalHandler<M: Message> {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -97,7 +97,7 @@ pub trait LocalHandler<M: Message> {
 
 #[async_trait]
 pub trait LocalAsyncHandler<M: Message> {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     async fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -107,7 +107,7 @@ pub trait LocalAsyncHandler<M: Message> {
 }
 
 pub trait LocalBatchHandler<M: Message> {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
 
     fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
@@ -118,7 +118,7 @@ pub trait LocalBatchHandler<M: Message> {
 
 #[async_trait]
 pub trait LocalAsyncBatchHandler<M: Message> {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
 
     async fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;

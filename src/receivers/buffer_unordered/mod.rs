@@ -44,7 +44,7 @@ macro_rules! buffer_unordered_poller_macro {
             $t: $h<M, Response = R, Error = E> + 'static,
             M: Message,
             R: Message,
-            E: crate::Error,
+            E: StdSyncSendError,
         {
             let ut = ut.downcast::<$t>().unwrap();
             let mut queue = FuturesUnordered::new();
@@ -94,8 +94,9 @@ macro_rules! buffer_unordered_poller_macro {
                         loop {
                             match queue.poll_next_unpin(cx) {
                                 Poll::Pending => return Poll::Pending,
-                                Poll::Ready(Some((mid, res))) => {
-                                    stx.send(Event::Response(mid, res)).ok();
+                                Poll::Ready(Some((mid, resp))) => {
+                                    let resp: Result<_, $t::Error> = resp;
+                                    stx.send(Event::Response(mid, resp.map_err(Error::Other))).ok();
                                 }
                                 Poll::Ready(None) => break,
                             }
@@ -111,8 +112,9 @@ macro_rules! buffer_unordered_poller_macro {
                         if let Some(fut) = sync_future.as_mut() {
                             match unsafe { fix_type(fut) }.poll(cx) {
                                 Poll::Pending => return Poll::Pending,
-                                Poll::Ready(res) => {
-                                    stx.send(Event::Synchronized(res)).ok();
+                                Poll::Ready(resp) => {
+                                    let resp: Result<_, E> = resp;
+                                    stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
                                 }
                             }
                             need_sync = false;

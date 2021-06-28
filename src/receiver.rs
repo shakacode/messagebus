@@ -1,4 +1,4 @@
-use crate::{msgs, trait_object::TraitObject, Bus, Error, Message};
+use crate::{Bus, Error, Message, error::{SendError, StdSyncSendError}, trait_object::TraitObject};
 use core::{
     any::TypeId,
     fmt,
@@ -37,7 +37,7 @@ pub trait SendTypedReceiver<M: Message>: Sync {
 pub trait ReciveTypedReceiver<M, E>: Sync
 where
     M: Message,
-    E: crate::Error,
+    E: StdSyncSendError,
 {
     fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<M, E>>;
 }
@@ -46,10 +46,10 @@ pub trait ReceiverTrait: Send + Sync {
     fn typed(&self) -> AnyReceiver<'_>;
     fn poller(&self) -> AnyPoller<'_>;
     fn name(&self) -> &str;
-    fn stats(&self) -> Result<(), SendError<()>>;
-    fn close(&self) -> Result<(), SendError<()>>;
-    fn sync(&self) -> Result<(), SendError<()>>;
-    fn flush(&self) -> Result<(), SendError<()>>;
+    fn stats(&self) -> Result<(), Error<Action>>;
+    fn close(&self) -> Result<(), Error<Action>>;
+    fn sync(&self) -> Result<(), Error<Action>>;
+    fn flush(&self) -> Result<(), Error<Action>>;
 }
 
 pub trait ReceiverPollerBuilder {
@@ -76,7 +76,7 @@ pub struct Stats {
 }
 
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Action {
     Flush,
     Sync,
@@ -85,10 +85,10 @@ pub enum Action {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone)]
-pub enum Event<M, E> {
-    Response(u64, Result<M, E>),
-    Synchronized(Result<(), E>),
+#[derive(Debug)]
+pub enum Event<M, E: StdSyncSendError> {
+    Response(u64, Result<M, Error<(), E>>),
+    Synchronized(Result<(), Error<(), E>>),
     Stats(Stats),
     Flushed,
     Exited,
@@ -98,7 +98,7 @@ struct ReceiverWrapper<M, R, E, S>
 where
     M: Message,
     R: Message,
-    E: Error,
+    E: StdSyncSendError,
     S: 'static,
 {
     inner: S,
@@ -109,7 +109,7 @@ impl<M, R, E, S> ReceiverTrait for ReceiverWrapper<M, R, E, S>
 where
     M: Message,
     R: Message,
-    E: Error,
+    E: StdSyncSendError,
     S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
 {
     fn name(&self) -> &str {
@@ -124,20 +124,20 @@ where
         AnyPoller::new(&self.inner)
     }
 
-    fn stats(&self) -> Result<(), SendError<()>> {
-        SendUntypedReceiver::send(&self.inner, Action::Stats).map_err(|_| SendError::Closed(()))
+    fn stats(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Stats)?)
     }
 
-    fn close(&self) -> Result<(), SendError<()>> {
-        SendUntypedReceiver::send(&self.inner, Action::Close).map_err(|_| SendError::Closed(()))
+    fn close(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Close)?)
     }
 
-    fn sync(&self) -> Result<(), SendError<()>> {
-        SendUntypedReceiver::send(&self.inner, Action::Sync).map_err(|_| SendError::Closed(()))
+    fn sync(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Sync)?)
     }
 
-    fn flush(&self) -> Result<(), SendError<()>> {
-        SendUntypedReceiver::send(&self.inner, Action::Flush).map_err(|_| SendError::Closed(()))
+    fn flush(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Flush)?)
     }
 }
 
@@ -192,7 +192,7 @@ impl<'a> AnyPoller<'a> {
     pub fn new<M, E, R>(rcvr: &'a R) -> Self
     where
         M: Message,
-        E: crate::Error,
+        E: StdSyncSendError,
         R: ReciveTypedReceiver<M, E> + 'static,
     {
         let trcvr = rcvr as &(dyn ReciveTypedReceiver<M, E>);
@@ -204,7 +204,7 @@ impl<'a> AnyPoller<'a> {
         }
     }
 
-    pub fn dyn_typed_receiver<M: Message, E: crate::Error>(
+    pub fn dyn_typed_receiver<M: Message, E: StdSyncSendError>(
         &'a self,
     ) -> &'a dyn ReciveTypedReceiver<M, E> {
         assert_eq!(self.type_id, TypeId::of::<dyn ReciveTypedReceiver<M, E>>());
@@ -212,35 +212,6 @@ impl<'a> AnyPoller<'a> {
         unsafe { mem::transmute(self.dyn_typed_receiver_trait_object) }
     }
 }
-
-pub enum SendError<M> {
-    Full(M),
-    Closed(M),
-}
-
-impl<M: fmt::Debug> fmt::Debug for SendError<M> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SendError::Full(m) => write!(f, "SendError::Full({:?})", m)?,
-            SendError::Closed(m) => write!(f, "SendError::Closed({:?})", m)?,
-        }
-
-        Ok(())
-    }
-}
-
-impl<M: fmt::Debug> fmt::Display for SendError<M> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SendError::Full(m) => write!(f, "SendError::Full({:?})", m)?,
-            SendError::Closed(m) => write!(f, "SendError::Closed({:?})", m)?,
-        }
-
-        Ok(())
-    }
-}
-
-impl<M: fmt::Debug> std::error::Error for SendError<M> {}
 
 #[derive(Debug, Clone)]
 pub struct ReceiverStats {
@@ -267,6 +238,7 @@ impl fmt::Display for ReceiverStats {
 
 struct ReceiverContext {
     resp_type_id: TypeId,
+    err_type_id: TypeId,
     limit: u64,
     processing: AtomicU64,
     need_flush: AtomicBool,
@@ -286,6 +258,7 @@ pub struct Receiver {
     inner: Arc<dyn ReceiverTrait>,
     context: Arc<ReceiverContext>,
     waiters: Arc<dyn Any + Send + Sync>,
+    waiters_void: Arc<dyn Any + Send + Sync>,
 }
 
 impl fmt::Debug for Receiver {
@@ -309,12 +282,13 @@ impl Receiver {
     where
         M: Message,
         R: Message,
-        E: Error,
+        E: StdSyncSendError,
         S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
     {
         Self {
             context: Arc::new(ReceiverContext {
                 resp_type_id: TypeId::of::<R>(),
+                err_type_id: TypeId::of::<E>(),
                 limit,
                 processing: AtomicU64::new(0),
                 need_flush: AtomicBool::new(false),
@@ -327,15 +301,19 @@ impl Receiver {
                 inner,
                 _m: Default::default(),
             }),
-            waiters: Arc::new(sharded_slab::Slab::<oneshot::Sender<R>>::new_with_config::<
-                SlabCfg,
-            >()),
+            waiters: Arc::new(sharded_slab::Slab::<oneshot::Sender<Result<R, Error<(), E>>>>::new_with_config::<SlabCfg>()),
+            waiters_void: Arc::new(sharded_slab::Slab::<oneshot::Sender<Result<R, Error<()>>>>::new_with_config::<SlabCfg>()),
         }
     }
 
     #[inline]
     pub fn resp_type_id(&self) -> TypeId {
         self.context.resp_type_id
+    }
+
+    #[inline]
+    pub fn err_type_id(&self) -> TypeId {
+        self.context.err_type_id
     }
 
     #[inline]
@@ -430,17 +408,24 @@ impl Receiver {
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
     where
         R: Message,
-        E: crate::Error,
+        E: StdSyncSendError,
     {
         let ctx_clone = self.context.clone();
         let inner_clone = self.inner.clone();
+
         let waiters = self
             .waiters
             .clone()
-            .downcast::<Slab<oneshot::Sender<R>>>()
+            .downcast::<Slab::<oneshot::Sender<Result<R, Error<(), E>>>>>()
             .unwrap();
 
-        Box::new(move |bus| {
+        let waiters_void = self
+            .waiters_void
+            .clone()
+            .downcast::<Slab::<oneshot::Sender<Result<R, Error<()>>>>>()
+            .unwrap();
+
+        Box::new(move |_| {
             Box::pin(async move {
                 let any_receiver = inner_clone.poller();
                 let receiver = any_receiver.dyn_typed_receiver::<R, E>();
@@ -458,21 +443,19 @@ impl Receiver {
                             ctx_clone.processing.fetch_sub(1, Ordering::SeqCst);
                             ctx_clone.response.notify_one();
 
-                            match resp {
-                                Ok(msg) => {
-                                    if let Some(waiter) = waiters.take(mid as usize) {
-                                        if let Err(_msg) = waiter.send(msg) {
-                                            error!("Response cannot be processed!");
-                                        }
-                                    } else if TypeId::of::<R>() != TypeId::of::<()>() {
-                                        warn!("Non-void response has no listeners!");
-                                    }
+                            if let Some(waiter) = waiters.take(mid as usize) {
+                                if waiter.send(resp).is_err() {
+                                    error!("Response cannot be processed!");
                                 }
-                                Err(err) => {
-                                    bus.try_send(msgs::Error(Arc::new(err.into()))).ok();
+                            } else if let Some(waiter) = waiters_void.take(mid as usize) {
+                                if waiter.send(resp.map_err(|x|x.into_dyn())).is_err() {
+                                    error!("Response cannot be processed!");
                                 }
+                            } else if TypeId::of::<R>() != TypeId::of::<()>() {
+                                warn!("Non-void response has no listeners!");
                             }
-                        }
+                        },
+
                         _ => unimplemented!(),
                     }
                 }
@@ -483,16 +466,31 @@ impl Receiver {
     #[inline]
     pub(crate) fn add_response_waiter<R: Message>(
         &self,
-        waiter: oneshot::Sender<R>,
+        waiter: oneshot::Sender<Result<R, Error<()>>>,
     ) -> Option<usize> {
         let idx = self
-            .waiters
-            .downcast_ref::<Slab<oneshot::Sender<R>>>()
+            .waiters_void
+            .downcast_ref::<Slab<oneshot::Sender<Result<R, Error<()>>>>>()
             .unwrap()
             .insert(waiter)?;
 
         Some(idx)
     }
+
+    #[inline]
+    pub(crate) fn add_response_waiter_we<R: Message, E: StdSyncSendError>(
+        &self,
+        waiter: oneshot::Sender<Result<R, Error<(), E>>>,
+    ) -> Option<usize> {
+        let idx = self
+            .waiters
+            .downcast_ref::<Slab<oneshot::Sender<Result<R, Error<(), E>>>>>()
+            .unwrap()
+            .insert(waiter)?;
+
+        Some(idx)
+    }
+
 
     #[inline]
     pub async fn close(&self) {

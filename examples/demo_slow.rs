@@ -1,4 +1,17 @@
-use messagebus::{error::Error, receivers, Bus, Handler};
+use messagebus::{receivers, Bus, Message, error, Handler};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+enum Error {
+    #[error("Error({0})")]
+    Error(anyhow::Error)
+}
+
+impl<M: Message> From<error::Error<M>> for Error {
+    fn from(err: error::Error<M>) -> Self {
+        Self::Error(err.into())
+    }
+}
 
 struct TmpReceiver;
 
@@ -41,9 +54,9 @@ impl Handler<u32> for TmpReceiver {
 async fn main() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
-        .subscribe::<f32, receivers::BufferUnorderedSync<_>, _, _>(8, Default::default())
-        .subscribe::<u16, receivers::BufferUnorderedSync<_>, _, _>(8, Default::default())
-        .subscribe::<u32, receivers::BufferUnorderedSync<_>, _, _>(8, Default::default())
+        .subscribe::<f32, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u16, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
+        .subscribe::<u32, receivers::BufferUnorderedSync<_, _, _>, _, _>(8, Default::default())
         .done()
         .build();
 

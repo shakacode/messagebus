@@ -134,11 +134,11 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn try_send<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
+    pub fn try_send<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.try_send_ext(msg, SendOptions::Broadcast)
     }
 
-    pub fn try_send_ext<M: Message>(
+    pub fn try_send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
@@ -183,12 +183,12 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn send_blocking<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
+    pub fn send_blocking<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.send_blocking_ext(msg, SendOptions::Broadcast)
     }
 
     #[inline]
-    pub fn send_blocking_ext<M: Message>(
+    pub fn send_blocking_ext<M: Message + Clone>(
         &self,
         msg: M,
         options: SendOptions,
@@ -197,11 +197,11 @@ impl BusInner {
     }
 
     #[inline]
-    pub async fn send<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
+    pub async fn send<M: Message + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
         Ok(self.send_ext(msg, SendOptions::Broadcast).await?)
     }
 
-    pub async fn send_ext<M: Message>(
+    pub async fn send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
@@ -234,11 +234,11 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn force_send<M: Message>(&self, msg: M) -> core::result::Result<(), Error<M>> {
+    pub fn force_send<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.force_send_ext(msg, SendOptions::Broadcast)
     }
 
-    pub fn force_send_ext<M: Message>(
+    pub fn force_send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
@@ -268,6 +268,48 @@ impl BusInner {
         );
 
         Ok(())
+    }
+
+    #[inline]
+    pub fn try_send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(msg).into());
+        }
+
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = TypeId::of::<M>();
+
+        if let Some(rs) = self.receivers.get(&tid).and_then(|rs|rs.first()) {
+            let permits = if let Some(x) = rs.try_reserve() {
+                x
+            } else {
+                return Err(SendError::Full(msg).into());
+            };
+
+            Ok(rs.send(mid, permits, msg)?)
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
+    pub async fn send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(msg).into());
+        }
+
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = TypeId::of::<M>();
+
+        if let Some(rs) = self.receivers.get(&tid).and_then(|rs|rs.first()) {
+            Ok(rs.send(mid, rs.reserve().await, msg)?)
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
+    #[inline]
+    pub fn send_one_blocking<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
+        futures::executor::block_on(self.send_one(msg))
     }
 
     pub async fn request<M: Message, R: Message>(

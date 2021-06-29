@@ -390,7 +390,7 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn force_send<M: Message>(&self, mid: u64, msg: M) -> Result<(), SendError<M>> {
+    pub fn force_send<M: Message + Clone>(&self, mid: u64, msg: M) -> Result<(), SendError<M>> {
         let any_receiver = self.inner.typed();
         let receiver = any_receiver.dyn_typed_receiver::<M>();
         let res = receiver.send(mid, msg);
@@ -452,7 +452,7 @@ impl Receiver {
                                     error!("Response cannot be processed!");
                                 }
                             } else if TypeId::of::<R>() != TypeId::of::<()>() {
-                                warn!("Non-void response has no listeners!");
+                                warn!("Non-void response has no waiters!");
                             }
                         },
 

@@ -1,19 +1,18 @@
-use core::panic;
+use core::fmt;
 
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-use crate::Message;
+use crate::{Message, envelop::{BoxedMessage, TransferableMessage}};
 
 pub trait StdSyncSendError: std::error::Error + Send + Sync + Unpin + 'static {}
 impl<T: std::error::Error + Send + Sync + Unpin + 'static> StdSyncSendError for T {}
-
 
 #[derive(Debug, Error)]
 pub enum VoidError {}
 
 #[derive(Debug, Error)]
-pub enum SendError<M: Message> {
+pub enum SendError<M: fmt::Debug> {
     #[error("Closed")]
     Closed(M),
 
@@ -21,8 +20,17 @@ pub enum SendError<M: Message> {
     Full(M),
 }
 
+impl<M: TransferableMessage> SendError<M> {
+    pub fn into_boxed(self) -> SendError<BoxedMessage> {
+        match self {
+            SendError::Closed(m) => SendError::Closed(BoxedMessage::from(m)),
+            SendError::Full(m) => SendError::Closed(BoxedMessage::from(m)),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
-pub enum Error<M: Message = (), E: StdSyncSendError = VoidError> {
+pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = VoidError> {
     #[error("Message Send Error: {0}")]
     SendError(#[from] SendError<M>),
 
@@ -35,6 +43,9 @@ pub enum Error<M: Message = (), E: StdSyncSendError = VoidError> {
     #[error("Other({0})")]
     Other(E),
 
+    #[error("Serialization({0})")]
+    Serialization(#[from] erased_serde::Error),
+
     #[error("Other({0})")]
     OtherBoxed(Box<dyn StdSyncSendError>),
 }
@@ -45,28 +56,31 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::SendError(inner) => Error::SendError(inner),
             Error::NoResponse => Error::NoReceivers,
             Error::NoReceivers => Error::NoReceivers,
+            Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::OtherBoxed(Box::new(inner) as _),
             Error::OtherBoxed(inner) => Error::OtherBoxed(inner),
         }
-    }    
-    
+    }
+
     pub fn map<U: From<Box<dyn StdSyncSendError>> + StdSyncSendError>(self) -> Error<M, U> {
         match self {
             Error::SendError(inner) => Error::SendError(inner),
             Error::NoResponse => Error::NoReceivers,
             Error::NoReceivers => Error::NoReceivers,
+            Error::Serialization(s) => Error::Serialization(s),
             Error::Other(_) => panic!("expected boxed error!"),
             Error::OtherBoxed(inner) => Error::Other(inner.into()),
         }
     }
 }
 
-impl <E: StdSyncSendError> Error<(), E> {
+impl<E: StdSyncSendError> Error<(), E> {
     pub fn specify<M: Message>(self) -> Error<M, E> {
         match self {
             Error::SendError(_) => panic!("cannot specify type on typed error"),
             Error::NoResponse => Error::NoReceivers,
             Error::NoReceivers => Error::NoReceivers,
+            Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::Other(inner),
             Error::OtherBoxed(inner) => Error::OtherBoxed(inner),
         }

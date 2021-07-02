@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedAsync;
 pub use sync::BufferUnorderedSync;
+use serde_derive::{Serialize, Deserialize};
 
 #[derive(Debug)]
 pub struct BufferUnorderedStats {
@@ -14,7 +15,7 @@ pub struct BufferUnorderedStats {
     pub parallel_total: AtomicU64,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedConfig {
     pub buffer_size: usize,
     pub max_parallel: usize,
@@ -96,7 +97,8 @@ macro_rules! buffer_unordered_poller_macro {
                                 Poll::Pending => return Poll::Pending,
                                 Poll::Ready(Some((mid, resp))) => {
                                     let resp: Result<_, $t::Error> = resp;
-                                    stx.send(Event::Response(mid, resp.map_err(Error::Other))).ok();
+                                    stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                                        .ok();
                                 }
                                 Poll::Ready(None) => break,
                             }
@@ -114,7 +116,8 @@ macro_rules! buffer_unordered_poller_macro {
                                 Poll::Pending => return Poll::Pending,
                                 Poll::Ready(resp) => {
                                     let resp: Result<_, E> = resp;
-                                    stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
+                                    stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                                        .ok();
                                 }
                             }
                             need_sync = false;

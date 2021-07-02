@@ -7,15 +7,15 @@ use std::{
     task::{Context, Poll},
 };
 
+use super::{BufferUnorderedConfig, BufferUnorderedStats};
 use crate::{
-    buffer_unordered_poller_macro, 
+    buffer_unordered_poller_macro,
     builder::ReceiverSubscriberBuilder,
-    error::{Error, StdSyncSendError, SendError}, 
-    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, 
+    error::{Error, SendError, StdSyncSendError},
+    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
     receivers::{fix_type, Request},
     Bus, Handler, Message, Untyped,
 };
-use super::{BufferUnorderedConfig, BufferUnorderedStats};
 
 use futures::{stream::FuturesUnordered, Future, StreamExt};
 use parking_lot::Mutex;

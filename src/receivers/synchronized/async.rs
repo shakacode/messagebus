@@ -9,9 +9,9 @@ use futures::Future;
 
 use super::SynchronizedConfig;
 use crate::{
-    error::{Error, StdSyncSendError, SendError},
     builder::ReceiverSubscriberBuilder,
-    receiver::{SendTypedReceiver, Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    error::{Error, SendError, StdSyncSendError},
+    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
     receivers::{fix_type, Request},
     AsyncSynchronizedHandler, Bus, Message, Untyped,
 };

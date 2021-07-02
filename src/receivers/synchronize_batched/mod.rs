@@ -5,6 +5,8 @@ use std::sync::atomic::AtomicU64;
 
 pub use r#async::SynchronizedBatchedAsync;
 pub use sync::SynchronizedBatchedSync;
+use serde_derive::{Serialize, Deserialize};
+
 
 #[derive(Debug)]
 pub struct SynchronizedBatchedStats {
@@ -14,7 +16,7 @@ pub struct SynchronizedBatchedStats {
     pub batch_size: AtomicU64,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct SynchronizedBatchedConfig {
     pub buffer_size: usize,
     pub batch_size: usize,
@@ -65,7 +67,7 @@ macro_rules! batch_synchronized_poller_macro {
                         Poll::Ready((mids, res)) => match res {
                             Ok(re) => {
                                 let mids: Vec<u64> = mids;
-                                let re: Vec<R> = re;
+                                let re = fix_into_iter::<R, _>(re);
 
                                 let mut mids = mids.into_iter();
                                 let mut re = re.into_iter();
@@ -74,11 +76,7 @@ macro_rules! batch_synchronized_poller_macro {
                                     if let Some(r) = re.next() {
                                         stx.send(Event::Response(mid, Ok(r))).ok();
                                     } else {
-                                        stx.send(Event::Response(
-                                            mid,
-                                            Err(Error::NoResponse),
-                                        ))
-                                        .ok();
+                                        stx.send(Event::Response(mid, Err(Error::NoResponse))).ok();
                                     }
                                 }
                             }
@@ -86,10 +84,11 @@ macro_rules! batch_synchronized_poller_macro {
                             Err(er) => {
                                 let er: $t::Error = er;
                                 for mid in mids {
-                                    stx.send(Event::Response(mid, Err(Error::Other(er.clone())))).ok();
+                                    stx.send(Event::Response(mid, Err(Error::Other(er.clone()))))
+                                        .ok();
                                 }
                             }
-                        }
+                        },
                     }
                 }
                 handle_future = None;
@@ -159,7 +158,8 @@ macro_rules! batch_synchronized_poller_macro {
                             Poll::Ready(resp) => {
                                 need_sync = false;
                                 let resp: Result<_, $t::Error> = resp;
-                                stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
+                                stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                                    .ok();
                             }
                         }
                         sync_future = None;

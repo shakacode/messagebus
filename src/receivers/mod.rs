@@ -28,6 +28,11 @@ where
     Pin::new_unchecked(x)
 }
 
+#[inline(always)]
+pub(crate) fn fix_into_iter<I, T: IntoIterator<Item = I> + Send>(x: T) -> impl IntoIterator<Item = I> + Send {
+    x
+}
+
 pub(crate) enum Request<M> {
     Action(Action),
     Request(u64, M),

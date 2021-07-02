@@ -1,4 +1,19 @@
-## MewssageBus changelog
+## MewssageBus pending changes:
+
+### 0.8.0
+#### new features:
+* Generator Handlers
+* Message Masking
+
+### 0.7.0
+#### new features:
+* Bus scopes (`enter` and `leave` methods) instead clone
+* Bus relays. Connect other message bus by IP address 
+
+#### breaking changes:
+* Batched handlers now require `InBatch` and `OutBatch` types 
+
+## MewssageBus changelog:
 
 ### 0.6.5
 #### new features:

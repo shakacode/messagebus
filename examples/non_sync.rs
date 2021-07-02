@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use messagebus::{receivers, AsyncSynchronizedHandler, Bus, Message, error, SynchronizedHandler};
+use messagebus::{error, receivers, AsyncSynchronizedHandler, Bus, Message, SynchronizedHandler};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 enum Error {
     #[error("Error({0})")]
-    Error(anyhow::Error)
+    Error(anyhow::Error),
 }
 
 impl<M: Message> From<error::Error<M>> for Error {

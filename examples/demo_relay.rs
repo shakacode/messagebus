@@ -15,31 +15,6 @@ impl<M: Message> From<error::Error<M>> for Error {
 
 struct TmpReceiver;
 
-impl Handler<f32> for TmpReceiver {
-    type Error = Error;
-    type Response = ();
-
-    fn handle(&self, msg: f32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("---> f32 {}", msg);
-
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        println!("done");
-
-        Ok(())
-    }
-}
-
-impl Handler<u16> for TmpReceiver {
-    type Error = Error;
-    type Response = ();
-
-    fn handle(&self, msg: u16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("---> u16 {}", msg);
-        Ok(())
-    }
-}
-
 impl Handler<u32> for TmpReceiver {
     type Error = Error;
     type Response = ();
@@ -53,8 +28,6 @@ impl Handler<u32> for TmpReceiver {
 fn module() -> Module {
     Module::new()
         .register(TmpReceiver)
-            .subscribe_sync::<f32>(8, Default::default())
-            .subscribe_sync::<u16>(8, Default::default())
             .subscribe_sync::<u32>(8, Default::default())
         .done()
 }
@@ -63,9 +36,7 @@ fn module() -> Module {
 async fn main() {
     let (b, poller) = Bus::build().add_module(module()).build();
 
-    b.send(32f32).await.unwrap();
-    b.send(11u16).await.unwrap();
-    b.send(32u32).await.unwrap();
+    // b.
 
     println!("flush");
     b.flush().await;

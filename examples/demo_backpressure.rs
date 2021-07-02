@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use messagebus::{receivers, AsyncHandler, Message, error, Bus};
+use messagebus::{error, receivers, AsyncHandler, Bus, Message};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 enum Error {
     #[error("Error({0})")]
-    Error(anyhow::Error)
+    Error(anyhow::Error),
 }
 
 impl<M: Message> From<error::Error<M>> for Error {
@@ -35,13 +35,7 @@ impl AsyncHandler<f32> for TmpReceiver {
 async fn main() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
-        .subscribe::<f32, receivers::BufferUnorderedAsync<_, _, _>, _, _>(
-            1,
-            receivers::BufferUnorderedConfig {
-                buffer_size: 1,
-                max_parallel: 1,
-            },
-        )
+            .subscribe_async::<f32>(1, receivers::BufferUnorderedConfig { buffer_size: 1, max_parallel: 1 })
         .done()
         .build();
 

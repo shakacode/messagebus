@@ -11,7 +11,7 @@ Inspired by Actix
 ### Basics
 1. Can deliver messages between actors using receivers (usually a queue implementations)
 2. Messages distincts and delivers by TypeId
-3. Messages delivers in a broadcast fashion to many receivers (Cloned)
+3. Messages delivers ether in a broadcast fashion to many receivers (Cloned) or addressed by recevier id, balanced (depends on queue load) or random
 4. There are different kind of receivers implemented:
   - BufferUnordered Receiver (sync and async)
   - Synchronized (sync and async)
@@ -21,9 +21,8 @@ Inspired by Actix
 
 Here are the list of implmented handler kinds:
 ```rust
-
 pub trait Handler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     fn handle(&self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -34,7 +33,7 @@ pub trait Handler<M: Message>: Send + Sync {
 
 #[async_trait]
 pub trait AsyncHandler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     async fn handle(&self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -44,7 +43,7 @@ pub trait AsyncHandler<M: Message>: Send + Sync {
 }
 
 pub trait SynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     fn handle(&mut self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -55,7 +54,7 @@ pub trait SynchronizedHandler<M: Message>: Send {
 
 #[async_trait]
 pub trait AsyncSynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError;
     type Response: Message;
 
     async fn handle(&mut self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
@@ -65,10 +64,12 @@ pub trait AsyncSynchronizedHandler<M: Message>: Send {
 }
 
 pub trait BatchHandler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
+    type InBatch: FromIterator<M> + Send;
+    type OutBatch: IntoIterator<Item = Self::Response> + Send;
 
-    fn handle(&self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
+    fn handle(&self, msg: Self::InBatch, bus: &Bus) -> Result<Self::OutBatch, Self::Error>;
     fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -76,20 +77,24 @@ pub trait BatchHandler<M: Message>: Send + Sync {
 
 #[async_trait]
 pub trait AsyncBatchHandler<M: Message>: Send + Sync {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
+    type InBatch: FromIterator<M> + Send;
+    type OutBatch: IntoIterator<Item = Self::Response> + Send;
 
-    async fn handle(&self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
+    async fn handle(&self, msg: Self::InBatch, bus: &Bus) -> Result<Self::OutBatch, Self::Error>;
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
         Ok(())
     }
 }
 
 pub trait BatchSynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
+    type InBatch: FromIterator<M> + Send;
+    type OutBatch: IntoIterator<Item = Self::Response> + Send;
 
-    fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
+    fn handle(&mut self, msg: Self::InBatch, bus: &Bus) -> Result<Self::OutBatch, Self::Error>;
     fn sync(&mut self, _bus: &Bus) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -97,10 +102,12 @@ pub trait BatchSynchronizedHandler<M: Message>: Send {
 
 #[async_trait]
 pub trait AsyncBatchSynchronizedHandler<M: Message>: Send {
-    type Error: crate::Error;
+    type Error: StdSyncSendError + Clone;
     type Response: Message;
+    type InBatch: FromIterator<M> + Send;
+    type OutBatch: IntoIterator<Item = Self::Response> + Send;
 
-    async fn handle(&mut self, msg: Vec<M>, bus: &Bus) -> Result<Vec<Self::Response>, Self::Error>;
+    async fn handle(&mut self, msg: Self::InBatch, bus: &Bus) -> Result<Self::OutBatch, Self::Error>;
     async fn sync(&mut self, _bus: &Bus) -> Result<(), Self::Error> {
         Ok(())
     }

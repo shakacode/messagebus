@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 
 pub use r#async::SynchronizedAsync;
 pub use sync::SynchronizedSync;
+use serde_derive::{Serialize, Deserialize};
 
 #[derive(Debug)]
 pub struct SynchronizedStats {
@@ -12,7 +13,7 @@ pub struct SynchronizedStats {
     pub buffer_total: AtomicU64,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SynchronizedConfig {
     pub buffer_size: usize,
 }
@@ -51,7 +52,8 @@ macro_rules! synchronized_poller_macro {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready((mid, resp)) => {
                             let resp: Result<_, $t::Error> = resp;
-                            stx.send(Event::Response(mid, resp.map_err(Error::Other))).ok();
+                            stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                                .ok();
                         }
                     }
                 }
@@ -91,7 +93,8 @@ macro_rules! synchronized_poller_macro {
                             Poll::Ready(resp) => {
                                 need_sync = false;
                                 let resp: Result<_, $t::Error> = resp;
-                                stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
+                                stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                                    .ok();
                             }
                         }
                         sync_future = None;

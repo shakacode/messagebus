@@ -7,8 +7,15 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{BatchHandler, Bus, Message, Untyped, buffer_unordered_batch_poller_macro, builder::ReceiverSubscriberBuilder, error::{Error, SendError, StdSyncSendError}, receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, receivers::{fix_type, Request}};
 use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
+use crate::{
+    buffer_unordered_batch_poller_macro,
+    builder::ReceiverSubscriberBuilder,
+    error::{Error, SendError, StdSyncSendError},
+    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type, Request},
+    BatchHandler, Bus, Message, Untyped,
+};
 
 use futures::{stream::FuturesUnordered, Future, StreamExt};
 use parking_lot::Mutex;
@@ -48,7 +55,8 @@ where
     srx: Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error> for BufferUnorderedBatchedSync<M, R, T::Error>
+impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
+    for BufferUnorderedBatchedSync<M, R, T::Error>
 where
     T: BatchHandler<M, Response = R> + 'static,
     T::Error: StdSyncSendError,

@@ -1,4 +1,4 @@
-use crate::{Bus, Error, Message, error::{SendError, StdSyncSendError}, trait_object::TraitObject};
+use crate::{Bus, Error, Message, envelop::{BoxedMessage, TransferableMessage}, error::{SendError, StdSyncSendError}, trait_object::TraitObject};
 use core::{
     any::TypeId,
     fmt,
@@ -7,6 +7,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use erased_serde::Deserializer;
 use futures::future::poll_fn;
 use futures::Future;
 use std::{
@@ -50,6 +51,10 @@ pub trait ReceiverTrait: Send + Sync {
     fn close(&self) -> Result<(), Error<Action>>;
     fn sync(&self) -> Result<(), Error<Action>>;
     fn flush(&self) -> Result<(), Error<Action>>;
+}
+
+pub trait TransferableReceiverTrait: Send + Sync {
+    fn send(&self, mid: u64, de: &mut dyn Deserializer) -> Result<(), Error<BoxedMessage>>;
 }
 
 pub trait ReceiverPollerBuilder {
@@ -140,6 +145,19 @@ where
         Ok(SendUntypedReceiver::send(&self.inner, Action::Flush)?)
     }
 }
+
+impl<M, R, E, S> TransferableReceiverTrait for ReceiverWrapper<M, R, E, S>
+where
+    M: TransferableMessage,
+    R: TransferableMessage,
+    E: StdSyncSendError,
+    S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
+{
+    fn send(&self, mid: u64, de: &mut dyn Deserializer) -> Result<(), Error<BoxedMessage>> {
+        unimplemented!()
+    }
+}
+
 
 pub struct Permit {
     pub(crate) fuse: bool,
@@ -301,8 +319,16 @@ impl Receiver {
                 inner,
                 _m: Default::default(),
             }),
-            waiters: Arc::new(sharded_slab::Slab::<oneshot::Sender<Result<R, Error<(), E>>>>::new_with_config::<SlabCfg>()),
-            waiters_void: Arc::new(sharded_slab::Slab::<oneshot::Sender<Result<R, Error<()>>>>::new_with_config::<SlabCfg>()),
+            waiters: Arc::new(
+                sharded_slab::Slab::<oneshot::Sender<Result<R, Error<(), E>>>>::new_with_config::<
+                    SlabCfg,
+                >(),
+            ),
+            waiters_void: Arc::new(
+                sharded_slab::Slab::<oneshot::Sender<Result<R, Error<()>>>>::new_with_config::<
+                    SlabCfg,
+                >(),
+            ),
         }
     }
 
@@ -374,8 +400,8 @@ impl Receiver {
     pub fn send<M: Message>(
         &self,
         mid: u64,
-        mut permit: Permit,
         msg: M,
+        mut permit: Permit,
     ) -> Result<(), SendError<M>> {
         let any_receiver = self.inner.typed();
         let receiver = any_receiver.dyn_typed_receiver::<M>();
@@ -416,13 +442,13 @@ impl Receiver {
         let waiters = self
             .waiters
             .clone()
-            .downcast::<Slab::<oneshot::Sender<Result<R, Error<(), E>>>>>()
+            .downcast::<Slab<oneshot::Sender<Result<R, Error<(), E>>>>>()
             .unwrap();
 
         let waiters_void = self
             .waiters_void
             .clone()
-            .downcast::<Slab::<oneshot::Sender<Result<R, Error<()>>>>>()
+            .downcast::<Slab<oneshot::Sender<Result<R, Error<()>>>>>()
             .unwrap();
 
         Box::new(move |_| {
@@ -448,13 +474,13 @@ impl Receiver {
                                     error!("Response cannot be processed!");
                                 }
                             } else if let Some(waiter) = waiters_void.take(mid as usize) {
-                                if waiter.send(resp.map_err(|x|x.into_dyn())).is_err() {
+                                if waiter.send(resp.map_err(|x| x.into_dyn())).is_err() {
                                     error!("Response cannot be processed!");
                                 }
                             } else if TypeId::of::<R>() != TypeId::of::<()>() {
                                 warn!("Non-void response has no waiters!");
                             }
-                        },
+                        }
 
                         _ => unimplemented!(),
                     }
@@ -491,6 +517,19 @@ impl Receiver {
         Some(idx)
     }
 
+    // #[inline]
+    // pub(crate) fn add_response_waiter_dyn(
+    //     &self,
+    //     waiter: oneshot::Sender<Result<R, Error<(), E>>>,
+    // ) -> Option<usize> {
+    //     let idx = self
+    //         .waiters
+    //         .downcast_ref::<Slab<oneshot::Sender<Result<R, Error<(), E>>>>>()
+    //         .unwrap()
+    //         .insert(waiter)?;
+
+    //     Some(idx)
+    // }
 
     #[inline]
     pub async fn close(&self) {

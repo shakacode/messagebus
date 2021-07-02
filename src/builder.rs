@@ -3,7 +3,7 @@ use std::{any::TypeId, collections::HashMap, marker::PhantomData, pin::Pin, sync
 use futures::{Future, FutureExt};
 use tokio::sync::Mutex;
 
-use crate::{Bus, BusInner, Message, Untyped, error::StdSyncSendError, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}};
+use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, Message, SynchronizedHandler, Untyped, error::StdSyncSendError, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}, receivers};
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
     SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
@@ -51,8 +51,14 @@ pub struct RegisterEntry<K, T, F, B> {
     _m: PhantomData<(K, T)>,
 }
 
-impl<K, T: 'static, F, B> RegisterEntry<K, T, F, B> 
-    where F: FnMut(&mut B, (TypeId, Receiver), Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>),
+impl<K, T: 'static, F, B> RegisterEntry<K, T, F, B>
+where
+    F: FnMut(
+        &mut B,
+        (TypeId, Receiver),
+        Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+    ),
 {
     pub fn done(mut self) -> B {
         for (tid, v) in self.receivers {
@@ -87,6 +93,42 @@ impl<T, F, B> RegisterEntry<UnsyncEntry, T, F, B> {
 
         self
     }
+
+    #[inline]
+    pub fn subscribe_sync<M>(self, queue: u64, cfg: receivers::SynchronizedConfig) -> Self
+    where
+        T: SynchronizedHandler<M> + Send + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::SynchronizedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+
+    #[inline]
+    pub fn subscribe_async<M>(self, queue: u64, cfg: receivers::SynchronizedConfig) -> Self
+    where
+        T: AsyncSynchronizedHandler<M> + Send + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::SynchronizedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+
+    #[inline]
+    pub fn subscribe_batch_sync<M>(self, queue: u64, cfg: receivers::SynchronizedBatchedConfig) -> Self
+    where
+        T: BatchSynchronizedHandler<M> + Send + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::SynchronizedBatchedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+
+    #[inline]
+    pub fn subscribe_batch_async<M>(self, queue: u64, cfg: receivers::SynchronizedBatchedConfig) -> Self
+    where
+        T: AsyncBatchSynchronizedHandler<M> + Send + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::SynchronizedBatchedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
 }
 
 impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
@@ -109,8 +151,45 @@ impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
 
         self
     }
-}
 
+    #[inline]
+    pub fn subscribe_sync<M>(self, queue: u64, cfg: receivers::BufferUnorderedConfig) -> Self
+    where
+        T: Handler<M> + Send + Sync + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::BufferUnorderedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+
+    #[inline]
+    pub fn subscribe_async<M>(self, queue: u64, cfg: receivers::BufferUnorderedConfig) -> Self
+    where
+        T: AsyncHandler<M> + Send + Sync + 'static,
+        M: Message,
+        T::Response: Message,
+        T::Error: StdSyncSendError,
+    {
+        self.subscribe::<M, receivers::BufferUnorderedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+
+    #[inline]
+    pub fn subscribe_batch_sync<M>(self, queue: u64, cfg: receivers::BufferUnorderedBatchedConfig) -> Self
+    where
+        T: BatchHandler<M> + Send + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::BufferUnorderedBatchedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+
+    #[inline]
+    pub fn subscribe_batch_async<M>(self, queue: u64, cfg: receivers::BufferUnorderedBatchedConfig) -> Self
+    where
+        T: AsyncBatchHandler<M> + Send + 'static,
+        M: Message,
+    {
+        self.subscribe::<M, receivers::BufferUnorderedBatchedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
+    }
+}
 
 pub struct Module {
     receivers: Vec<(TypeId, Receiver)>,
@@ -125,7 +204,20 @@ impl Module {
         }
     }
 
-    pub fn register<T: Send + Sync + 'static>(self, item: T) -> RegisterEntry<SyncEntry, T, impl FnMut(&mut Self, (TypeId, Receiver), Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>), Self> {
+    pub fn register<T: Send + Sync + 'static>(
+        self,
+        item: T,
+    ) -> RegisterEntry<
+        SyncEntry,
+        T,
+        impl FnMut(
+            &mut Self,
+            (TypeId, Receiver),
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        ),
+        Self,
+    > {
         RegisterEntry {
             item: Arc::new(item) as Untyped,
             payload: self,
@@ -139,7 +231,20 @@ impl Module {
         }
     }
 
-    pub fn register_unsync<T: Send + 'static>(self, item: T) -> RegisterEntry<UnsyncEntry, T, impl FnMut(&mut Self, (TypeId, Receiver), Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>), Self> {
+    pub fn register_unsync<T: Send + 'static>(
+        self,
+        item: T,
+    ) -> RegisterEntry<
+        UnsyncEntry,
+        T,
+        impl FnMut(
+            &mut Self,
+            (TypeId, Receiver),
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        ),
+        Self,
+    > {
         RegisterEntry {
             item: Arc::new(Mutex::new(item)) as Untyped,
             payload: self,
@@ -153,9 +258,11 @@ impl Module {
         }
     }
 
-    fn extend(&mut self, other: Module) {
-        self.receivers.extend(other.receivers.into_iter());
-        self.pollings.extend(other.pollings.into_iter());
+    pub fn add_module(mut self, module: Module) -> Self {
+        self.receivers.extend(module.receivers);
+        self.pollings.extend(module.pollings);
+
+        self
     }
 }
 
@@ -170,7 +277,20 @@ impl BusBuilder {
         }
     }
 
-    pub fn register<T: Send + Sync + 'static>(self, item: T) -> RegisterEntry<SyncEntry, T, impl FnMut(&mut Self, (TypeId, Receiver), Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>), Self> {
+    pub fn register<T: Send + Sync + 'static>(
+        self,
+        item: T,
+    ) -> RegisterEntry<
+        SyncEntry,
+        T,
+        impl FnMut(
+            &mut Self,
+            (TypeId, Receiver),
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        ),
+        Self,
+    > {
         RegisterEntry {
             item: Arc::new(item) as Untyped,
             payload: self,
@@ -184,7 +304,20 @@ impl BusBuilder {
         }
     }
 
-    pub fn register_unsync<T: Send + 'static>(self, item: T) -> RegisterEntry<UnsyncEntry, T, impl FnMut(&mut Self, (TypeId, Receiver), Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>), Self> {
+    pub fn register_unsync<T: Send + 'static>(
+        self,
+        item: T,
+    ) -> RegisterEntry<
+        UnsyncEntry,
+        T,
+        impl FnMut(
+            &mut Self,
+            (TypeId, Receiver),
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        ),
+        Self,
+    > {
         RegisterEntry {
             item: Arc::new(Mutex::new(item)) as Untyped,
             payload: self,
@@ -199,7 +332,7 @@ impl BusBuilder {
     }
 
     pub fn add_module(mut self, module: Module) -> Self {
-        self.inner.extend(module);
+        self.inner = self.inner.add_module(module);
 
         self
     }

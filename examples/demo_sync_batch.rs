@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use messagebus::{receivers, AsyncBatchSynchronizedHandler, BatchSynchronizedHandler, Message, error, Bus};
+use messagebus::{
+    error, AsyncBatchSynchronizedHandler, BatchSynchronizedHandler, Bus, Message,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 enum Error {
     #[error("Error({0})")]
-    Error(Arc<anyhow::Error>)
+    Error(Arc<anyhow::Error>),
 }
 
 impl<M: Message> From<error::Error<M>> for Error {
@@ -22,8 +24,15 @@ struct TmpReceiver;
 impl AsyncBatchSynchronizedHandler<i32> for TmpReceiver {
     type Error = Error;
     type Response = ();
+    type InBatch = Vec<i32>;
+    type OutBatch = Vec<()>;
 
-    async fn handle(&mut self, msg: Vec<i32>, _bus: &Bus) -> Result<Vec<Self::Response>, Self::Error> {
+
+    async fn handle(
+        &mut self,
+        msg: Vec<i32>,
+        _bus: &Bus,
+    ) -> Result<Vec<Self::Response>, Self::Error> {
         println!("---> [i32; {}] {:?}", msg.len(), msg);
 
         Ok(vec![])
@@ -33,6 +42,8 @@ impl AsyncBatchSynchronizedHandler<i32> for TmpReceiver {
 impl BatchSynchronizedHandler<i16> for TmpReceiver {
     type Error = Error;
     type Response = ();
+    type InBatch = Vec<i16>;
+    type OutBatch = Vec<()>;
 
     fn handle(&mut self, msg: Vec<i16>, _bus: &Bus) -> Result<Vec<Self::Response>, Self::Error> {
         println!("---> [i16; {}] {:?}", msg.len(), msg);
@@ -44,8 +55,8 @@ impl BatchSynchronizedHandler<i16> for TmpReceiver {
 async fn main() {
     let (b, poller) = Bus::build()
         .register_unsync(TmpReceiver)
-        .subscribe::<i32, receivers::SynchronizedBatchedAsync<_, _, _>, _, _>(16, Default::default())
-        .subscribe::<i16, receivers::SynchronizedBatchedSync<_, _, _>, _, _>(16, Default::default())
+            .subscribe_batch_async::<i32>(16, Default::default())
+            .subscribe_batch_sync::<i16>(16, Default::default())
         .done()
         .build();
 

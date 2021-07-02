@@ -5,15 +5,15 @@ use std::{
 };
 
 use crate::synchronized_poller_macro;
-use futures::{Future, executor::block_on};
+use futures::{executor::block_on, Future};
 
 use super::SynchronizedConfig;
 use crate::{
-    error::{Error, StdSyncSendError, SendError},
     builder::ReceiverSubscriberBuilder,
-    receiver::{SendTypedReceiver, Action, Event, ReciveTypedReceiver, SendUntypedReceiver},
+    error::{Error, SendError, StdSyncSendError},
+    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
     receivers::{fix_type, Request},
-    SynchronizedHandler, Bus, Message, Untyped,
+    Bus, Message, SynchronizedHandler, Untyped,
 };
 use tokio::sync::{mpsc, Mutex};
 

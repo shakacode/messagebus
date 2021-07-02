@@ -7,7 +7,14 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{AsyncBatchHandler, Bus, Message, Untyped, buffer_unordered_batch_poller_macro, builder::ReceiverSubscriberBuilder, error::{Error, SendError, StdSyncSendError}, receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, receivers::{fix_type, Request}};
+use crate::{
+    buffer_unordered_batch_poller_macro,
+    builder::ReceiverSubscriberBuilder,
+    error::{Error, SendError, StdSyncSendError},
+    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type, Request},
+    AsyncBatchHandler, Bus, Message, Untyped,
+};
 
 use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
 use futures::{stream::FuturesUnordered, Future, StreamExt};
@@ -39,7 +46,8 @@ where
     srx: Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error> for BufferUnorderedBatchedAsync<M, R, T::Error>
+impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
+    for BufferUnorderedBatchedAsync<M, R, T::Error>
 where
     T: AsyncBatchHandler<M, Response = R> + 'static,
     T::Error: StdSyncSendError + Clone,

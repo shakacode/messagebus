@@ -5,11 +5,11 @@ use std::{
 };
 
 use crate::{
-    batch_synchronized_poller_macro, 
+    batch_synchronized_poller_macro,
     builder::ReceiverSubscriberBuilder,
-    error::{Error, StdSyncSendError, SendError}, 
-    receiver::{Action, Event, ReciveTypedReceiver, SendUntypedReceiver, SendTypedReceiver}, 
-    receivers::{fix_type, Request},
+    error::{Error, SendError, StdSyncSendError},
+    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receivers::{fix_type, fix_into_iter, Request},
     BatchSynchronizedHandler, Bus, Message, Untyped,
 };
 
@@ -44,7 +44,8 @@ where
     srx: parking_lot::Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
 }
 
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error> for SynchronizedBatchedSync<M, R, T::Error>
+impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
+    for SynchronizedBatchedSync<M, R, T::Error>
 where
     T: BatchSynchronizedHandler<M, Response = R> + 'static,
     T::Error: StdSyncSendError,
@@ -66,9 +67,8 @@ where
 
         let poller = Box::new(move |ut| {
             Box::new(move |bus| {
-                Box::pin(batch_synchronized_poller::<T, M, R>(
-                    rx, bus, ut, cfg, stx,
-                )) as Pin<Box<dyn Future<Output = ()> + Send>>
+                Box::pin(batch_synchronized_poller::<T, M, R>(rx, bus, ut, cfg, stx))
+                    as Pin<Box<dyn Future<Output = ()> + Send>>
             }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
         });
 

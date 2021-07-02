@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedBatchedAsync;
 pub use sync::BufferUnorderedBatchedSync;
+use serde_derive::{Serialize, Deserialize};
 
 #[derive(Debug)]
 pub struct BufferUnorderedBatchedStats {
@@ -16,7 +17,7 @@ pub struct BufferUnorderedBatchedStats {
     pub batch_size: AtomicU64,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedBatchedConfig {
     pub buffer_size: usize,
     pub max_parallel: usize,
@@ -145,7 +146,11 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                     }
                                     Err(er) => {
                                         for mid in mids {
-                                            stx.send(Event::Response(mid, Err(Error::Other(er.clone())))).ok();
+                                            stx.send(Event::Response(
+                                                mid,
+                                                Err(Error::Other(er.clone())),
+                                            ))
+                                            .ok();
                                         }
                                     }
                                 },
@@ -165,7 +170,8 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                 Poll::Pending => return Poll::Pending,
                                 Poll::Ready(resp) => {
                                     let resp: Result<_, $t::Error> = resp;
-                                    stx.send(Event::Synchronized(resp.map_err(Error::Other))).ok();
+                                    stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                                        .ok();
                                 }
                             }
                             need_sync = false;

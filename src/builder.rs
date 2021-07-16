@@ -1,9 +1,16 @@
-use std::{any::TypeId, collections::HashMap, marker::PhantomData, pin::Pin, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, pin::Pin, sync::Arc};
 
 use futures::{Future, FutureExt};
 use tokio::sync::Mutex;
 
-use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, Message, SynchronizedHandler, Untyped, error::StdSyncSendError, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}, receivers};
+use crate::{
+    envelop::TypeTag,
+    error::StdSyncSendError,
+    receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receivers, AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler,
+    AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler,
+    Message, SynchronizedHandler, Untyped,
+};
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
     SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
@@ -36,7 +43,7 @@ pub struct RegisterEntry<K, T, F, B> {
     payload: B,
     builder: F,
     receivers: HashMap<
-        TypeId,
+        TypeTag,
         Vec<(
             Receiver,
             Box<
@@ -55,7 +62,7 @@ impl<K, T: 'static, F, B> RegisterEntry<K, T, F, B>
 where
     F: FnMut(
         &mut B,
-        (TypeId, Receiver),
+        (TypeTag, Receiver),
         Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
     ),
@@ -65,7 +72,7 @@ where
             for (r, poller, poller2) in v {
                 let poller = poller(self.item.clone());
 
-                (self.builder)(&mut self.payload, (tid, r), poller, poller2);
+                (self.builder)(&mut self.payload, (tid.clone(), r), poller, poller2);
             }
         }
 
@@ -87,7 +94,7 @@ impl<T, F, B> RegisterEntry<UnsyncEntry, T, F, B> {
         let receiver = Receiver::new::<M, R, E, S>(queue, inner);
         let poller2 = receiver.start_polling_events::<R, E>();
         self.receivers
-            .entry(TypeId::of::<M>())
+            .entry(M::type_tag_())
             .or_insert_with(Vec::new)
             .push((receiver, poller, poller2));
 
@@ -99,6 +106,7 @@ impl<T, F, B> RegisterEntry<UnsyncEntry, T, F, B> {
     where
         T: SynchronizedHandler<M> + Send + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::SynchronizedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
@@ -108,24 +116,35 @@ impl<T, F, B> RegisterEntry<UnsyncEntry, T, F, B> {
     where
         T: AsyncSynchronizedHandler<M> + Send + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::SynchronizedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
 
     #[inline]
-    pub fn subscribe_batch_sync<M>(self, queue: u64, cfg: receivers::SynchronizedBatchedConfig) -> Self
+    pub fn subscribe_batch_sync<M>(
+        self,
+        queue: u64,
+        cfg: receivers::SynchronizedBatchedConfig,
+    ) -> Self
     where
         T: BatchSynchronizedHandler<M> + Send + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::SynchronizedBatchedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
 
     #[inline]
-    pub fn subscribe_batch_async<M>(self, queue: u64, cfg: receivers::SynchronizedBatchedConfig) -> Self
+    pub fn subscribe_batch_async<M>(
+        self,
+        queue: u64,
+        cfg: receivers::SynchronizedBatchedConfig,
+    ) -> Self
     where
         T: AsyncBatchSynchronizedHandler<M> + Send + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::SynchronizedBatchedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
@@ -145,7 +164,7 @@ impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
         let receiver = Receiver::new::<M, R, E, S>(queue, inner);
         let poller2 = receiver.start_polling_events::<R, E>();
         self.receivers
-            .entry(TypeId::of::<M>())
+            .entry(M::type_tag_())
             .or_insert_with(Vec::new)
             .push((receiver, poller, poller2));
 
@@ -157,6 +176,7 @@ impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
     where
         T: Handler<M> + Send + Sync + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::BufferUnorderedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
@@ -173,26 +193,36 @@ impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
     }
 
     #[inline]
-    pub fn subscribe_batch_sync<M>(self, queue: u64, cfg: receivers::BufferUnorderedBatchedConfig) -> Self
+    pub fn subscribe_batch_sync<M>(
+        self,
+        queue: u64,
+        cfg: receivers::BufferUnorderedBatchedConfig,
+    ) -> Self
     where
         T: BatchHandler<M> + Send + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::BufferUnorderedBatchedSync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
 
     #[inline]
-    pub fn subscribe_batch_async<M>(self, queue: u64, cfg: receivers::BufferUnorderedBatchedConfig) -> Self
+    pub fn subscribe_batch_async<M>(
+        self,
+        queue: u64,
+        cfg: receivers::BufferUnorderedBatchedConfig,
+    ) -> Self
     where
         T: AsyncBatchHandler<M> + Send + 'static,
         M: Message,
+        T::Response: Message,
     {
         self.subscribe::<M, receivers::BufferUnorderedBatchedAsync<M, T::Response, T::Error>, T::Response, T::Error>(queue, cfg)
     }
 }
 
 pub struct Module {
-    receivers: Vec<(TypeId, Receiver)>,
+    receivers: Vec<(TypeTag, Receiver)>,
     pollings: Vec<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
 }
 
@@ -212,7 +242,7 @@ impl Module {
         T,
         impl FnMut(
             &mut Self,
-            (TypeId, Receiver),
+            (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         ),
@@ -239,7 +269,7 @@ impl Module {
         T,
         impl FnMut(
             &mut Self,
-            (TypeId, Receiver),
+            (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         ),
@@ -285,7 +315,7 @@ impl BusBuilder {
         T,
         impl FnMut(
             &mut Self,
-            (TypeId, Receiver),
+            (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         ),
@@ -312,7 +342,7 @@ impl BusBuilder {
         T,
         impl FnMut(
             &mut Self,
-            (TypeId, Receiver),
+            (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
         ),

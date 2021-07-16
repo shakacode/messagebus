@@ -28,7 +28,7 @@ impl Handler<u32> for TmpReceiver {
 fn module() -> Module {
     Module::new()
         .register(TmpReceiver)
-            .subscribe_sync::<u32>(8, Default::default())
+        .subscribe_sync::<u32>(8, Default::default())
         .done()
 }
 

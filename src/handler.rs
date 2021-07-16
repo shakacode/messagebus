@@ -89,7 +89,11 @@ pub trait AsyncBatchSynchronizedHandler<M: Message>: Send {
     type InBatch: FromIterator<M> + Send;
     type OutBatch: IntoIterator<Item = Self::Response> + Send;
 
-    async fn handle(&mut self, msg: Self::InBatch, bus: &Bus) -> Result<Self::OutBatch, Self::Error>;
+    async fn handle(
+        &mut self,
+        msg: Self::InBatch,
+        bus: &Bus,
+    ) -> Result<Self::OutBatch, Self::Error>;
     async fn sync(&mut self, _bus: &Bus) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -135,7 +139,11 @@ pub trait LocalAsyncBatchHandler<M: Message> {
     type InBatch: FromIterator<M> + Send;
     type OutBatch: IntoIterator<Item = Self::Response> + Send;
 
-    async fn handle(&mut self, msg: Self::InBatch, bus: &Bus) -> Result<Self::OutBatch, Self::Error>;
+    async fn handle(
+        &mut self,
+        msg: Self::InBatch,
+        bus: &Bus,
+    ) -> Result<Self::OutBatch, Self::Error>;
     async fn sync(&mut self, _bus: &Bus) -> Result<(), Self::Error> {
         Ok(())
     }

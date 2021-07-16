@@ -1,14 +1,25 @@
-use std::{any::TypeId, borrow::Cow, collections::HashMap, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    any::TypeId,
+    borrow::Cow,
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use tokio::sync::oneshot::Sender;
 use sharded_slab::Slab;
+use tokio::sync::oneshot::Sender;
 
-use crate::{Bus, Message, envelop::SafeMessage, error::{Error, SendError}, receiver::Permit};
+use crate::{
+    error::{Error, SendError},
+    receiver::Permit,
+    Bus, Message,
+};
 
 pub trait RelayTrait {
-    // fn handle_message(&self, mid: u64, msg: &dyn SafeMessage, tx: Option<Sender<>>, bus: &Bus);
-    fn start_relay(&self, bus: &Bus) -> Result<(), Error> ;
-    fn stop_relay(&self);
+    type Context;
+    // fn handle_message(&self, mid: u64, msg: &dyn SafeMessage, ctx: Self::Context, bus: &Bus);
+    // fn handle_request(&self, mid: u64, msg: &dyn SafeMessage, ctx: Self::Context, bus: &Bus);
+    fn start_relay(&self, bus: &Bus) -> Result<Self::Context, Error>;
+    fn stop_relay(&self, ctx: Self::Context);
 }
 
 pub struct Relay {

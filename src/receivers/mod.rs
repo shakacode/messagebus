@@ -29,7 +29,9 @@ where
 }
 
 #[inline(always)]
-pub(crate) fn fix_into_iter<I, T: IntoIterator<Item = I> + Send>(x: T) -> impl IntoIterator<Item = I> + Send {
+pub(crate) fn fix_into_iter<I, T: IntoIterator<Item = I> + Send>(
+    x: T,
+) -> impl IntoIterator<Item = I> + Send {
     x
 }
 

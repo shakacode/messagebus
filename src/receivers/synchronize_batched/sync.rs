@@ -9,7 +9,7 @@ use crate::{
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
     receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, fix_into_iter, Request},
+    receivers::{fix_into_iter, fix_type, Request},
     BatchSynchronizedHandler, Bus, Message, Untyped,
 };
 

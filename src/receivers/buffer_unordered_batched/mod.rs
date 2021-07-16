@@ -4,8 +4,8 @@ mod sync;
 use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedBatchedAsync;
+use serde_derive::{Deserialize, Serialize};
 pub use sync::BufferUnorderedBatchedSync;
-use serde_derive::{Serialize, Deserialize};
 
 #[derive(Debug)]
 pub struct BufferUnorderedBatchedStats {

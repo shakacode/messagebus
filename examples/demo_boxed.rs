@@ -1,8 +1,11 @@
 use async_trait::async_trait;
-use messagebus::{derive::Message, error, AsyncHandler, Bus, Handler, Message, TypeTagged};
+use messagebus::{
+    derive::{Error as MbError, Message},
+    error, AsyncHandler, Bus, Handler, Message,
+};
 use thiserror::Error;
 
-#[derive(Debug, Error, messagebus::derive::Error)]
+#[derive(Debug, Error, MbError)]
 enum Error {
     #[error("Error({0})")]
     Error(anyhow::Error),
@@ -13,9 +16,6 @@ impl<M: Message> From<error::Error<M>> for Error {
         Self::Error(err.into())
     }
 }
-
-struct TmpReceiver;
-struct TmpReceiver2;
 
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
@@ -37,15 +37,18 @@ struct MsgI32(i32);
 #[message(clone)]
 struct MsgI16(i16);
 
+struct TmpReceiver;
+struct TmpReceiver2;
+
 #[async_trait]
 impl AsyncHandler<MsgF32> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
     async fn handle(&self, msg: MsgF32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgU16(1)).await?;
+        bus.send(MsgU16(1u16)).await?;
 
-        println!("TmpReceiver ---> {:?} {}", msg, msg.type_tag());
+        println!("TmpReceiver ---> {:?}", msg);
 
         Ok(())
     }
@@ -63,7 +66,7 @@ impl AsyncHandler<MsgU16> for TmpReceiver {
     type Response = ();
 
     async fn handle(&self, msg: MsgU16, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgU32(2)).await?;
+        bus.send(MsgU32(2u32)).await?;
         println!("TmpReceiver ---> {:?}", msg);
 
         Ok(())
@@ -82,7 +85,7 @@ impl AsyncHandler<MsgU32> for TmpReceiver {
     type Response = ();
 
     async fn handle(&self, msg: MsgU32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgI32(3)).await?;
+        bus.send(MsgI32(3i32)).await?;
         println!("TmpReceiver ---> {:?}", msg);
 
         Ok(())
@@ -100,7 +103,7 @@ impl AsyncHandler<MsgI32> for TmpReceiver {
     type Response = ();
 
     async fn handle(&self, msg: MsgI32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgI16(4)).await?;
+        bus.send(MsgI16(4i16)).await?;
         println!("TmpReceiver ---> {:?}", msg);
 
         Ok(())
@@ -138,7 +141,7 @@ impl AsyncHandler<MsgI32> for TmpReceiver2 {
     async fn handle(&self, msg: MsgI32, bus: &Bus) -> Result<Self::Response, Self::Error> {
         println!("TmpReceiver2: ---> {:?}", msg);
 
-        bus.send(MsgI16(5)).await?;
+        bus.send(MsgI16(5i16)).await?;
 
         Ok(())
     }
@@ -184,7 +187,16 @@ async fn main() {
         .done()
         .build();
 
-    b.send(MsgF32(0.)).await.unwrap();
+    b.send(MsgF32(0f32)).await.unwrap();
+    println!("flush");
+
+    b.flush().await;
+
+    println!("sending boxed variant");
+
+    b.send_boxed(Box::new(MsgF32(0f32)), Default::default())
+        .await
+        .unwrap();
 
     println!("flush");
     b.flush().await;

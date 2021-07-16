@@ -2,12 +2,13 @@ use core::f32;
 
 use async_trait::async_trait;
 use messagebus::{
+    derive::Message,
     error::{self, StdSyncSendError},
     AsyncHandler, Bus, Message,
 };
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, messagebus::derive::Error)]
 enum Error {
     #[error("Error({0})")]
     Error(anyhow::Error),
@@ -19,19 +20,55 @@ impl<M: Message, E: StdSyncSendError> From<error::Error<M, E>> for Error {
     }
 }
 
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgF64(pub f64);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgF32(pub f32);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgI32(pub i32);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgU32(pub u32);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgU16(pub u16);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgI16(pub i16);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgU8(pub u8);
+
+#[derive(Debug, Clone, Message)]
+#[message(clone)]
+struct MsgI8(pub i8);
+
 struct TmpReceiver1;
 struct TmpReceiver2;
 
 #[async_trait]
-impl AsyncHandler<i32> for TmpReceiver1 {
+impl AsyncHandler<MsgI32> for TmpReceiver1 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: i32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        let resp1 = bus.request::<_, f32>(10i16, Default::default()).await?;
-        let resp2 = bus.request::<_, f32>(20u16, Default::default()).await?;
+    async fn handle(&self, msg: MsgI32, bus: &Bus) -> Result<Self::Response, Self::Error> {
+        let resp1 = bus
+            .request::<_, MsgF32>(MsgI16(10i16), Default::default())
+            .await?;
+        let resp2 = bus
+            .request::<_, MsgF32>(MsgU16(20u16), Default::default())
+            .await?;
 
-        Ok(msg as f32 + resp1 + resp2)
+        Ok(MsgF32(msg.0 as f32 + resp1.0 + resp2.0))
     }
 
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
@@ -42,12 +79,12 @@ impl AsyncHandler<i32> for TmpReceiver1 {
 }
 
 #[async_trait]
-impl AsyncHandler<u32> for TmpReceiver1 {
+impl AsyncHandler<MsgU32> for TmpReceiver1 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: u32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        Ok(msg as f32)
+    async fn handle(&self, msg: MsgU32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        Ok(MsgF32(msg.0 as _))
     }
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
         println!("TmpReceiver1 u32: sync");
@@ -57,15 +94,19 @@ impl AsyncHandler<u32> for TmpReceiver1 {
 }
 
 #[async_trait]
-impl AsyncHandler<i16> for TmpReceiver1 {
+impl AsyncHandler<MsgI16> for TmpReceiver1 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: i16, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        let resp1 = bus.request::<_, f32>(1i8, Default::default()).await?;
-        let resp2 = bus.request::<_, f32>(2u8, Default::default()).await?;
+    async fn handle(&self, msg: MsgI16, bus: &Bus) -> Result<Self::Response, Self::Error> {
+        let resp1 = bus
+            .request::<_, MsgF32>(MsgI8(1i8), Default::default())
+            .await?;
+        let resp2 = bus
+            .request::<_, MsgF32>(MsgU8(2u8), Default::default())
+            .await?;
 
-        Ok(msg as f32 + resp1 + resp2)
+        Ok(MsgF32(msg.0 as f32 + resp1.0 + resp2.0))
     }
 
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
@@ -76,12 +117,12 @@ impl AsyncHandler<i16> for TmpReceiver1 {
 }
 
 #[async_trait]
-impl AsyncHandler<u16> for TmpReceiver1 {
+impl AsyncHandler<MsgU16> for TmpReceiver1 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: u16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        Ok(msg as f32)
+    async fn handle(&self, msg: MsgU16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        Ok(MsgF32(msg.0 as _))
     }
 
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
@@ -92,12 +133,12 @@ impl AsyncHandler<u16> for TmpReceiver1 {
 }
 
 #[async_trait]
-impl AsyncHandler<i8> for TmpReceiver1 {
+impl AsyncHandler<MsgI8> for TmpReceiver1 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: i8, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        Ok(msg as f32)
+    async fn handle(&self, msg: MsgI8, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        Ok(MsgF32(msg.0 as _))
     }
 
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
@@ -108,12 +149,12 @@ impl AsyncHandler<i8> for TmpReceiver1 {
 }
 
 #[async_trait]
-impl AsyncHandler<u8> for TmpReceiver1 {
+impl AsyncHandler<MsgU8> for TmpReceiver1 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: u8, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        Ok(msg as f32)
+    async fn handle(&self, msg: MsgU8, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        Ok(MsgF32(msg.0 as _))
     }
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
         println!("TmpReceiver1 u8: sync");
@@ -123,16 +164,25 @@ impl AsyncHandler<u8> for TmpReceiver1 {
 }
 
 #[async_trait]
-impl AsyncHandler<f64> for TmpReceiver2 {
+impl AsyncHandler<MsgF64> for TmpReceiver2 {
     type Error = Error;
-    type Response = f64;
+    type Response = MsgF64;
 
-    async fn handle(&self, msg: f64, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        let resp1 = bus.request::<_, f32>(100i32, Default::default()).await? as f64;
-        let resp2 = bus.request::<_, f32>(200u32, Default::default()).await? as f64;
-        let resp3 = bus.request::<_, f32>(300f32, Default::default()).await? as f64;
+    async fn handle(&self, msg: MsgF64, bus: &Bus) -> Result<Self::Response, Self::Error> {
+        let resp1 = bus
+            .request::<_, MsgF32>(MsgI32(100i32), Default::default())
+            .await?
+            .0 as f64;
+        let resp2 = bus
+            .request::<_, MsgF32>(MsgU32(200u32), Default::default())
+            .await?
+            .0 as f64;
+        let resp3 = bus
+            .request::<_, MsgF32>(MsgF32(300f32), Default::default())
+            .await?
+            .0 as f64;
 
-        Ok(msg + resp1 + resp2 + resp3)
+        Ok(MsgF64(msg.0 + resp1 + resp2 + resp3))
     }
 
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
@@ -143,11 +193,11 @@ impl AsyncHandler<f64> for TmpReceiver2 {
 }
 
 #[async_trait]
-impl AsyncHandler<f32> for TmpReceiver2 {
+impl AsyncHandler<MsgF32> for TmpReceiver2 {
     type Error = Error;
-    type Response = f32;
+    type Response = MsgF32;
 
-    async fn handle(&self, msg: f32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+    async fn handle(&self, msg: MsgF32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
         Ok(msg)
     }
     async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
@@ -161,22 +211,28 @@ impl AsyncHandler<f32> for TmpReceiver2 {
 async fn main() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver1)
-            .subscribe_async::<i32>(8, Default::default())
-            .subscribe_async::<u32>(8, Default::default())
-            .subscribe_async::<i16>(8, Default::default())
-            .subscribe_async::<u16>(8, Default::default())
-            .subscribe_async::<i8>(8, Default::default())
-            .subscribe_async::<u8>(8, Default::default())
+        .subscribe_async::<MsgI32>(8, Default::default())
+        .subscribe_async::<MsgU32>(8, Default::default())
+        .subscribe_async::<MsgI16>(8, Default::default())
+        .subscribe_async::<MsgU16>(8, Default::default())
+        .subscribe_async::<MsgI8>(8, Default::default())
+        .subscribe_async::<MsgU8>(8, Default::default())
         .done()
         .register(TmpReceiver2)
-            .subscribe_async::<f32>(8, Default::default())
-            .subscribe_async::<f64>(8, Default::default())
+        .subscribe_async::<MsgF32>(8, Default::default())
+        .subscribe_async::<MsgF64>(8, Default::default())
         .done()
         .build();
 
     println!(
-        "{:?}",
-        b.request_local_we::<_, f64, Error>(1000f64, Default::default())
+        "plain {:?}",
+        b.request_we::<_, MsgF64, Error>(MsgF64(1000f64), Default::default())
+            .await
+    );
+
+    println!(
+        "boxed {:?}",
+        b.request_boxed(Box::new(MsgF64(1000.)), Default::default())
             .await
     );
 

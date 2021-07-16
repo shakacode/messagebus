@@ -4,21 +4,25 @@ pub mod error;
 mod handler;
 mod receiver;
 pub mod receivers;
-mod trait_object;
 pub mod relay;
+mod trait_object;
 
 #[macro_use]
 extern crate log;
 
+pub mod derive {
+    pub use messagebus_derive::*;
+}
+
 use crate::receiver::Permit;
 use builder::BusBuilder;
 pub use builder::Module;
-pub use relay::RelayTrait;
-use core::any::{Any, TypeId};
-pub use envelop::{BoxedMessage, TransferableMessage, Message};
+use core::any::Any;
+pub use envelop::{Message, SharedMessage, TypeTag, TypeTagged};
 use error::{Error, SendError, StdSyncSendError};
 pub use handler::*;
 use receiver::Receiver;
+pub use relay::RelayTrait;
 use smallvec::SmallVec;
 use std::{
     collections::HashMap,
@@ -48,12 +52,12 @@ impl Default for SendOptions {
 }
 
 pub struct BusInner {
-    receivers: HashMap<TypeId, SmallVec<[Receiver; 4]>>,
+    receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
 }
 
 impl BusInner {
-    pub(crate) fn new(input: Vec<(TypeId, Receiver)>) -> Self {
+    pub(crate) fn new(input: Vec<(TypeTag, Receiver)>) -> Self {
         let mut receivers = HashMap::new();
 
         for (key, value) in input {
@@ -136,11 +140,11 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn try_send<M: TransferableMessage + Clone>(&self, msg: M) -> Result<(), Error<M>> {
+    pub fn try_send<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.try_send_ext(msg, SendOptions::Broadcast)
     }
 
-    pub fn try_send_ext<M: TransferableMessage + Clone>(
+    pub fn try_send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
@@ -149,10 +153,10 @@ impl BusInner {
             return Err(SendError::Closed(msg).into());
         }
 
+        let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tid = TypeId::of::<M>();
 
-        if let Some(rs) = self.receivers.get(&tid) {
+        if let Some(rs) = self.receivers.get(&tt) {
             let permits = if let Some(x) = self.try_reserve(rs) {
                 x
             } else {
@@ -185,12 +189,12 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn send_blocking<M: TransferableMessage + Clone>(&self, msg: M) -> Result<(), Error<M>> {
+    pub fn send_blocking<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.send_blocking_ext(msg, SendOptions::Broadcast)
     }
 
     #[inline]
-    pub fn send_blocking_ext<M: TransferableMessage + Clone>(
+    pub fn send_blocking_ext<M: Message + Clone>(
         &self,
         msg: M,
         options: SendOptions,
@@ -199,11 +203,11 @@ impl BusInner {
     }
 
     #[inline]
-    pub async fn send<M: TransferableMessage + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
+    pub async fn send<M: Message + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
         Ok(self.send_ext(msg, SendOptions::Broadcast).await?)
     }
 
-    pub async fn send_ext<M: TransferableMessage + Clone>(
+    pub async fn send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
@@ -212,10 +216,10 @@ impl BusInner {
             return Err(SendError::Closed(msg).into());
         }
 
+        let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tid = TypeId::of::<M>();
 
-        if let Some(rs) = self.receivers.get(&tid) {
+        if let Some(rs) = self.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
                     let _ = r.send(mid, msg.clone(), r.reserve().await);
@@ -236,11 +240,11 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn force_send<M: TransferableMessage + Clone>(&self, msg: M) -> Result<(), Error<M>> {
+    pub fn force_send<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.force_send_ext(msg, SendOptions::Broadcast)
     }
 
-    pub fn force_send_ext<M: TransferableMessage + Clone>(
+    pub fn force_send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
@@ -249,10 +253,10 @@ impl BusInner {
             return Err(SendError::Closed(msg).into());
         }
 
+        let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tid = TypeId::of::<M>();
 
-        if let Some(rs) = self.receivers.get(&tid) {
+        if let Some(rs) = self.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
                     let _ = r.force_send(mid, msg.clone());
@@ -273,15 +277,15 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn try_send_one<M: TransferableMessage>(&self, msg: M) -> Result<(), Error<M>> {
+    pub fn try_send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
+        let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tid = TypeId::of::<M>();
 
-        if let Some(rs) = self.receivers.get(&tid).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
             let permits = if let Some(x) = rs.try_reserve() {
                 x
             } else {
@@ -294,30 +298,15 @@ impl BusInner {
         }
     }
 
-    pub async fn send_one<M: TransferableMessage>(&self, msg: M) -> Result<(), Error<M>> {
+    pub async fn send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
+        let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tid = TypeId::of::<M>();
 
-        if let Some(rs) = self.receivers.get(&tid).and_then(|rs| rs.first()) {
-            Ok(rs.send(mid, msg, rs.reserve().await)?)
-        } else {
-            Err(Error::NoReceivers)
-        }
-    }
-
-    pub async fn send_local_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(SendError::Closed(msg).into());
-        }
-
-        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tid = TypeId::of::<M>();
-
-        if let Some(rs) = self.receivers.get(&tid).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
             Ok(rs.send(mid, msg, rs.reserve().await)?)
         } else {
             Err(Error::NoReceivers)
@@ -325,19 +314,19 @@ impl BusInner {
     }
 
     #[inline]
-    pub fn send_one_blocking<M: TransferableMessage>(&self, msg: M) -> Result<(), Error<M>> {
+    pub fn send_one_blocking<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
         futures::executor::block_on(self.send_one(msg))
     }
 
-    pub async fn request<M: TransferableMessage, R: TransferableMessage>(
+    pub async fn request<M: Message, R: Message>(
         &self,
         req: M,
         options: SendOptions,
     ) -> Result<R, Error<M>> {
-        let tid = TypeId::of::<M>();
-        let rid = TypeId::of::<R>();
+        let tid = req.type_tag();
+        let rid = R::type_tag_();
 
-        let mut iter = self.select_receivers(tid, options, Some(rid), None);
+        let mut iter = self.select_receivers(&tid, options, Some(&rid), None);
         if let Some(rc) = iter.next() {
             let (tx, rx) = oneshot::channel();
             let mid = (rc.add_response_waiter(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
@@ -349,17 +338,17 @@ impl BusInner {
         }
     }
 
-    pub async fn request_local_we<M, R, E>(&self, req: M, options: SendOptions) -> Result<R, Error<M, E>>
+    pub async fn request_we<M, R, E>(&self, req: M, options: SendOptions) -> Result<R, Error<M, E>>
     where
         M: Message,
         R: Message,
         E: StdSyncSendError,
     {
-        let tid = TypeId::of::<M>();
-        let rid = TypeId::of::<R>();
-        let eid = TypeId::of::<E>();
+        let tid = M::type_tag_();
+        let rid = R::type_tag_();
+        let eid = E::type_tag_();
 
-        let mut iter = self.select_receivers(tid, options, Some(rid), Some(eid));
+        let mut iter = self.select_receivers(&tid, options, Some(&rid), Some(&eid));
         if let Some(rc) = iter.next() {
             let (tx, rx) = oneshot::channel();
             let mid = (rc.add_response_waiter_we(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
@@ -371,23 +360,94 @@ impl BusInner {
         }
     }
 
-    #[inline]
-    fn select_receivers(
+    pub async fn send_boxed(
         &self,
-        tid: TypeId,
+        msg: Box<dyn Message>,
         _options: SendOptions,
-        rid: Option<TypeId>,
-        eid: Option<TypeId>,
-    ) -> impl Iterator<Item = &Receiver> + '_ {
+    ) -> Result<(), Error<Box<dyn Message>>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(msg).into());
+        }
+
+        let tt = msg.type_tag();
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        if let Some(rs) = self.receivers.get(&tt) {
+            if let Some((last, head)) = rs.split_last() {
+                for r in head {
+                    let _ = r.send_boxed(mid, msg.try_clone_boxed().unwrap(), r.reserve().await);
+                }
+
+                let _ = last.send_boxed(mid, msg, last.reserve().await);
+
+                return Ok(());
+            }
+        }
+
+        warn!("Unhandled message: no receivers");
+
+        Ok(())
+    }
+
+    pub async fn send_boxed_one(
+        &self,
+        msg: Box<dyn Message>,
+        _options: SendOptions,
+    ) -> Result<(), Error<Box<dyn Message>>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(msg).into());
+        }
+
+        let tt = msg.type_tag();
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
+            Ok(rs.send_boxed(mid, msg, rs.reserve().await)?)
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
+    pub async fn request_boxed(
+        &self,
+        req: Box<dyn Message>,
+        options: SendOptions,
+    ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(req).into());
+        }
+
+        let tt = req.type_tag();
+
+        let mut iter = self.select_receivers(&tt, options, None, None);
+        if let Some(rc) = iter.next() {
+            let (tx, rx) = oneshot::channel();
+            let mid = (rc.add_response_waiter_boxed(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
+            rc.send_boxed(mid, req, rc.reserve().await)?;
+
+            rx.await?.map_err(|x| x.specify::<Box<dyn Message>>())
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
+    #[inline]
+    fn select_receivers<'a, 'b: 'a, 'c: 'a, 'd: 'a>(
+        &'a self,
+        tid: &'b TypeTag,
+        _options: SendOptions,
+        rid: Option<&'c TypeTag>,
+        eid: Option<&'d TypeTag>,
+    ) -> impl Iterator<Item = &Receiver> + 'a {
         self.receivers
-            .get(&tid)
+            .get(tid)
             .into_iter()
             .map(|item| item.iter())
             .flatten()
             .filter(move |x| match (rid, eid) {
-                (Some(r), Some(e)) => x.resp_type_id() == r && x.err_type_id() == e,
-                (Some(r), None) => x.resp_type_id() == r,
-                (None, Some(e)) => x.err_type_id() == e,
+                (Some(r), Some(e)) => x.resp_type_tag() == r && x.err_type_tag() == e,
+                (Some(r), None) => x.resp_type_tag() == r,
+                (None, Some(e)) => x.err_type_tag() == e,
                 (None, None) => true,
             })
     }

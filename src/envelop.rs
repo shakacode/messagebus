@@ -4,12 +4,8 @@ use std::any::type_name;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-#[derive(Debug, Copy, Clone)]
-#[repr(C)]
-pub struct TraitObject {
-    pub data: *mut (),
-    pub vtable: *mut (),
-}
+pub trait MessageBounds: fmt::Debug + Unpin + Send + Sync + 'static {}
+impl<T: fmt::Debug + Unpin + Send + Sync + 'static> MessageBounds for T {}
 
 pub type TypeTag = Cow<'static, str>;
 
@@ -22,7 +18,7 @@ pub trait TypeTagged {
     fn type_name(&self) -> Cow<str>;
 }
 
-pub trait Message: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static {
+pub trait Message: TypeTagged + MessageBounds {
     fn as_any_ref(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn as_any_boxed(self: Box<Self>) -> Box<dyn Any>;
@@ -46,6 +42,19 @@ impl TypeTagged for () {
     }
     fn type_name(&self) -> Cow<str> {
         type_name::<Self>().into()
+    }
+}
+
+impl<T: TypeTagged> TypeTagged for Arc<T> {
+    fn type_tag_() -> TypeTag {
+        T::type_tag_()
+    }
+
+    fn type_tag(&self) -> TypeTag {
+        T::type_tag(&*self)
+    }
+    fn type_name(&self) -> Cow<str> {
+        T::type_name(&*self)
     }
 }
 
@@ -89,6 +98,47 @@ impl Message for () {
         Some(Box::new(self.clone()))
     }
 }
+
+// impl<T: Message> Message for Arc<T> {
+//     fn as_any_ref(&self) -> &dyn Any {
+//         T::as_any_ref(&*self)
+//     }
+//     fn as_any_mut(&mut self) -> &mut dyn Any {
+//         unimplemented!()
+//     }
+//     fn as_any_boxed(self: Box<Self>) -> Box<dyn Any> {
+//         unimplemented!()
+//     }
+//     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any> {
+//         self
+//     }
+
+//     fn as_shared_ref(&self) -> Option<&dyn SharedMessage> {
+//         Some(self)
+//     }
+//     fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
+//         Some(self)
+//     }
+//     fn as_shared_boxed(self: Box<Self>) -> Option<Box<dyn SharedMessage>> {
+//         Some(self)
+//     }
+//     fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
+//         Some(self)
+//     }
+//     fn try_clone_into(&self, into: &mut dyn Any) -> bool {
+//         let into = if let Some(inner) = into.downcast_mut::<Option<()>>() {
+//             inner
+//         } else {
+//             return false;
+//         };
+
+//         into.replace(self.clone());
+//         true
+//     }
+//     fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
+//         Some(Box::new(self.clone()))
+//     }
+// }
 
 pub trait IntoBoxedMessage {
     fn into_boxed(self) -> Box<dyn Message>;

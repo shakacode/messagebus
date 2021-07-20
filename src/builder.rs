@@ -5,11 +5,11 @@ use tokio::sync::Mutex;
 
 use crate::{
     envelop::TypeTag,
-    error::StdSyncSendError,
+    error::{Error, StdSyncSendError},
     receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
     receivers, AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler,
     AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler,
-    Message, SynchronizedHandler, Untyped,
+    IntoBoxedMessage, Message, SynchronizedHandler, Untyped,
 };
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
@@ -221,7 +221,26 @@ impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
     }
 }
 
+pub struct MessageTypeDescriptor {
+    de: Box<
+        dyn Fn(&mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn Message>, Error>
+            + Send
+            + Sync,
+    >,
+}
+
+impl MessageTypeDescriptor {
+    #[inline]
+    pub async fn deserialize_boxed(
+        &self,
+        de: &mut dyn erased_serde::Deserializer<'_>,
+    ) -> Result<Box<dyn Message>, Error> {
+        (self.de)(de)
+    }
+}
+
 pub struct Module {
+    message_types: Vec<(TypeTag, MessageTypeDescriptor)>,
     receivers: Vec<(TypeTag, Receiver)>,
     pollings: Vec<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
 }
@@ -229,9 +248,25 @@ pub struct Module {
 impl Module {
     pub fn new() -> Self {
         Self {
+            message_types: Vec::new(),
             receivers: Vec::new(),
             pollings: Vec::new(),
         }
+    }
+
+    pub fn register_shared_message<
+        M: Message + Clone + serde::Serialize + serde::de::DeserializeOwned,
+    >(
+        mut self,
+    ) -> Self {
+        self.message_types.push((
+            M::type_tag_(),
+            MessageTypeDescriptor {
+                de: Box::new(move |de| Ok(M::deserialize(de)?.into_boxed())),
+            },
+        ));
+
+        self
     }
 
     pub fn register<T: Send + Sync + 'static>(
@@ -289,6 +324,7 @@ impl Module {
     }
 
     pub fn add_module(mut self, module: Module) -> Self {
+        self.message_types.extend(module.message_types);
         self.receivers.extend(module.receivers);
         self.pollings.extend(module.pollings);
 
@@ -305,6 +341,16 @@ impl BusBuilder {
         Self {
             inner: Module::new(),
         }
+    }
+
+    pub fn register_shared_message<
+        M: Message + Clone + serde::Serialize + serde::de::DeserializeOwned,
+    >(
+        self,
+    ) -> Self {
+        let inner = self.inner.register_shared_message::<M>();
+
+        BusBuilder { inner }
     }
 
     pub fn register<T: Send + Sync + 'static>(
@@ -369,7 +415,10 @@ impl BusBuilder {
 
     pub fn build(self) -> (Bus, impl Future<Output = ()>) {
         let bus = Bus {
-            inner: Arc::new(BusInner::new(self.inner.receivers)),
+            inner: Arc::new(BusInner::new(
+                self.inner.receivers,
+                self.inner.message_types,
+            )),
         };
 
         let mut futs = Vec::with_capacity(self.inner.pollings.len() * 2);

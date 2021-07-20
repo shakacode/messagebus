@@ -207,8 +207,8 @@ impl AsyncHandler<MsgF32> for TmpReceiver2 {
     }
 }
 
-#[tokio::main]
-async fn main() {
+#[tokio::test]
+async fn test() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver1)
         .subscribe_async::<MsgI32>(8, Default::default())
@@ -224,26 +224,22 @@ async fn main() {
         .done()
         .build();
 
-    println!(
-        "plain {:?}",
-        b.request_we::<_, MsgF64, Error>(MsgF64(1000f64), Default::default())
-            .await
-    );
+    let we_res = b
+        .request_we::<_, MsgF64, Error>(MsgF64(1000f64), Default::default())
+        .await
+        .unwrap();
 
-    println!(
-        "boxed {:?}",
-        b.request_boxed(Box::new(MsgF64(1000.)), Default::default())
-            .await
-    );
+    assert_eq!(we_res.0, 1633.0f64);
 
-    println!("flush");
+    let boxed_res = b
+        .request_boxed(Box::new(MsgF64(1000.)), Default::default())
+        .await
+        .unwrap();
+
+    let val = boxed_res.as_any_ref().downcast_ref::<MsgF64>().unwrap().0;
+    assert_eq!(val, 1633.0);
+
     b.flush().await;
-
-    println!("close");
     b.close().await;
-
-    println!("closed");
-
     poller.await;
-    println!("[done]");
 }

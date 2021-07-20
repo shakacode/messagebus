@@ -78,6 +78,9 @@ pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = VoidError> {
 
     #[error("WrongMessageType()")]
     WrongMessageType(M),
+
+    #[error("TypeTagNotRegistered({0})")]
+    TypeTagNotRegistered(TypeTag),
 }
 
 impl<M: Message, E: StdSyncSendError> Error<M, E> {
@@ -92,6 +95,7 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::WrongMessageType(inner) => Error::WrongMessageType(inner),
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
+            Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
         }
     }
 
@@ -106,6 +110,7 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::WrongMessageType(inner) => Error::WrongMessageType(inner),
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
+            Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
         }
     }
 }
@@ -122,6 +127,7 @@ impl<E: StdSyncSendError> Error<(), E> {
             Error::OtherBoxed(inner) => Error::OtherBoxed(inner),
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
+            Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
         }
     }
 }
@@ -149,6 +155,7 @@ impl Error<Box<dyn Message>> {
             Error::OtherBoxed(inner) => Error::OtherBoxed(inner),
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
+            Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
         }
     }
 }

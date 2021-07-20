@@ -15,10 +15,10 @@ pub mod derive {
 }
 
 use crate::receiver::Permit;
-use builder::BusBuilder;
 pub use builder::Module;
+use builder::{BusBuilder, MessageTypeDescriptor};
 use core::any::Any;
-pub use envelop::{Message, SharedMessage, TypeTag, TypeTagged};
+pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 use error::{Error, SendError, StdSyncSendError};
 pub use handler::*;
 use receiver::Receiver;
@@ -52,13 +52,18 @@ impl Default for SendOptions {
 }
 
 pub struct BusInner {
+    message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
 }
 
 impl BusInner {
-    pub(crate) fn new(input: Vec<(TypeTag, Receiver)>) -> Self {
+    pub(crate) fn new(
+        input: Vec<(TypeTag, Receiver)>,
+        mt: Vec<(TypeTag, MessageTypeDescriptor)>,
+    ) -> Self {
         let mut receivers = HashMap::new();
+        let message_types: HashMap<TypeTag, MessageTypeDescriptor> = mt.into_iter().collect();
 
         for (key, value) in input {
             receivers
@@ -68,6 +73,7 @@ impl BusInner {
         }
 
         Self {
+            message_types,
             receivers,
             closed: AtomicBool::new(false),
         }
@@ -429,6 +435,66 @@ impl BusInner {
         } else {
             Err(Error::NoReceivers)
         }
+    }
+
+    pub async fn send_deserialize_one<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        tt: TypeTag,
+        de: &'b mut dyn erased_serde::Deserializer<'c>,
+        _options: SendOptions,
+    ) -> Result<(), Error<Box<dyn Message>>> {
+        if self.closed.load(Ordering::SeqCst) {
+            println!("closed message bus");
+            return Err(Error::NoResponse);
+        }
+
+        let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
+            let msg = self.deserialize_message(tt.clone(), de).await?;
+            Ok(rs.send_boxed(mid, msg, rs.reserve().await)?)
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
+    pub async fn request_deserialize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        tt: TypeTag,
+        de: &'b mut dyn erased_serde::Deserializer<'c>,
+        options: SendOptions,
+    ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
+        if self.closed.load(Ordering::SeqCst) {
+            println!("closed message bus");
+            return Err(Error::NoResponse);
+        }
+
+        let mut iter = self.select_receivers(&tt, options, None, None);
+        if let Some(rc) = iter.next() {
+            let (tx, rx) = oneshot::channel();
+            let mid = (rc.add_response_waiter_boxed(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
+            let msg = self.deserialize_message(tt.clone(), de).await?;
+            rc.send_boxed(mid, msg, rc.reserve().await)?;
+
+            rx.await?.map_err(|x| x.specify::<Box<dyn Message>>())
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
+    async fn deserialize_message<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        tt: TypeTag,
+        de: &'b mut dyn erased_serde::Deserializer<'c>,
+    ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
+        let md = self
+            .message_types
+            .get(&tt)
+            .ok_or_else(|| Error::TypeTagNotRegistered(tt))?;
+
+        md.deserialize_boxed(de)
+            .await
+            .map_err(|err| err.specify::<Box<dyn Message>>())
     }
 
     #[inline]

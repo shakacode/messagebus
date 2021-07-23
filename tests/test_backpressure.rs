@@ -27,18 +27,14 @@ impl AsyncHandler<MsgF32> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgF32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("---> f32 {:?}", msg);
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        println!("done");
+    async fn handle(&self, _msg: MsgF32, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        std::thread::sleep(std::time::Duration::from_millis(100));
         Ok(())
     }
 }
 
-#[tokio::main]
-async fn main() {
+#[tokio::test]
+async fn test_backpressure() {
     let (b, poller) = Bus::build()
         .register(TmpReceiver)
         .subscribe_async::<MsgF32>(
@@ -51,47 +47,12 @@ async fn main() {
         .done()
         .build();
 
-    println!("sending 1");
+    b.send(MsgF32(32f32)).await.unwrap();
     b.send(MsgF32(32f32)).await.unwrap();
 
-    println!("sending 2");
-    b.send(MsgF32(32f32)).await.unwrap();
+    assert!(b.try_send(MsgF32(32f32)).is_err());
 
-    println!("sending 3");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 4");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 5");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 6");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 7");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 8");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 9");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 10");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("sending 11");
-    b.send(MsgF32(32f32)).await.unwrap();
-
-    println!("flush");
     b.flush().await;
-
-    println!("close");
     b.close().await;
-
-    println!("closed");
-
     poller.await;
-    println!("[done]");
 }

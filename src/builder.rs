@@ -52,7 +52,7 @@ pub struct RegisterEntry<K, T, F, B> {
                 )
                     -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
             >,
-            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
         )>,
     >,
     _m: PhantomData<(K, T)>,
@@ -64,7 +64,7 @@ where
         &mut B,
         (TypeTag, Receiver),
         Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-        Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+        Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
     ),
 {
     pub fn done(mut self) -> B {
@@ -231,7 +231,7 @@ pub struct MessageTypeDescriptor {
 
 impl MessageTypeDescriptor {
     #[inline]
-    pub async fn deserialize_boxed(
+    pub fn deserialize_boxed(
         &self,
         de: &mut dyn erased_serde::Deserializer<'_>,
     ) -> Result<Box<dyn Message>, Error> {
@@ -269,6 +269,10 @@ impl Module {
         self
     }
 
+    pub fn register_relay<T: Send + Sync + 'static, P: IntoIterator<Item = TypeTag>>(pat: P, obj: T) {
+        
+    }
+
     pub fn register<T: Send + Sync + 'static>(
         self,
         item: T,
@@ -279,7 +283,7 @@ impl Module {
             &mut Self,
             (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
         ),
         Self,
     > {
@@ -289,7 +293,9 @@ impl Module {
             builder: |p: &mut Self, val, poller, poller2| {
                 p.receivers.push(val);
                 p.pollings.push(poller);
-                p.pollings.push(poller2);
+                if let Some(poller2)  = poller2 {
+                    p.pollings.push(poller2);
+                }
             },
             receivers: HashMap::new(),
             _m: Default::default(),
@@ -306,7 +312,7 @@ impl Module {
             &mut Self,
             (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
         ),
         Self,
     > {
@@ -316,7 +322,9 @@ impl Module {
             builder: |p: &mut Self, val, poller, poller2| {
                 p.receivers.push(val);
                 p.pollings.push(poller);
-                p.pollings.push(poller2);
+                if let Some(poller2)  = poller2 {
+                    p.pollings.push(poller2);
+                }
             },
             receivers: HashMap::new(),
             _m: Default::default(),
@@ -363,7 +371,7 @@ impl BusBuilder {
             &mut Self,
             (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
         ),
         Self,
     > {
@@ -373,7 +381,9 @@ impl BusBuilder {
             builder: |p: &mut Self, val, poller, poller2| {
                 p.inner.receivers.push(val);
                 p.inner.pollings.push(poller);
-                p.inner.pollings.push(poller2);
+                if let Some(poller2)  = poller2 {
+                    p.inner.pollings.push(poller2);
+                }
             },
             receivers: HashMap::new(),
             _m: Default::default(),
@@ -390,7 +400,7 @@ impl BusBuilder {
             &mut Self,
             (TypeTag, Receiver),
             Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-            Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
+            Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
         ),
         Self,
     > {
@@ -400,7 +410,10 @@ impl BusBuilder {
             builder: |p: &mut Self, val, poller, poller2| {
                 p.inner.receivers.push(val);
                 p.inner.pollings.push(poller);
-                p.inner.pollings.push(poller2);
+
+                if let Some(poller2)  = poller2 {
+                    p.inner.pollings.push(poller2);
+                }
             },
             receivers: HashMap::new(),
             _m: Default::default(),

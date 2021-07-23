@@ -1,133 +1,132 @@
-use std::{
-    any::TypeId,
-    borrow::Cow,
-    collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{Notify, oneshot};
+use crate::{Message, Permit, TypeTag, error::Error, receiver::{Action, AnyReceiver, AnyWrapperArc, AnyWrapperRef, ReceiverTrait, SendUntypedReceiver, Stats}};
 
-use sharded_slab::Slab;
-use tokio::sync::oneshot::Sender;
-
-use crate::{
-    error::{Error, SendError},
-    receiver::Permit,
-    Bus, Message,
-};
-
-pub trait RelayTrait {
-    type Context;
-    // fn handle_message(&self, mid: u64, msg: &dyn SafeMessage, ctx: Self::Context, bus: &Bus);
-    // fn handle_request(&self, mid: u64, msg: &dyn SafeMessage, ctx: Self::Context, bus: &Bus);
-    fn start_relay(&self, bus: &Bus) -> Result<Self::Context, Error>;
-    fn stop_relay(&self, ctx: Self::Context);
+struct SlabCfg;
+impl sharded_slab::Config for SlabCfg {
+    const RESERVED_BITS: usize = 1;
 }
 
-pub struct Relay {
-    in_map: HashMap<Cow<'static, str>, TypeId>,
-    out_map: HashMap<TypeId, Cow<'static, str>>,
-    // waiters: Slab<Sender<Result<R, Error<(), E>>>>,
-    queue_size: AtomicU64,
-    limit: u64,
+type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
+
+
+pub enum TypeTagKind {
+    Message,
+    Response,
+    Error,
 }
 
-impl Relay {
-    // pub async fn reserve(&self) -> Permit {
-    //     loop {
-    //         let count = self.queue_size.load(Ordering::Relaxed);
-    //         if count < self.limit {
-    //             let res = self.processing.compare_exchange(
-    //                 count,
-    //                 count + 1,
-    //                 Ordering::SeqCst,
-    //                 Ordering::SeqCst,
-    //             );
-    //             if res.is_ok() {
-    //                 break Permit {
-    //                     fuse: false,
-    //                     inner: self.context.clone(),
-    //                 };
-    //             }
+pub struct TypeDescriptor {
+    kind: TypeTagKind,
+    
+}
 
-    //             // continue
-    //         } else {
-    //             self.response.notified().await
-    //         }
-    //     }
-    // }
+pub struct TypeMap {
+    hash_map: HashMap<TypeTag, TypeDescriptor>
+}
 
-    // pub fn try_reserve(&self) -> Option<Permit> {
-    //     loop {
-    //         let count = self.processing.load(Ordering::Relaxed);
+pub(crate) struct RelayContext {
+    
+}
 
-    //         if count < self.limit {
-    //             let res = self.processing.compare_exchange(
-    //                 count,
-    //                 count + 1,
-    //                 Ordering::SeqCst,
-    //                 Ordering::SeqCst,
-    //             );
-    //             if res.is_ok() {
-    //                 break Some(Permit {
-    //                     fuse: false,
-    //                     inner: self.context.clone(),
-    //                 });
-    //             }
+pub(crate) struct RelayWrapper<S>
+where
+    S: 'static,
+{
+    inner: S,
+    context: Arc<RelayContext>,
+    waiters: Slab<oneshot::Sender<Result<Box<dyn Message>, Error>>>,
+}
+impl<S> RelayWrapper<S> {
+    pub fn new(inner: S, limit: u64) -> Self {
+        Self {
+            inner,
+            context: Arc::new(RelayContext {
 
-    //             // continue
-    //         } else {
-    //             break None;
-    //         }
-    //     }
-    // }
+            }),
+            waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
+        }
+    }
+}
+impl<S> ReceiverTrait for RelayWrapper<S>
+where
+    S: SendUntypedReceiver + 'static,
+{
+    fn name(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
 
-    // #[inline]
-    // pub fn send<M: Message>(
-    //     &self,
-    //     mid: u64,
-    //     msg: M,
-    //     mut permit: Permit,
-    // ) -> Result<(), SendError<M>> {
-    //     unimplemented!()
-    // }
+    fn typed(&self) -> Option<AnyReceiver<'_>> { None }
+    fn wrapper(&self) -> Option<AnyWrapperRef<'_>> { None }
+    fn wrapper_arc(self: Arc<Self>) -> Option<AnyWrapperArc> { None }
 
-    // #[inline]
-    // pub fn force_send<M: Message + Clone>(&self, mid: u64, msg: M) -> Result<(), SendError<M>> {
-    //     unimplemented!()
-    // }
+    fn send_boxed(
+        &self,
+        mid: u64,
+        boxed_msg: Box<dyn Message>,
+    ) -> Result<(), Error<Box<dyn Message>>> {
+        Ok(self.inner.send_msg(mid, boxed_msg)?)
+    }
 
-    // #[inline]
-    // pub fn need_flush(&self) -> bool {
-    //     self.context.need_flush.load(Ordering::SeqCst)
-    // }
+    fn need_flush(&self) -> bool {
+        false
+    }
 
-    // #[inline]
-    // pub async fn close(&self) {
-    //     let notified = self.context.closed.notified();
-    //     if self.inner.close().is_ok() {
-    //         notified.await;
-    //     } else {
-    //         warn!("close failed!");
-    //     }
-    // }
+    fn stats(&self) -> Result<Stats, Error<Action>> {
+        unimplemented!()
+    }
 
-    // #[inline]
-    // pub async fn sync(&self) {
-    //     let notified = self.context.synchronized.notified();
-    //     if self.inner.sync().is_ok() {
-    //         notified.await
-    //     } else {
-    //         warn!("sync failed!");
-    //     }
-    // }
+    fn close(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Close)?)
+    }
 
-    // #[inline]
-    // pub async fn flush(&self) {
-    //     let notified = self.context.flushed.notified();
-    //     if self.inner.flush().is_ok() {
-    //         notified.await;
-    //         self.context.need_flush.store(false, Ordering::SeqCst);
-    //     } else {
-    //         warn!("flush failed!");
-    //     }
-    // }
+    fn close_notify(&self) -> &Notify {
+        unimplemented!()
+    }
+    
+    fn sync(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Sync)?)
+    }
+
+    fn sync_notify(&self) -> &Notify {
+        unimplemented!()
+    }
+
+    fn flush(&self) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, Action::Flush)?)
+    }
+
+    fn flush_notify(&self) -> &Notify {
+        unimplemented!()
+    }
+
+    fn add_response_listener(
+        &self,
+        listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .waiters
+            .insert(listener)
+            .ok_or_else(|| Error::AddListenerError)? as _)
+    }
+
+    fn try_reserve(&self) -> Option<Permit> {
+        None
+    }
+
+    fn reserve_notify(&self) -> &Notify {
+        unimplemented!()
+    }
+
+    fn accept_message_type(&self, tt: &TypeTag) -> bool {
+        false
+    }
+
+    fn accept_response_type(&self, tt: &TypeTag) -> bool {
+        false
+    }
+
+    fn accept_error_type(&self, tt: &TypeTag) -> bool {
+        false
+    }
 }

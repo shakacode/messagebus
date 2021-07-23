@@ -1,3 +1,5 @@
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
 use async_trait::async_trait;
 use messagebus::{
     derive::{Error as MbError, Message},
@@ -26,17 +28,13 @@ struct SharedMsg<T: core::fmt::Debug + Clone + serde::Serialize + Send + Sync + 
     #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))] T,
 );
 
-struct TmpReceiver;
+struct TmpReceiverContext {
+    sync1: AtomicBool,
+    sync2: AtomicBool,
+}
 
-#[async_trait]
-impl AsyncHandler<Msg> for TmpReceiver {
-    type Error = Error;
-    type Response = ();
-
-    async fn handle(&self, msg: Msg, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("---> {:?}: {}", msg, msg.as_shared_ref().is_some());
-        Ok(())
-    }
+struct TmpReceiver {
+    ctx: Arc<TmpReceiverContext>,
 }
 
 #[async_trait]
@@ -44,16 +42,34 @@ impl AsyncHandler<SharedMsg<f32>> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: SharedMsg<f32>, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("---> {:?}: {}", msg, msg.as_shared_ref().is_some());
+    async fn handle(&self, _msg: SharedMsg<f32>, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        self.ctx.sync1.store(true, Ordering::Relaxed);
         Ok(())
     }
 }
 
-#[tokio::main]
-async fn main() {
+
+#[async_trait]
+impl AsyncHandler<Msg> for TmpReceiver {
+    type Error = Error;
+    type Response = ();
+
+    async fn handle(&self, _msg: Msg, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+        self.ctx.sync2.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+
+#[tokio::test]
+async fn test_shared() {
+    let ctx = Arc::new(TmpReceiverContext {
+        sync1: AtomicBool::new(false), 
+        sync2: AtomicBool::new(false),
+    });
+
     let (b, poller) = Bus::build()
-        .register(TmpReceiver)
+        .register(TmpReceiver { ctx: ctx.clone() })
         .subscribe_async::<Msg>(8, Default::default())
         .subscribe_async::<SharedMsg<f32>>(8, Default::default())
         .done()
@@ -62,14 +78,10 @@ async fn main() {
     b.send_one(Msg).await.unwrap();
     b.send_one(SharedMsg(0.0f32)).await.unwrap();
 
-    println!("flushing");
     b.flush().await;
-
-    println!("closing");
     b.close().await;
-
-    println!("closed");
     poller.await;
 
-    println!("[done]");
+    assert_eq!(ctx.sync1.load(Ordering::Relaxed), true);
+    assert_eq!(ctx.sync2.load(Ordering::Relaxed), false);
 }

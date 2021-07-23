@@ -41,6 +41,15 @@ pub enum SendError<M: fmt::Debug> {
     Full(M),
 }
 
+impl<M: fmt::Debug> SendError<M> {
+    pub fn map_msg<UM: fmt::Debug + 'static, F: FnOnce(M) -> UM>(self, f: F) -> SendError<UM> {
+        match self {
+            SendError::Closed(inner) => SendError::Closed(f(inner)),
+            SendError::Full(inner) => SendError::Full(f(inner)),
+        }
+    }
+}
+
 impl<M: Message> SendError<M> {
     pub fn into_boxed(self) -> SendError<Box<dyn Message>> {
         match self {
@@ -81,6 +90,38 @@ pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = VoidError> {
 
     #[error("TypeTagNotRegistered({0})")]
     TypeTagNotRegistered(TypeTag),
+}
+
+impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
+    pub fn map_msg<UM: fmt::Debug + 'static, F: FnOnce(M) -> UM>(self, f: F) -> Error<UM, E> {
+        match self {
+            Error::SendError(inner) => Error::SendError(inner.map_msg(f)),
+            Error::NoResponse => Error::NoReceivers,
+            Error::NoReceivers => Error::NoReceivers,
+            Error::Serialization(s) => Error::Serialization(s),
+            Error::Other(inner) => Error::Other(inner),
+            Error::OtherBoxed(inner) => Error::OtherBoxed(inner),
+            Error::WrongMessageType(inner) => Error::WrongMessageType(f(inner)),
+            Error::AddListenerError => Error::AddListenerError,
+            Error::MessageCastError => Error::MessageCastError,
+            Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+        }
+    }
+
+    pub fn map_err<UE: StdSyncSendError, F: FnOnce(E) -> UE>(self, f: F) -> Error<M, UE> {
+        match self {
+            Error::SendError(inner) => Error::SendError(inner),
+            Error::NoResponse => Error::NoReceivers,
+            Error::NoReceivers => Error::NoReceivers,
+            Error::Serialization(s) => Error::Serialization(s),
+            Error::Other(inner) => Error::Other(f(inner)),
+            Error::OtherBoxed(inner) => Error::OtherBoxed(inner),
+            Error::WrongMessageType(inner) => Error::WrongMessageType(inner),
+            Error::AddListenerError => Error::AddListenerError,
+            Error::MessageCastError => Error::MessageCastError,
+            Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+        }
+    }
 }
 
 impl<M: Message, E: StdSyncSendError> Error<M, E> {

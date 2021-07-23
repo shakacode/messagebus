@@ -12,7 +12,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use futures::future::poll_fn;
+use futures::{FutureExt, future::poll_fn};
 use futures::Future;
 use std::{
     any::Any,
@@ -23,7 +23,7 @@ use std::{
     },
 };
 use tokio::sync::{oneshot, Notify};
-
+use crate::relay::RelayWrapper;
 struct SlabCfg;
 impl sharded_slab::Config for SlabCfg {
     const RESERVED_BITS: usize = 1;
@@ -33,6 +33,9 @@ type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 
 pub trait SendUntypedReceiver: Send + Sync {
     fn send(&self, msg: Action) -> Result<(), SendError<Action>>;
+    fn send_msg(&self, _mid: u64, _msg: Box<dyn Message>) ->  Result<(), SendError<Box<dyn Message>>> {
+        unimplemented!()
+    }
 }
 
 pub trait SendTypedReceiver<M: Message>: Sync {
@@ -51,30 +54,49 @@ pub trait WrapperReturnTypeOnly<R: Message>: Send + Sync {
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<R, Error>>,
-    ) -> Result<usize, Error>;
+    ) -> Result<u64, Error>;
 }
 
 pub trait WrapperReturnTypeAndError<R: Message, E: StdSyncSendError>: Send + Sync {
+    fn start_polling_events(self: Arc<Self>) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>;
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<R, Error<(), E>>>,
-    ) -> Result<usize, Error>;
+    ) -> Result<u64, Error>;
     fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<(), Error>;
 }
 
 pub trait ReceiverTrait: Send + Sync {
-    fn typed(&self) -> AnyReceiver<'_>;
-    fn wrapper(&self) -> AnyWrapper<'_>;
     fn name(&self) -> &str;
+    fn typed(&self) -> Option<AnyReceiver<'_>>;
+    fn wrapper(&self) -> Option<AnyWrapperRef<'_>>;
+    fn wrapper_arc(self: Arc<Self>) -> Option<AnyWrapperArc>;
+    
     fn send_boxed(&self, mid: u64, msg: Box<dyn Message>) -> Result<(), Error<Box<dyn Message>>>;
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
-    ) -> Result<usize, Error>;
-    fn stats(&self) -> Result<(), Error<Action>>;
+    ) -> Result<u64, Error>;
+
+    fn stats(&self) -> Result<Stats, Error<Action>>;
+
     fn close(&self) -> Result<(), Error<Action>>;
+    fn close_notify(&self) -> &Notify;
+
     fn sync(&self) -> Result<(), Error<Action>>;
+    fn sync_notify(&self) -> &Notify;
+
     fn flush(&self) -> Result<(), Error<Action>>;
+    fn flush_notify(&self) -> &Notify;
+
+    fn need_flush(&self) -> bool;
+
+    fn try_reserve(&self) -> Option<Permit>;
+    fn reserve_notify(&self) -> &Notify;
+
+    fn accept_message_type(&self, tt: &TypeTag) -> bool;
+    fn accept_response_type(&self, tt: &TypeTag) -> bool;
+    fn accept_error_type(&self, tt: &TypeTag) -> bool;
 }
 
 pub trait ReceiverPollerBuilder {
@@ -124,10 +146,11 @@ where
     M: Message,
     R: Message,
     E: StdSyncSendError,
-    S: 'static,
+    S: ReciveTypedReceiver<R, E> + 'static,
 {
     inner: S,
     waiters: Slab<Waiter<R, E>>,
+    context: Arc<ReceiverContext>,
     _m: PhantomData<(M, R, E)>,
 }
 
@@ -136,16 +159,47 @@ where
     M: Message,
     R: Message,
     E: StdSyncSendError,
-    S: Send + Sync + 'static,
+    S: ReciveTypedReceiver<R, E>  + Send + Sync + 'static,
 {
+    
+    fn start_polling_events(self: Arc<Self>) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
+        Box::new(move |_| {
+            Box::pin(async move {
+                loop {
+                    let this = self.clone();
+                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx)).await;
+
+                    match event {
+                        Event::Exited => {
+                            self.context.closed.notify_waiters();
+                            break;
+                        }
+                        Event::Flushed => self.context.flushed.notify_waiters(),
+                        Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
+                        Event::Response(mid, resp) => {
+                            self.context.processing.fetch_sub(1, Ordering::SeqCst);
+                            self.context.response.notify_one();
+
+                            if let Err(err) = self.response(mid, resp) {
+                                error!("Response error: {}", err);
+                            }
+                        }
+
+                        _ => unimplemented!(),
+                    }
+                }
+            })
+        })
+    }
+
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<R, Error<(), E>>>,
-    ) -> Result<usize, Error> {
+    ) -> Result<u64, Error> {
         Ok(self
             .waiters
             .insert(Waiter::WithErrorType(listener))
-            .ok_or_else(|| Error::AddListenerError)?)
+            .ok_or_else(|| Error::AddListenerError)? as _)
     }
 
     fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<(), Error> {
@@ -170,16 +224,16 @@ where
     M: Message,
     R: Message,
     E: StdSyncSendError,
-    S: Send + Sync + 'static,
+    S: ReciveTypedReceiver<R, E>  + Send + Sync + 'static,
 {
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<R, Error>>,
-    ) -> Result<usize, Error> {
+    ) -> Result<u64, Error> {
         Ok(self
             .waiters
             .insert(Waiter::WithoutErrorType(listener))
-            .ok_or_else(|| Error::AddListenerError)?)
+            .ok_or_else(|| Error::AddListenerError)? as _)
     }
 }
 
@@ -194,12 +248,16 @@ where
         std::any::type_name::<Self>()
     }
 
-    fn typed(&self) -> AnyReceiver<'_> {
-        AnyReceiver::new(&self.inner)
+    fn typed(&self) -> Option<AnyReceiver<'_>> {
+        Some(AnyReceiver::new(&self.inner))
     }
 
-    fn wrapper(&self) -> AnyWrapper<'_> {
-        AnyWrapper::new(self)
+    fn wrapper(&self) -> Option<AnyWrapperRef<'_>> {
+        Some(AnyWrapperRef::new(self))
+    }
+
+    fn wrapper_arc(self: Arc<Self>) -> Option<AnyWrapperArc> {
+        Some(AnyWrapperArc::new(self))
     }
 
     fn send_boxed(
@@ -216,36 +274,93 @@ where
             .map_err(|err| Error::from(err.into_boxed()))?)
     }
 
-    fn stats(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Stats)?)
+    fn stats(&self) -> Result<Stats, Error<Action>> {
+        unimplemented!()
     }
 
     fn close(&self) -> Result<(), Error<Action>> {
         Ok(SendUntypedReceiver::send(&self.inner, Action::Close)?)
     }
 
+    fn close_notify(&self) -> &Notify {
+        &self.context.closed
+    }
+
     fn sync(&self) -> Result<(), Error<Action>> {
         Ok(SendUntypedReceiver::send(&self.inner, Action::Sync)?)
+    }
+
+    fn sync_notify(&self) -> &Notify {
+        &self.context.synchronized
     }
 
     fn flush(&self) -> Result<(), Error<Action>> {
         Ok(SendUntypedReceiver::send(&self.inner, Action::Flush)?)
     }
 
+    fn flush_notify(&self) -> &Notify {
+        &self.context.flushed
+    } 
+
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
-    ) -> Result<usize, Error> {
+    ) -> Result<u64, Error> {
         Ok(self
             .waiters
             .insert(Waiter::Boxed(listener))
-            .ok_or_else(|| Error::AddListenerError)?)
+            .ok_or_else(|| Error::AddListenerError)? as _)
+    }
+
+    fn need_flush(&self) -> bool {
+        self.context.need_flush.load(Ordering::SeqCst)
+    } 
+
+    fn try_reserve(&self) -> Option<Permit> {
+        loop {
+            let count = self.context.processing.load(Ordering::Relaxed);
+
+            if count < self.context.limit {
+                let res = self.context.processing.compare_exchange(
+                    count,
+                    count + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                if res.is_ok() {
+                    break Some(Permit {
+                        fuse: false,
+                        inner: self.context.clone(),
+                    });
+                }
+
+                // continue
+            } else {
+                break None;
+            }
+        }
+    }
+
+    fn reserve_notify(&self) -> &Notify {
+        &self.context.response
+    }
+
+    fn accept_message_type(&self, tt: &TypeTag) -> bool {
+        M::type_tag_().as_ref() == tt.as_ref()
+    }
+
+    fn accept_response_type(&self, tt: &TypeTag) -> bool {
+        R::type_tag_().as_ref() == tt.as_ref()
+    }
+    
+    fn accept_error_type(&self, tt: &TypeTag) -> bool {
+        E::type_tag_().as_ref() == tt.as_ref()
     }
 }
 
 pub struct Permit {
     pub(crate) fuse: bool,
-    pub(crate) inner: Arc<dyn PermitDrop>,
+    pub(crate) inner: Arc<dyn PermitDrop + Send + Sync>,
 }
 
 impl Drop for Permit {
@@ -259,8 +374,7 @@ impl Drop for Permit {
 pub struct AnyReceiver<'a> {
     data: *mut (),
     typed: (TypeId, *mut ()),
-    poller: (TypeId, *mut ()),
-    _m: PhantomData<&'a usize>,
+    _m: PhantomData<&'a dyn Any>,
 }
 
 impl<'a> AnyReceiver<'a> {
@@ -272,10 +386,7 @@ impl<'a> AnyReceiver<'a> {
         S: SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
     {
         let send_typed_receiver = rcvr as &(dyn SendTypedReceiver<M>);
-        let recive_typed_receiver = rcvr as &(dyn ReciveTypedReceiver<R, E>);
-
         let send_typed_receiver: TraitObject = unsafe { mem::transmute(send_typed_receiver) };
-        let recive_typed_receiver: TraitObject = unsafe { mem::transmute(recive_typed_receiver) };
 
         Self {
             data: send_typed_receiver.data,
@@ -283,49 +394,35 @@ impl<'a> AnyReceiver<'a> {
                 TypeId::of::<dyn SendTypedReceiver<M>>(),
                 send_typed_receiver.vtable,
             ),
-            poller: (
-                TypeId::of::<dyn ReciveTypedReceiver<R, E>>(),
-                recive_typed_receiver.vtable,
-            ),
             _m: Default::default(),
         }
     }
 
-    pub fn cast_send_typed<M: Message>(&'a self) -> &'a dyn SendTypedReceiver<M> {
-        assert_eq!(self.typed.0, TypeId::of::<dyn SendTypedReceiver<M>>());
+    #[inline]
+    pub fn cast_send_typed<M: Message>(&'a self) -> Option<&'a dyn SendTypedReceiver<M>> {
+        if self.typed.0 != TypeId::of::<dyn SendTypedReceiver<M>>() {
+            return None;
+        }
 
-        unsafe {
+        Some(unsafe {
             mem::transmute(TraitObject {
                 data: self.data,
                 vtable: self.typed.1,
             })
-        }
-    }
-
-    pub fn cast_recive_typed<R: Message, E: StdSyncSendError>(
-        &'a self,
-    ) -> &'a dyn ReciveTypedReceiver<R, E> {
-        assert_eq!(self.poller.0, TypeId::of::<dyn ReciveTypedReceiver<R, E>>());
-
-        unsafe {
-            mem::transmute(TraitObject {
-                data: self.data,
-                vtable: self.poller.1,
-            })
-        }
+        })
     }
 }
 
 unsafe impl Send for AnyReceiver<'_> {}
 
-pub struct AnyWrapper<'a> {
+pub struct AnyWrapperRef<'a> {
     data: *mut (),
     wrapper_r: (TypeId, *mut ()),
     wrapper_re: (TypeId, *mut ()),
     _m: PhantomData<&'a usize>,
 }
 
-impl<'a> AnyWrapper<'a> {
+impl<'a> AnyWrapperRef<'a> {
     pub fn new<R, E, S>(rcvr: &'a S) -> Self
     where
         R: Message,
@@ -352,38 +449,66 @@ impl<'a> AnyWrapper<'a> {
         }
     }
 
-    pub fn cast_ret_only<R: Message>(&'a self) -> &'a dyn WrapperReturnTypeOnly<R> {
-        assert_eq!(
-            self.wrapper_r.0,
-            TypeId::of::<dyn WrapperReturnTypeOnly<R>>()
-        );
+    #[inline]
+    pub fn cast_ret_only<R: Message>(&'a self) -> Option<&'a dyn WrapperReturnTypeOnly<R>> {
+        if self.wrapper_r.0 != TypeId::of::<dyn WrapperReturnTypeOnly<R>>() {
+            return None
+        }
 
-        unsafe {
+        Some(unsafe {
             mem::transmute(TraitObject {
                 data: self.data,
                 vtable: self.wrapper_r.1,
             })
-        }
+        })
     }
 
+    #[inline]
     pub fn cast_ret_and_error<R: Message, E: StdSyncSendError>(
         &'a self,
-    ) -> &'a dyn WrapperReturnTypeAndError<R, E> {
-        assert_eq!(
-            self.wrapper_re.0,
-            TypeId::of::<dyn WrapperReturnTypeAndError<R, E>>()
-        );
+    ) -> Option<&'a dyn WrapperReturnTypeAndError<R, E>> {
+        if self.wrapper_re.0 != TypeId::of::<dyn WrapperReturnTypeAndError<R, E>>() {
+            return None;
+        }
 
-        unsafe {
+        Some(unsafe {
             mem::transmute(TraitObject {
                 data: self.data,
                 vtable: self.wrapper_re.1,
             })
-        }
+        })
     }
 }
 
-unsafe impl Send for AnyWrapper<'_> {}
+unsafe impl Send for AnyWrapperRef<'_> {}
+
+pub struct AnyWrapperArc {
+    wrapper_re: Box<dyn Any>,
+}
+
+impl AnyWrapperArc {
+    pub fn new<R, E, S>(rcvr: Arc<S>) -> Self
+    where
+        R: Message,
+        E: StdSyncSendError,
+        S: WrapperReturnTypeAndError<R, E> + 'static,
+    {
+        let wrapper_re = Box::new(rcvr as Arc<dyn WrapperReturnTypeAndError<R, E>>);
+
+        Self {
+            wrapper_re,
+        }
+    }
+
+    #[inline]
+    pub fn cast_ret_and_error<R: Message, E: StdSyncSendError>(
+        &self,
+    ) -> Option<Arc<dyn WrapperReturnTypeAndError<R, E>>> {
+        Some(self.wrapper_re.downcast_ref::<Arc<dyn WrapperReturnTypeAndError<R, E>>>()?.clone())
+    }
+}
+
+unsafe impl Send for AnyWrapperArc {}
 
 #[derive(Debug, Clone)]
 pub struct ReceiverStats {
@@ -409,8 +534,6 @@ impl fmt::Display for ReceiverStats {
 }
 
 struct ReceiverContext {
-    resp_type_tag: TypeTag,
-    err_type_tag: TypeTag,
     limit: u64,
     processing: AtomicU64,
     need_flush: AtomicBool,
@@ -434,7 +557,6 @@ enum Waiter<R: Message, E: StdSyncSendError> {
 
 pub struct Receiver {
     inner: Arc<dyn ReceiverTrait>,
-    context: Arc<ReceiverContext>,
 }
 
 impl fmt::Debug for Receiver {
@@ -462,87 +584,67 @@ impl Receiver {
         S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
     {
         Self {
-            context: Arc::new(ReceiverContext {
-                resp_type_tag: R::type_tag_(),
-                err_type_tag: E::type_tag_(),
-                limit,
-                processing: AtomicU64::new(0),
-                need_flush: AtomicBool::new(false),
-                flushed: Notify::new(),
-                synchronized: Notify::new(),
-                closed: Notify::new(),
-                response: Notify::new(),
-            }),
             inner: Arc::new(ReceiverWrapper {
                 inner,
-                waiters: sharded_slab::Slab::<Waiter<R, E>>::new_with_config::<SlabCfg>(),
+                waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
+                context: Arc::new(ReceiverContext {
+                    limit,
+                    processing: AtomicU64::new(0),
+                    need_flush: AtomicBool::new(false),
+                    flushed: Notify::new(),
+                    synchronized: Notify::new(),
+                    closed: Notify::new(),
+                    response: Notify::new(),
+                }),
                 _m: Default::default(),
             }),
         }
     }
 
     #[inline]
-    pub fn resp_type_tag(&self) -> &TypeTag {
-        &self.context.resp_type_tag
+    pub(crate) fn new_relay<S>(limit: u64, inner: S) -> Self
+    where
+        S: SendUntypedReceiver + 'static,
+    {
+        Self {
+            inner: Arc::new(RelayWrapper::new(inner, limit)),
+        }
     }
 
     #[inline]
-    pub fn err_type_tag(&self) -> &TypeTag {
-        &self.context.err_type_tag
+    pub fn accept_message_type(&self, tt: &TypeTag) -> bool {
+        self.inner.accept_message_type(tt)
+    }
+
+    #[inline]
+    pub fn accept_response_type(&self, tt: &TypeTag) -> bool {
+        self.inner.accept_response_type(tt)
+    }
+
+    #[inline]
+    pub fn accept_error_type(&self, tt: &TypeTag) -> bool {
+        self.inner.accept_error_type(tt)
     }
 
     #[inline]
     pub fn need_flush(&self) -> bool {
-        self.context.need_flush.load(Ordering::SeqCst)
+        self.inner.need_flush()
     }
 
+    #[inline]
     pub async fn reserve(&self) -> Permit {
         loop {
-            let count = self.context.processing.load(Ordering::Relaxed);
-            if count < self.context.limit {
-                let res = self.context.processing.compare_exchange(
-                    count,
-                    count + 1,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
-                if res.is_ok() {
-                    break Permit {
-                        fuse: false,
-                        inner: self.context.clone(),
-                    };
-                }
-
-                // continue
+            if let Some(p) = self.inner.try_reserve() {
+                return p;
             } else {
-                self.context.response.notified().await
+                self.inner.reserve_notify().notified().await
             }
         }
     }
 
+    #[inline]
     pub fn try_reserve(&self) -> Option<Permit> {
-        loop {
-            let count = self.context.processing.load(Ordering::Relaxed);
-
-            if count < self.context.limit {
-                let res = self.context.processing.compare_exchange(
-                    count,
-                    count + 1,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
-                if res.is_ok() {
-                    break Some(Permit {
-                        fuse: false,
-                        inner: self.context.clone(),
-                    });
-                }
-
-                // continue
-            } else {
-                break None;
-            }
-        }
+        self.inner.try_reserve()
     }
 
     #[inline]
@@ -551,128 +653,129 @@ impl Receiver {
         mid: u64,
         msg: M,
         mut permit: Permit,
-    ) -> Result<(), SendError<M>> {
-        let any_receiver = self.inner.typed();
-        let receiver = any_receiver.cast_send_typed::<M>();
-        let res = receiver.send(mid, msg);
-        permit.fuse = true;
+    ) -> Result<(), Error<M>> {
+        let res = if let Some(any_receiver) = self.inner.typed() {
+            any_receiver.cast_send_typed::<M>().unwrap()
+                .send(mid, msg)
+                .map_err(Into::into)
+        } else {
+            self.inner.send_boxed(mid, msg.into_boxed())
+                .map_err(|err| err.map_msg(|b|*b.as_any_boxed().downcast::<M>().unwrap()))
+                .map(|_|())
+        };
 
-        if !res.is_err() {
-            self.context.need_flush.store(true, Ordering::SeqCst);
-        }
+        permit.fuse = true;
+        
+        res
+    }
+
+    #[inline]
+    pub fn force_send<M: Message + Clone>(&self, mid: u64, msg: M) -> Result<(), Error<M>> {
+        let res = if let Some(any_receiver) = self.inner.typed() {
+            any_receiver.cast_send_typed::<M>().unwrap()
+                .send(mid, msg)
+                .map_err(Into::into)
+        } else {
+            self.inner.send_boxed(mid, msg.into_boxed())
+                .map_err(|err| err.map_msg(|b|*b.as_any_boxed().downcast::<M>().unwrap()))
+                .map(|_|())
+        };
 
         res
     }
 
     #[inline]
-    pub fn force_send<M: Message + Clone>(&self, mid: u64, msg: M) -> Result<(), SendError<M>> {
-        let any_receiver = self.inner.typed();
-        let receiver = any_receiver.cast_send_typed::<M>();
-        let res = receiver.send(mid, msg);
-        self.context.processing.fetch_add(1, Ordering::SeqCst);
-
-        if !res.is_err() {
-            self.context.need_flush.store(true, Ordering::SeqCst);
-        }
-
-        res
-    }
-
     pub fn send_boxed(
         &self,
         mid: u64,
         msg: Box<dyn Message>,
         mut permit: Permit,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        self.context.processing.fetch_add(1, Ordering::SeqCst);
         let res = self.inner.send_boxed(mid, msg);
         permit.fuse = true;
-
-        if !res.is_err() {
-            self.context.need_flush.store(true, Ordering::SeqCst);
-        }
-
         Ok(())
     }
 
-    pub fn start_polling_events<R, E>(
-        &self,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
-    where
-        R: Message,
-        E: StdSyncSendError,
-    {
-        let ctx_clone = self.context.clone();
-        let inner_clone = self.inner.clone();
-
-        Box::new(move |_| {
-            Box::pin(async move {
-                let any_receiver = inner_clone.typed();
-                let receiver = any_receiver.cast_recive_typed::<R, E>();
-
-                let any_wrapper = inner_clone.wrapper();
-                let wrapper = any_wrapper.cast_ret_and_error::<R, E>();
-
-                loop {
-                    let event = poll_fn(move |ctx| receiver.poll_events(ctx)).await;
-                    match event {
-                        Event::Exited => {
-                            ctx_clone.closed.notify_waiters();
-                            break;
-                        }
-                        Event::Flushed => ctx_clone.flushed.notify_waiters(),
-                        Event::Synchronized(_res) => ctx_clone.synchronized.notify_waiters(),
-                        Event::Response(mid, resp) => {
-                            ctx_clone.processing.fetch_sub(1, Ordering::SeqCst);
-                            ctx_clone.response.notify_one();
-
-                            if let Err(err) = wrapper.response(mid, resp) {
-                                error!("Response error: {}", err);
-                            }
-                        }
-
-                        _ => unimplemented!(),
-                    }
-                }
-            })
-        })
+    #[inline]
+    pub fn start_polling_events<R: Message, E: StdSyncSendError>(&self) -> Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>> {
+        Some(self.inner
+            .clone()
+            .wrapper_arc()?
+            .cast_ret_and_error::<R, E>().unwrap()
+            .start_polling_events())
     }
 
     #[inline]
     pub(crate) fn add_response_waiter_boxed(
         &self,
-        waiter: oneshot::Sender<Result<Box<dyn Message>, Error>>,
-    ) -> Result<usize, Error> {
-        self.inner.add_response_listener(waiter)
+    ) -> Result<(u64, impl Future<Output = Result<Box<dyn Message>, Error>>), Error> {
+        let (tx, rx) = oneshot::channel();
+        let mid = self.inner.add_response_listener(tx)?;
+
+        Ok((mid, async move {
+            match rx.await {
+                Ok(x) => x,
+                Err(err) => Err(Error::from(err))
+            }
+        }))
     }
 
     #[inline]
     pub(crate) fn add_response_waiter<R: Message>(
         &self,
-        waiter: oneshot::Sender<Result<R, Error>>,
-    ) -> Result<usize, Error> {
-        let any_receiver = self.inner.wrapper();
-        let receiver = any_receiver.cast_ret_only::<R>();
+    ) -> Result<(u64, impl Future<Output = Result<R, Error>>), Error> {
+        if let Some(any_receiver) = self.inner.wrapper() {
+            let (tx, rx) = oneshot::channel();
+            let mid = any_receiver.cast_ret_only::<R>().unwrap()
+                .add_response_listener(tx)?;
 
-        receiver.add_response_listener(waiter)
+            Ok((mid, async move {
+                match rx.await {
+                    Ok(x) => x,
+                    Err(err) => Err(Error::from(err))
+                }
+            }.left_future()))
+        } else {
+            let (tx, rx) = oneshot::channel();
+            let mid = self.inner
+                .add_response_listener(tx)?;
+
+            Ok((mid, async move {
+                match rx.await {
+                    Ok(Ok(x)) => Ok(*x.as_any_boxed().downcast::<R>().unwrap()),
+                    Ok(Err(x)) => Err(x),
+                    Err(err) => Err(Error::from(err))
+                }
+            }.right_future()))
+        }
     }
 
     #[inline]
     pub(crate) fn add_response_waiter_we<R: Message, E: StdSyncSendError>(
         &self,
-        waiter: oneshot::Sender<Result<R, Error<(), E>>>,
-    ) -> Result<usize, Error> {
-        let any_receiver = self.inner.wrapper();
-        let receiver = any_receiver.cast_ret_and_error::<R, E>();
+    ) -> Result<(u64, impl Future<Output = Result<R, Error<(), E>>>), Error> {
+        if let Some(any_wrapper) = self.inner.wrapper() {
+            let (tx, rx) = oneshot::channel();
+            let mid = any_wrapper.cast_ret_and_error::<R, E>().unwrap()
+                .add_response_listener(tx)?;
 
-        receiver.add_response_listener(waiter)
+            Ok((mid, async move {
+                match rx.await {
+                    Ok(x) => x,
+                    Err(err) => Err(Error::from(err))
+                }
+            }))
+        } else {
+            unimplemented!()
+        }
     }
 
     #[inline]
     pub async fn close(&self) {
-        let notified = self.context.closed.notified();
+        let notify = self.inner.close_notify().notified();
+        
         if self.inner.close().is_ok() {
-            notified.await;
+            notify.await;
         } else {
             warn!("close failed!");
         }
@@ -680,9 +783,10 @@ impl Receiver {
 
     #[inline]
     pub async fn sync(&self) {
-        let notified = self.context.synchronized.notified();
+        let notify = self.inner.sync_notify().notified();
+
         if self.inner.sync().is_ok() {
-            notified.await
+            notify.await;
         } else {
             warn!("sync failed!");
         }
@@ -690,10 +794,10 @@ impl Receiver {
 
     #[inline]
     pub async fn flush(&self) {
-        let notified = self.context.flushed.notified();
+        let notify = self.inner.flush_notify().notified();
+
         if self.inner.flush().is_ok() {
-            notified.await;
-            self.context.need_flush.store(false, Ordering::SeqCst);
+            notify.await;
         } else {
             warn!("flush failed!");
         }

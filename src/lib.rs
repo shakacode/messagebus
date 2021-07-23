@@ -4,8 +4,8 @@ pub mod error;
 mod handler;
 mod receiver;
 pub mod receivers;
-pub mod relay;
 mod trait_object;
+mod relay;
 
 #[macro_use]
 extern crate log;
@@ -22,7 +22,6 @@ pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeT
 use error::{Error, SendError, StdSyncSendError};
 pub use handler::*;
 use receiver::Receiver;
-pub use relay::RelayTrait;
 use smallvec::SmallVec;
 use std::{
     collections::HashMap,
@@ -31,7 +30,6 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::oneshot;
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
@@ -334,11 +332,13 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tid, options, Some(&rid), None);
         if let Some(rc) = iter.next() {
-            let (tx, rx) = oneshot::channel();
-            let mid = (rc.add_response_waiter(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
-            rc.send(mid, req, rc.reserve().await)?;
+            let (mid, rx) = rc.add_response_waiter::<R>()
+                .map_err(|x| x.specify::<M>())?;
 
-            rx.await?.map_err(|x| x.specify::<M>())
+            let mid = mid | 1 << (u64::BITS - 1);
+
+            rc.send(mid, req, rc.reserve().await)?;
+            rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
         }
@@ -356,11 +356,13 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tid, options, Some(&rid), Some(&eid));
         if let Some(rc) = iter.next() {
-            let (tx, rx) = oneshot::channel();
-            let mid = (rc.add_response_waiter_we(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
-            rc.send(mid, req, rc.reserve().await)?;
+            let (mid, rx) = rc.add_response_waiter_we::<R, E>()
+                .map_err(|x| x.map_err(|_| unimplemented!()).map_msg(|_| unimplemented!()))?;
 
-            rx.await?.map_err(|x| x.specify::<M>())
+            rc.send(mid | 1 << (u64::BITS - 1), req, rc.reserve().await)
+                .map_err(|x| x.map_err(|_| unimplemented!()))?;
+            
+            rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
         }
@@ -427,11 +429,12 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tt, options, None, None);
         if let Some(rc) = iter.next() {
-            let (tx, rx) = oneshot::channel();
-            let mid = (rc.add_response_waiter_boxed(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
-            rc.send_boxed(mid, req, rc.reserve().await)?;
+            let (mid, rx) = rc.add_response_waiter_boxed()
+                .map_err(|x| x.map_err(|_| unimplemented!()).map_msg(|_| unimplemented!()))?;
+            
+            rc.send_boxed(mid | 1 << (usize::BITS - 1), req, rc.reserve().await)?;
 
-            rx.await?.map_err(|x| x.specify::<Box<dyn Message>>())
+            rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
             Err(Error::NoReceivers)
         }
@@ -451,7 +454,7 @@ impl BusInner {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
-            let msg = self.deserialize_message(tt.clone(), de).await?;
+            let msg = self.deserialize_message(tt.clone(), de)?;
             Ok(rs.send_boxed(mid, msg, rs.reserve().await)?)
         } else {
             Err(Error::NoReceivers)
@@ -471,21 +474,21 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tt, options, None, None);
         if let Some(rc) = iter.next() {
-            let (tx, rx) = oneshot::channel();
-            let mid = (rc.add_response_waiter_boxed(tx).unwrap() | 1 << (usize::BITS - 1)) as u64;
-            let msg = self.deserialize_message(tt.clone(), de).await?;
-            rc.send_boxed(mid, msg, rc.reserve().await)?;
+            let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
+            let msg = self.deserialize_message(tt.clone(), de)?;
 
-            rx.await?.map_err(|x| x.specify::<Box<dyn Message>>())
+            rc.send_boxed(mid | 1 << (usize::BITS - 1), msg, rc.reserve().await)?;
+
+            rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
             Err(Error::NoReceivers)
         }
     }
 
-    async fn deserialize_message<'a, 'b: 'a, 'c: 'a>(
-        &'a self,
+    pub fn deserialize_message(
+        &self,
         tt: TypeTag,
-        de: &'b mut dyn erased_serde::Deserializer<'c>,
+        de: &mut dyn erased_serde::Deserializer<'_>,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
         let md = self
             .message_types
@@ -493,7 +496,6 @@ impl BusInner {
             .ok_or_else(|| Error::TypeTagNotRegistered(tt))?;
 
         md.deserialize_boxed(de)
-            .await
             .map_err(|err| err.specify::<Box<dyn Message>>())
     }
 
@@ -511,9 +513,9 @@ impl BusInner {
             .map(|item| item.iter())
             .flatten()
             .filter(move |x| match (rid, eid) {
-                (Some(r), Some(e)) => x.resp_type_tag() == r && x.err_type_tag() == e,
-                (Some(r), None) => x.resp_type_tag() == r,
-                (None, Some(e)) => x.err_type_tag() == e,
+                (Some(r), Some(e)) => x.accept_response_type(r) && x.accept_error_type(e),
+                (Some(r), None) => x.accept_response_type(r),
+                (None, Some(e)) => x.accept_error_type(e),
                 (None, None) => true,
             })
     }

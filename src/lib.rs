@@ -512,12 +512,7 @@ impl BusInner {
             .into_iter()
             .map(|item| item.iter())
             .flatten()
-            .filter(move |x| match (rid, eid) {
-                (Some(r), Some(e)) => x.accept_response_type(r) && x.accept_error_type(e),
-                (Some(r), None) => x.accept_response_type(r),
-                (None, Some(e)) => x.accept_error_type(e),
-                (None, None) => true,
-            })
+            .filter(move |x| x.accept(tid, rid, eid))
     }
 }
 

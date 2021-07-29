@@ -3,14 +3,7 @@ use std::{collections::HashMap, marker::PhantomData, pin::Pin, sync::Arc};
 use futures::{Future, FutureExt};
 use tokio::sync::Mutex;
 
-use crate::{
-    envelop::TypeTag,
-    error::{Error, StdSyncSendError},
-    receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    receivers, AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler,
-    AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler,
-    IntoBoxedMessage, Message, SynchronizedHandler, Untyped,
-};
+use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, IntoBoxedMessage, Message, SynchronizedHandler, Untyped, envelop::TypeTag, error::{Error, StdSyncSendError}, receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver}, receivers, relay::TypeMap};
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
     SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
@@ -92,7 +85,7 @@ impl<T, F, B> RegisterEntry<UnsyncEntry, T, F, B> {
         let (inner, poller) = S::build(cfg);
 
         let receiver = Receiver::new::<M, R, E, S>(queue, inner);
-        let poller2 = receiver.start_polling_events::<R, E>();
+        let poller2 = receiver.start_polling();
         self.receivers
             .entry(M::type_tag_())
             .or_insert_with(Vec::new)
@@ -162,7 +155,7 @@ impl<T, F, B> RegisterEntry<SyncEntry, T, F, B> {
         let (inner, poller) = S::build(cfg);
 
         let receiver = Receiver::new::<M, R, E, S>(queue, inner);
-        let poller2 = receiver.start_polling_events::<R, E>();
+        let poller2 = receiver.start_polling();
         self.receivers
             .entry(M::type_tag_())
             .or_insert_with(Vec::new)
@@ -269,8 +262,14 @@ impl Module {
         self
     }
 
-    pub fn register_relay<T: Send + Sync + 'static, P: IntoIterator<Item = TypeTag>>(pat: P, obj: T) {
-        
+    pub fn register_relay<S: SendUntypedReceiver + Send + Sync + 'static>(queue: u64, map: TypeMap, inner: S) {
+        let receiver = Receiver::new_relay::<S>(queue, map, inner);
+        let poller2 = receiver.start_polling();
+
+        // self.receivers
+        //     .entry(M::type_tag_())
+        //     .or_insert_with(Vec::new)
+        //     .push((receiver, poller, poller2));
     }
 
     pub fn register<T: Send + Sync + 'static>(

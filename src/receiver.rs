@@ -1,9 +1,4 @@
-use crate::{
-    envelop::{IntoBoxedMessage, TypeTag},
-    error::{SendError, StdSyncSendError},
-    trait_object::TraitObject,
-    Bus, Error, Message,
-};
+use crate::{Bus, Error, Message, envelop::{IntoBoxedMessage, TypeTag}, error::{SendError, StdSyncSendError}, relay::TypeMap, trait_object::TraitObject};
 use core::{
     any::TypeId,
     fmt,
@@ -94,9 +89,8 @@ pub trait ReceiverTrait: Send + Sync {
     fn try_reserve(&self) -> Option<Permit>;
     fn reserve_notify(&self) -> &Notify;
 
-    fn accept_message_type(&self, tt: &TypeTag) -> bool;
-    fn accept_response_type(&self, tt: &TypeTag) -> bool;
-    fn accept_error_type(&self, tt: &TypeTag) -> bool;
+    fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool;
+    fn start_polling(self: Arc<Self>) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>;
 }
 
 pub trait ReceiverPollerBuilder {
@@ -345,16 +339,24 @@ where
         &self.context.response
     }
 
-    fn accept_message_type(&self, tt: &TypeTag) -> bool {
-        M::type_tag_().as_ref() == tt.as_ref()
+    fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+        if let Some(resp) = resp {
+            if resp.as_ref() != R::type_tag_().as_ref() {
+                return false;
+            }
+        }
+
+        if let Some(err) = err {
+            if err.as_ref() != E::type_tag_().as_ref() {
+                return false;
+            }
+        }
+
+        msg.as_ref() == M::type_tag_().as_ref()
     }
 
-    fn accept_response_type(&self, tt: &TypeTag) -> bool {
-        R::type_tag_().as_ref() == tt.as_ref()
-    }
-    
-    fn accept_error_type(&self, tt: &TypeTag) -> bool {
-        E::type_tag_().as_ref() == tt.as_ref()
+    fn start_polling(self: Arc<Self>) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
+        self.start_polling_events()
     }
 }
 
@@ -602,28 +604,18 @@ impl Receiver {
     }
 
     #[inline]
-    pub(crate) fn new_relay<S>(limit: u64, inner: S) -> Self
+    pub(crate) fn new_relay<S>(limit: u64, type_map: TypeMap, inner: S) -> Self
     where
         S: SendUntypedReceiver + 'static,
     {
         Self {
-            inner: Arc::new(RelayWrapper::new(inner, limit)),
+            inner: Arc::new(RelayWrapper::new(inner, type_map, limit)),
         }
     }
 
     #[inline]
-    pub fn accept_message_type(&self, tt: &TypeTag) -> bool {
-        self.inner.accept_message_type(tt)
-    }
-
-    #[inline]
-    pub fn accept_response_type(&self, tt: &TypeTag) -> bool {
-        self.inner.accept_response_type(tt)
-    }
-
-    #[inline]
-    pub fn accept_error_type(&self, tt: &TypeTag) -> bool {
-        self.inner.accept_error_type(tt)
+    pub fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+        self.inner.accept(msg, resp, err)
     }
 
     #[inline]
@@ -697,12 +689,8 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn start_polling_events<R: Message, E: StdSyncSendError>(&self) -> Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>> {
-        Some(self.inner
-            .clone()
-            .wrapper_arc()?
-            .cast_ret_and_error::<R, E>().unwrap()
-            .start_polling_events())
+    pub fn start_polling(&self) -> Option<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>> {
+        Some(self.inner.clone().start_polling())
     }
 
     #[inline]

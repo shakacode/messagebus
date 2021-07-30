@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use messagebus::{
@@ -42,12 +45,15 @@ impl AsyncHandler<SharedMsg<f32>> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, _msg: SharedMsg<f32>, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+    async fn handle(
+        &self,
+        _msg: SharedMsg<f32>,
+        _bus: &Bus,
+    ) -> Result<Self::Response, Self::Error> {
         self.ctx.sync1.store(true, Ordering::Relaxed);
         Ok(())
     }
 }
-
 
 #[async_trait]
 impl AsyncHandler<Msg> for TmpReceiver {
@@ -60,11 +66,10 @@ impl AsyncHandler<Msg> for TmpReceiver {
     }
 }
 
-
 #[tokio::test]
 async fn test_shared() {
     let ctx = Arc::new(TmpReceiverContext {
-        sync1: AtomicBool::new(false), 
+        sync1: AtomicBool::new(false),
         sync2: AtomicBool::new(false),
     });
 

@@ -4,8 +4,8 @@ pub mod error;
 mod handler;
 mod receiver;
 pub mod receivers;
-mod trait_object;
 mod relay;
+mod trait_object;
 
 #[macro_use]
 extern crate log;
@@ -22,6 +22,11 @@ pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeT
 use error::{Error, SendError, StdSyncSendError};
 pub use handler::*;
 use receiver::Receiver;
+pub use receiver::{
+    Action, Event, ReciveTypedReceiver, ReciveUnypedReceiver, SendTypedReceiver,
+    SendUntypedReceiver, TypeTagAccept,
+};
+pub use relay::Relay;
 use smallvec::SmallVec;
 use std::{
     collections::HashMap,
@@ -57,19 +62,9 @@ pub struct BusInner {
 
 impl BusInner {
     pub(crate) fn new(
-        input: Vec<(TypeTag, Receiver)>,
-        mt: Vec<(TypeTag, MessageTypeDescriptor)>,
+        receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
+        message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     ) -> Self {
-        let mut receivers = HashMap::new();
-        let message_types: HashMap<TypeTag, MessageTypeDescriptor> = mt.into_iter().collect();
-
-        for (key, value) in input {
-            receivers
-                .entry(key)
-                .or_insert_with(SmallVec::new)
-                .push(value);
-        }
-
         Self {
             message_types,
             receivers,
@@ -220,6 +215,13 @@ impl BusInner {
             return Err(SendError::Closed(msg).into());
         }
 
+        for r in &self.receivers {
+            println!("{:?}: ", r.0);
+            for i in r.1 {
+                println!("  {:?}: ", i.name());
+            }
+        }
+
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
@@ -332,7 +334,8 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tid, options, Some(&rid), None);
         if let Some(rc) = iter.next() {
-            let (mid, rx) = rc.add_response_waiter::<R>()
+            let (mid, rx) = rc
+                .add_response_waiter::<R>()
                 .map_err(|x| x.specify::<M>())?;
 
             let mid = mid | 1 << (u64::BITS - 1);
@@ -356,12 +359,14 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tid, options, Some(&rid), Some(&eid));
         if let Some(rc) = iter.next() {
-            let (mid, rx) = rc.add_response_waiter_we::<R, E>()
-                .map_err(|x| x.map_err(|_| unimplemented!()).map_msg(|_| unimplemented!()))?;
+            let (mid, rx) = rc.add_response_waiter_we::<R, E>().map_err(|x| {
+                x.map_err(|_| unimplemented!())
+                    .map_msg(|_| unimplemented!())
+            })?;
 
             rc.send(mid | 1 << (u64::BITS - 1), req, rc.reserve().await)
                 .map_err(|x| x.map_err(|_| unimplemented!()))?;
-            
+
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -429,9 +434,11 @@ impl BusInner {
 
         let mut iter = self.select_receivers(&tt, options, None, None);
         if let Some(rc) = iter.next() {
-            let (mid, rx) = rc.add_response_waiter_boxed()
-                .map_err(|x| x.map_err(|_| unimplemented!()).map_msg(|_| unimplemented!()))?;
-            
+            let (mid, rx) = rc.add_response_waiter_boxed().map_err(|x| {
+                x.map_err(|_| unimplemented!())
+                    .map_msg(|_| unimplemented!())
+            })?;
+
             rc.send_boxed(mid | 1 << (usize::BITS - 1), req, rc.reserve().await)?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())

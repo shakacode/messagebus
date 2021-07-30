@@ -9,26 +9,41 @@ use crate::{
     Message,
 };
 
+pub trait DynError: TypeTagged {
+    fn description(&self) -> String;
+}
+
 pub trait StdSyncSendError: std::error::Error + TypeTagged + Send + Sync + Unpin + 'static {}
 impl<T: std::error::Error + TypeTagged + Send + Sync + Unpin + 'static> StdSyncSendError for T {}
 
-#[derive(Debug, Error)]
-pub enum VoidError {}
+#[derive(Debug)]
+pub struct GenericError {
+    pub type_tag: TypeTag,
+    pub description: String,
+}
 
-impl TypeTagged for VoidError {
+impl fmt::Display for GenericError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GenericError({}): {}", self.type_tag, self.description)
+    }
+}
+
+impl std::error::Error for GenericError {}
+
+impl TypeTagged for GenericError {
     fn type_name(&self) -> Cow<str> {
-        type_name::<VoidError>().into()
+        type_name::<GenericError>().into()
     }
 
     fn type_tag(&self) -> TypeTag {
-        type_name::<VoidError>().into()
+        type_name::<GenericError>().into()
     }
 
     fn type_tag_() -> TypeTag
     where
         Self: Sized,
     {
-        type_name::<VoidError>().into()
+        type_name::<GenericError>().into()
     }
 }
 
@@ -60,7 +75,7 @@ impl<M: Message> SendError<M> {
 }
 
 #[derive(Debug, Error)]
-pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = VoidError> {
+pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = GenericError> {
     #[error("Message Send Error: {0}")]
     SendError(#[from] SendError<M>),
 

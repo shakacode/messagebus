@@ -58,6 +58,19 @@ impl<T: TypeTagged> TypeTagged for Arc<T> {
     }
 }
 
+impl<T: TypeTagged> TypeTagged for Box<T> {
+    fn type_tag_() -> TypeTag {
+        T::type_tag_()
+    }
+
+    fn type_tag(&self) -> TypeTag {
+        T::type_tag(&*self)
+    }
+    fn type_name(&self) -> Cow<str> {
+        T::type_name(&*self)
+    }
+}
+
 impl Message for () {
     fn as_any_ref(&self) -> &dyn Any {
         self

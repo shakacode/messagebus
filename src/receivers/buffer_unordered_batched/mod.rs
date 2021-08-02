@@ -76,6 +76,9 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                     buffer_mid.push(mid);
                                     buffer.push(msg);
                                 }
+                                Request::Action(Action::Init) => {
+                                    stx.send(Event::Ready).ok();
+                                },
                                 Request::Action(Action::Flush) => need_flush = true,
                                 Request::Action(Action::Close) => rx.close(),
                                 Request::Action(Action::Sync) => {

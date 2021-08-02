@@ -102,6 +102,9 @@ macro_rules! batch_synchronized_poller_macro {
                                 buffer_mid.push(mid);
                                 buffer.push(msg);
                             }
+                            Request::Action(Action::Init) => {
+                                stx.send(Event::Ready).ok();
+                            },
                             Request::Action(Action::Flush) => need_flush = true,
                             Request::Action(Action::Sync) => need_sync = true,
                             Request::Action(Action::Close) => rx.close(),

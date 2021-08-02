@@ -254,12 +254,8 @@ impl Module {
         self
     }
 
-    pub fn register_relay<S: Relay + Send + Sync + 'static>(
-        mut self,
-        inner: S,
-        queue: u64,
-    ) -> Self {
-        let receiver = Receiver::new_relay::<S>(queue, inner);
+    pub fn register_relay<S: Relay + Send + Sync + 'static>(mut self, inner: S) -> Self {
+        let receiver = Receiver::new_relay::<S>(inner);
         self.pollings.push(receiver.start_polling());
 
         let mut receiver_added = false;
@@ -358,8 +354,8 @@ impl BusBuilder {
         BusBuilder { inner }
     }
 
-    pub fn register_relay<S: Relay + Send + Sync + 'static>(self, inner: S, queue: u64) -> Self {
-        let inner = self.inner.register_relay(inner, queue);
+    pub fn register_relay<S: Relay + Send + Sync + 'static>(self, inner: S) -> Self {
+        let inner = self.inner.register_relay(inner);
 
         BusBuilder { inner }
     }

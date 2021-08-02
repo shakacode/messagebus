@@ -79,6 +79,9 @@ pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = GenericError>
     #[error("Message Send Error: {0}")]
     SendError(#[from] SendError<M>),
 
+    #[error("Message receiver dropped try again another receiver")]
+    TryAgain(M),
+
     #[error("NoResponse")]
     NoResponse,
 
@@ -90,6 +93,9 @@ pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = GenericError>
 
     #[error("MessageCastError")]
     MessageCastError,
+
+    #[error("Not Ready")]
+    NotReady,
 
     #[error("Other({0})")]
     Other(E),
@@ -111,7 +117,8 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
     pub fn map_msg<UM: fmt::Debug + 'static, F: FnOnce(M) -> UM>(self, f: F) -> Error<UM, E> {
         match self {
             Error::SendError(inner) => Error::SendError(inner.map_msg(f)),
-            Error::NoResponse => Error::NoReceivers,
+            Error::TryAgain(inner) => Error::TryAgain(f(inner)),
+            Error::NoResponse => Error::NoResponse,
             Error::NoReceivers => Error::NoReceivers,
             Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::Other(inner),
@@ -120,13 +127,15 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+            Error::NotReady => Error::NotReady,
         }
     }
 
     pub fn map_err<UE: StdSyncSendError, F: FnOnce(E) -> UE>(self, f: F) -> Error<M, UE> {
         match self {
             Error::SendError(inner) => Error::SendError(inner),
-            Error::NoResponse => Error::NoReceivers,
+            Error::TryAgain(inner) => Error::TryAgain(inner),
+            Error::NoResponse => Error::NoResponse,
             Error::NoReceivers => Error::NoReceivers,
             Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::Other(f(inner)),
@@ -135,6 +144,7 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+            Error::NotReady => Error::NotReady,
         }
     }
 }
@@ -143,7 +153,8 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
     pub fn into_dyn(self) -> Error<M> {
         match self {
             Error::SendError(inner) => Error::SendError(inner),
-            Error::NoResponse => Error::NoReceivers,
+            Error::TryAgain(inner) => Error::TryAgain(inner),
+            Error::NoResponse => Error::NoResponse,
             Error::NoReceivers => Error::NoReceivers,
             Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::OtherBoxed(Box::new(inner) as _),
@@ -152,13 +163,15 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+            Error::NotReady => Error::NotReady,
         }
     }
 
     pub fn map<U: From<Box<dyn StdSyncSendError>> + StdSyncSendError>(self) -> Error<M, U> {
         match self {
             Error::SendError(inner) => Error::SendError(inner),
-            Error::NoResponse => Error::NoReceivers,
+            Error::TryAgain(inner) => Error::TryAgain(inner),
+            Error::NoResponse => Error::NoResponse,
             Error::NoReceivers => Error::NoReceivers,
             Error::Serialization(s) => Error::Serialization(s),
             Error::Other(_) => panic!("expected boxed error!"),
@@ -167,6 +180,7 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+            Error::NotReady => Error::NotReady,
         }
     }
 }
@@ -175,8 +189,9 @@ impl<E: StdSyncSendError> Error<(), E> {
     pub fn specify<M: fmt::Debug>(self) -> Error<M, E> {
         match self {
             Error::SendError(_) => panic!("cannot specify type on typed error"),
+            Error::TryAgain(_) => panic!("cannot specify type on typed error"),
             Error::WrongMessageType(_) => panic!("cannot specify type on typed error"),
-            Error::NoResponse => Error::NoReceivers,
+            Error::NoResponse => Error::NoResponse,
             Error::NoReceivers => Error::NoReceivers,
             Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::Other(inner),
@@ -184,6 +199,7 @@ impl<E: StdSyncSendError> Error<(), E> {
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+            Error::NotReady => Error::NotReady,
         }
     }
 }
@@ -203,8 +219,9 @@ impl Error<Box<dyn Message>> {
             Error::SendError(SendError::Full(m)) => {
                 Error::SendError(SendError::Full(m.into_boxed()))
             }
+            Error::TryAgain(inner) => Error::TryAgain(inner.into_boxed()),
             Error::WrongMessageType(m) => Error::WrongMessageType(m.into_boxed()),
-            Error::NoResponse => Error::NoReceivers,
+            Error::NoResponse => Error::NoResponse,
             Error::NoReceivers => Error::NoReceivers,
             Error::Serialization(s) => Error::Serialization(s),
             Error::Other(inner) => Error::Other(inner),
@@ -212,6 +229,7 @@ impl Error<Box<dyn Message>> {
             Error::AddListenerError => Error::AddListenerError,
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
+            Error::NotReady => Error::NotReady,
         }
     }
 }

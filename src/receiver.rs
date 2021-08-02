@@ -85,7 +85,6 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn name(&self) -> &str;
     fn typed(&self) -> Option<AnyReceiver<'_>>;
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>>;
-    fn wrapper_arc(self: Arc<Self>) -> Option<AnyWrapperArc>;
 
     fn send_boxed(&self, mid: u64, msg: Box<dyn Message>) -> Result<(), Error<Box<dyn Message>>>;
     fn add_response_listener(
@@ -106,8 +105,10 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
 
     fn need_flush(&self) -> bool;
 
-    fn try_reserve(&self) -> Option<Permit>;
-    fn reserve_notify(&self) -> &Notify;
+    fn try_reserve(&self, tt: &TypeTag) -> Option<Permit>;
+    fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify>;
+
+    fn ready(&self) -> bool;
 
     fn start_polling(
         self: Arc<Self>,
@@ -140,6 +141,7 @@ pub struct Stats {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum Action {
+    Init,
     Flush,
     Sync,
     Close,
@@ -154,6 +156,8 @@ pub enum Event<M, E: StdSyncSendError> {
     Stats(Stats),
     Flushed,
     Exited,
+    Ready,
+    Pause,
 }
 
 struct ReceiverWrapper<M, R, E, S>
@@ -186,6 +190,8 @@ where
                     let event = poll_fn(move |ctx| this.inner.poll_events(ctx)).await;
 
                     match event {
+                        Event::Pause => self.context.ready.store(false, Ordering::SeqCst),
+                        Event::Ready => self.context.ready.store(true, Ordering::SeqCst),
                         Event::Exited => {
                             self.context.closed.notify_waiters();
                             break;
@@ -300,10 +306,6 @@ where
         Some(AnyWrapperRef::new(self))
     }
 
-    fn wrapper_arc(self: Arc<Self>) -> Option<AnyWrapperArc> {
-        Some(AnyWrapperArc::new(self))
-    }
-
     fn send_boxed(
         &self,
         mid: u64,
@@ -360,7 +362,7 @@ where
         self.context.need_flush.load(Ordering::SeqCst)
     }
 
-    fn try_reserve(&self) -> Option<Permit> {
+    fn try_reserve(&self, _: &TypeTag) -> Option<Permit> {
         loop {
             let count = self.context.processing.load(Ordering::Relaxed);
 
@@ -385,14 +387,18 @@ where
         }
     }
 
-    fn reserve_notify(&self) -> &Notify {
-        &self.context.response
+    fn reserve_notify(&self, _: &TypeTag) -> Arc<Notify> {
+        self.context.response.clone()
     }
 
     fn start_polling(
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
         self.start_polling_events()
+    }
+
+    fn ready(&self) -> bool {
+        self.context.ready.load(Ordering::SeqCst)
     }
 }
 
@@ -520,36 +526,6 @@ impl<'a> AnyWrapperRef<'a> {
 
 unsafe impl Send for AnyWrapperRef<'_> {}
 
-pub struct AnyWrapperArc {
-    wrapper_re: Box<dyn Any>,
-}
-
-impl AnyWrapperArc {
-    pub fn new<R, E, S>(rcvr: Arc<S>) -> Self
-    where
-        R: Message,
-        E: StdSyncSendError,
-        S: WrapperReturnTypeAndError<R, E> + 'static,
-    {
-        let wrapper_re = Box::new(rcvr as Arc<dyn WrapperReturnTypeAndError<R, E>>);
-
-        Self { wrapper_re }
-    }
-
-    #[inline]
-    pub fn cast_ret_and_error<R: Message, E: StdSyncSendError>(
-        &self,
-    ) -> Option<Arc<dyn WrapperReturnTypeAndError<R, E>>> {
-        Some(
-            self.wrapper_re
-                .downcast_ref::<Arc<dyn WrapperReturnTypeAndError<R, E>>>()?
-                .clone(),
-        )
-    }
-}
-
-unsafe impl Send for AnyWrapperArc {}
-
 #[derive(Debug, Clone)]
 pub struct ReceiverStats {
     pub name: Cow<'static, str>,
@@ -577,10 +553,11 @@ struct ReceiverContext {
     limit: u64,
     processing: AtomicU64,
     need_flush: AtomicBool,
+    ready: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
-    response: Notify,
+    response: Arc<Notify>,
 }
 
 impl PermitDrop for ReceiverContext {
@@ -632,10 +609,11 @@ impl Receiver {
                     limit,
                     processing: AtomicU64::new(0),
                     need_flush: AtomicBool::new(false),
+                    ready: AtomicBool::new(false),
                     flushed: Notify::new(),
                     synchronized: Notify::new(),
                     closed: Notify::new(),
-                    response: Notify::new(),
+                    response: Arc::new(Notify::new()),
                 }),
                 _m: Default::default(),
             }),
@@ -643,12 +621,12 @@ impl Receiver {
     }
 
     #[inline]
-    pub(crate) fn new_relay<S>(limit: u64, inner: S) -> Self
+    pub(crate) fn new_relay<S>(inner: S) -> Self
     where
         S: Relay + Send + Sync + 'static,
     {
         Self {
-            inner: Arc::new(RelayWrapper::new(inner, limit)),
+            inner: Arc::new(RelayWrapper::new(inner)),
         }
     }
 
@@ -668,19 +646,19 @@ impl Receiver {
     }
 
     #[inline]
-    pub async fn reserve(&self) -> Permit {
+    pub async fn reserve(&self, tt: &TypeTag) -> Permit {
         loop {
-            if let Some(p) = self.inner.try_reserve() {
+            if let Some(p) = self.inner.try_reserve(tt) {
                 return p;
             } else {
-                self.inner.reserve_notify().notified().await
+                self.inner.reserve_notify(tt).notified().await
             }
         }
     }
 
     #[inline]
-    pub fn try_reserve(&self) -> Option<Permit> {
-        self.inner.try_reserve()
+    pub fn try_reserve(&self, tt: &TypeTag) -> Option<Permit> {
+        self.inner.try_reserve(tt)
     }
 
     #[inline]
@@ -730,7 +708,7 @@ impl Receiver {
     ) -> Result<(), Error<Box<dyn Message>>> {
         let res = self.inner.send_boxed(mid, msg);
         permit.fuse = true;
-        Ok(())
+        res
     }
 
     #[inline]

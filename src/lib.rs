@@ -5,6 +5,7 @@ mod handler;
 mod receiver;
 pub mod receivers;
 mod relay;
+pub mod relays;
 mod trait_object;
 
 #[macro_use]
@@ -124,11 +125,11 @@ impl BusInner {
         }
     }
 
-    fn try_reserve(&self, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
+    fn try_reserve(&self, tt: &TypeTag, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
 
         for r in rs {
-            if let Some(prmt) = r.try_reserve() {
+            if let Some(prmt) = r.try_reserve(tt) {
                 permits.push(prmt);
             } else {
                 return None;
@@ -156,7 +157,7 @@ impl BusInner {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.receivers.get(&tt) {
-            let permits = if let Some(x) = self.try_reserve(rs) {
+            let permits = if let Some(x) = self.try_reserve(&tt, rs) {
                 x
             } else {
                 return Err(SendError::Full(msg).into());
@@ -228,10 +229,10 @@ impl BusInner {
         if let Some(rs) = self.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.send(mid, msg.clone(), r.reserve().await);
+                    let _ = r.send(mid, msg.clone(), r.reserve(&tt).await);
                 }
 
-                let _ = last.send(mid, msg, last.reserve().await);
+                let _ = last.send(mid, msg, last.reserve(&tt).await);
 
                 return Ok(());
             }
@@ -292,7 +293,7 @@ impl BusInner {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
-            let permits = if let Some(x) = rs.try_reserve() {
+            let permits = if let Some(x) = rs.try_reserve(&tt) {
                 x
             } else {
                 return Err(SendError::Full(msg).into());
@@ -313,7 +314,7 @@ impl BusInner {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
-            Ok(rs.send(mid, msg, rs.reserve().await)?)
+            Ok(rs.send(mid, msg, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -340,7 +341,7 @@ impl BusInner {
 
             let mid = mid | 1 << (u64::BITS - 1);
 
-            rc.send(mid, req, rc.reserve().await)?;
+            rc.send(mid, req, rc.reserve(&tid).await)?;
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -364,7 +365,7 @@ impl BusInner {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send(mid | 1 << (u64::BITS - 1), req, rc.reserve().await)
+            rc.send(mid | 1 << (u64::BITS - 1), req, rc.reserve(&tid).await)
                 .map_err(|x| x.map_err(|_| unimplemented!()))?;
 
             rx.await.map_err(|x| x.specify::<M>())
@@ -388,10 +389,10 @@ impl BusInner {
         if let Some(rs) = self.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.send_boxed(mid, msg.try_clone_boxed().unwrap(), r.reserve().await);
+                    let _ = r.send_boxed(mid, msg.try_clone_boxed().unwrap(), r.reserve(&tt).await);
                 }
 
-                let _ = last.send_boxed(mid, msg, last.reserve().await);
+                let _ = last.send_boxed(mid, msg, last.reserve(&tt).await);
 
                 return Ok(());
             }
@@ -415,7 +416,7 @@ impl BusInner {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
-            Ok(rs.send_boxed(mid, msg, rs.reserve().await)?)
+            Ok(rs.send_boxed(mid, msg, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -439,7 +440,7 @@ impl BusInner {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(mid | 1 << (usize::BITS - 1), req, rc.reserve().await)?;
+            rc.send_boxed(mid | 1 << (usize::BITS - 1), req, rc.reserve(&tt).await)?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -462,7 +463,7 @@ impl BusInner {
 
         if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
             let msg = self.deserialize_message(tt.clone(), de)?;
-            Ok(rs.send_boxed(mid, msg, rs.reserve().await)?)
+            Ok(rs.send_boxed(mid, msg, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -484,7 +485,7 @@ impl BusInner {
             let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
             let msg = self.deserialize_message(tt.clone(), de)?;
 
-            rc.send_boxed(mid | 1 << (usize::BITS - 1), msg, rc.reserve().await)?;
+            rc.send_boxed(mid | 1 << (usize::BITS - 1), msg, rc.reserve(&tt).await)?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {

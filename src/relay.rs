@@ -1,11 +1,12 @@
 use crate::{
     error::Error,
     receiver::{
-        Action, AnyReceiver, AnyWrapperArc, AnyWrapperRef, PermitDrop, ReceiverTrait,
-        SendUntypedReceiver, Stats, TypeTagAccept,
+        Action, AnyReceiver, AnyWrapperRef, PermitDrop, ReceiverTrait, SendUntypedReceiver, Stats,
+        TypeTagAccept,
     },
     Bus, Event, Message, Permit, ReciveUnypedReceiver, TypeTag,
 };
+use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
 use std::{
     pin::Pin,
@@ -27,16 +28,31 @@ impl sharded_slab::Config for SlabCfg {
 type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 
 pub(crate) struct RelayContext {
-    limit: u64,
-    processing: AtomicU64,
+    receivers: DashMap<TypeTag, Arc<RelayReceiverContext>>,
     need_flush: AtomicBool,
+    ready: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
-    response: Notify,
 }
 
-impl PermitDrop for RelayContext {
+pub struct RelayReceiverContext {
+    limit: u64,
+    processing: AtomicU64,
+    response: Arc<Notify>,
+}
+
+impl RelayReceiverContext {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            processing: Default::default(),
+            response: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl PermitDrop for RelayReceiverContext {
     fn permit_drop(&self) {
         self.processing.fetch_sub(1, Ordering::SeqCst);
     }
@@ -51,17 +67,16 @@ where
     waiters: Slab<oneshot::Sender<Result<Box<dyn Message>, Error>>>,
 }
 impl<S> RelayWrapper<S> {
-    pub fn new(inner: S, limit: u64) -> Self {
+    pub fn new(inner: S) -> Self {
         Self {
             inner,
             context: Arc::new(RelayContext {
-                limit,
-                processing: AtomicU64::new(0),
+                receivers: DashMap::new(),
                 need_flush: AtomicBool::new(false),
+                ready: AtomicBool::new(false),
                 flushed: Notify::new(),
                 synchronized: Notify::new(),
                 closed: Notify::new(),
-                response: Notify::new(),
             }),
             waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
         }
@@ -95,9 +110,7 @@ where
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>> {
         None
     }
-    fn wrapper_arc(self: Arc<Self>) -> Option<AnyWrapperArc> {
-        None
-    }
+
     fn send_boxed(
         &self,
         mid: u64,
@@ -148,12 +161,19 @@ where
             .ok_or_else(|| Error::AddListenerError)? as _)
     }
 
-    fn try_reserve(&self) -> Option<Permit> {
-        loop {
-            let count = self.context.processing.load(Ordering::Relaxed);
+    fn try_reserve(&self, tt: &TypeTag) -> Option<Permit> {
+        if !self.context.receivers.contains_key(tt) {
+            self.context
+                .receivers
+                .insert(tt.clone(), Arc::new(RelayReceiverContext::new(16)));
+        }
 
-            if count < self.context.limit {
-                let res = self.context.processing.compare_exchange(
+        loop {
+            let context = self.context.receivers.get(tt).unwrap();
+            let count = context.processing.load(Ordering::Relaxed);
+
+            if count < context.limit {
+                let res = context.processing.compare_exchange(
                     count,
                     count + 1,
                     Ordering::SeqCst,
@@ -162,7 +182,7 @@ where
                 if res.is_ok() {
                     break Some(Permit {
                         fuse: false,
-                        inner: self.context.clone(),
+                        inner: context.clone(),
                     });
                 }
 
@@ -173,8 +193,18 @@ where
         }
     }
 
-    fn reserve_notify(&self) -> &Notify {
-        &self.context.response
+    fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify> {
+        if !self.context.receivers.contains_key(tt) {
+            self.context
+                .receivers
+                .insert(tt.clone(), Arc::new(RelayReceiverContext::new(16)));
+        }
+
+        self.context.receivers.get(tt).unwrap().response.clone()
+    }
+
+    fn ready(&self) -> bool {
+        self.context.ready.load(Ordering::SeqCst)
     }
 
     fn start_polling(
@@ -187,6 +217,8 @@ where
                     let event = poll_fn(move |ctx| this.inner.poll_events(ctx)).await;
 
                     match event {
+                        Event::Pause => self.context.ready.store(false, Ordering::SeqCst),
+                        Event::Ready => self.context.ready.store(true, Ordering::SeqCst),
                         Event::Exited => {
                             self.context.closed.notify_waiters();
                             break;
@@ -194,8 +226,11 @@ where
                         Event::Flushed => self.context.flushed.notify_waiters(),
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {
-                            self.context.processing.fetch_sub(1, Ordering::SeqCst);
-                            self.context.response.notify_one();
+                            let tt = if let Ok(bm) = &resp {
+                                Some(bm.type_tag())
+                            } else {
+                                None
+                            };
 
                             if let Some(chan) = self.waiters.take(mid as _) {
                                 if let Err(err) = chan.send(resp) {
@@ -203,6 +238,13 @@ where
                                 }
                             } else {
                                 warn!("No waiters for mid({})", mid);
+                            };
+
+                            if let Some(tt) = tt {
+                                if let Some(ctx) = self.context.receivers.get(&tt) {
+                                    ctx.processing.fetch_sub(1, Ordering::SeqCst);
+                                    ctx.response.notify_one();
+                                }
                             }
                         }
 

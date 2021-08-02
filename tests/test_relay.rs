@@ -192,7 +192,7 @@ impl TypeTagAccept for TestRelay {
         &self,
         msg: &messagebus::TypeTag,
         resp: Option<&messagebus::TypeTag>,
-        err: Option<&messagebus::TypeTag>,
+        _err: Option<&messagebus::TypeTag>,
     ) -> bool {
         if msg.as_ref() == Msg::<i16>::type_tag_().as_ref() {
             if let Some(resp) = resp {
@@ -309,7 +309,7 @@ async fn test_relay() {
     };
 
     let (b, poller) = Bus::build()
-        .register_relay(relay, 1)
+        .register_relay(relay)
         .register(TmpReceiver)
         .subscribe_async::<Msg<i32>>(
             1,

@@ -70,6 +70,9 @@ macro_rules! synchronized_poller_macro {
                                 stx.send(Event::Flushed).ok();
                                 continue;
                             }
+                            Request::Action(Action::Init) => {
+                                stx.send(Event::Ready).ok();
+                            }
                             Request::Action(Action::Sync) => need_sync = true,
                             Request::Action(Action::Close) => {
                                 rx.close();

@@ -32,18 +32,19 @@ impl sharded_slab::Config for SlabCfg {
 type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 
 pub trait SendUntypedReceiver: Send + Sync {
-    fn send(&self, msg: Action) -> Result<(), SendError<Action>>;
+    fn send(&self, msg: Action, bus: &Bus) -> Result<(), SendError<Action>>;
     fn send_msg(
         &self,
         _mid: u64,
         _msg: Box<dyn Message>,
+        _bus: &Bus
     ) -> Result<(), SendError<Box<dyn Message>>> {
         unimplemented!()
     }
 }
 
 pub trait SendTypedReceiver<M: Message>: Sync {
-    fn send(&self, mid: u64, msg: M) -> Result<(), SendError<M>>;
+    fn send(&self, mid: u64, msg: M, bus: &Bus,) -> Result<(), SendError<M>>;
 }
 
 pub trait ReciveTypedReceiver<M, E>: Sync
@@ -51,11 +52,11 @@ where
     M: Message,
     E: StdSyncSendError,
 {
-    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<M, E>>;
+    fn poll_events(&self, ctx: &mut Context<'_>, bus: &Bus) -> Poll<Event<M, E>>;
 }
 
 pub trait ReciveUnypedReceiver: Sync {
-    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<Box<dyn Message>, GenericError>>;
+    fn poll_events(&self, ctx: &mut Context<'_>, bus: &Bus) -> Poll<Event<Box<dyn Message>, GenericError>>;
 }
 
 pub trait WrapperReturnTypeOnly<R: Message>: Send + Sync {
@@ -86,29 +87,26 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn typed(&self) -> Option<AnyReceiver<'_>>;
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>>;
 
-    fn send_boxed(&self, mid: u64, msg: Box<dyn Message>) -> Result<(), Error<Box<dyn Message>>>;
+    fn send_boxed(&self, mid: u64, msg: Box<dyn Message>, bus: &Bus) -> Result<(), Error<Box<dyn Message>>>;
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
     ) -> Result<u64, Error>;
 
     fn stats(&self) -> Result<Stats, Error<Action>>;
-
-    fn close(&self) -> Result<(), Error<Action>>;
+    
+    fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>>;
     fn close_notify(&self) -> &Notify;
-
-    fn sync(&self) -> Result<(), Error<Action>>;
     fn sync_notify(&self) -> &Notify;
-
-    fn flush(&self) -> Result<(), Error<Action>>;
     fn flush_notify(&self) -> &Notify;
+    fn ready_notify(&self) -> &Notify;
 
+    fn is_init_sent(&self) -> bool;
+    fn is_ready(&self) -> bool;
     fn need_flush(&self) -> bool;
 
     fn try_reserve(&self, tt: &TypeTag) -> Option<Permit>;
     fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify>;
-
-    fn ready(&self) -> bool;
 
     fn start_polling(
         self: Arc<Self>,
@@ -153,6 +151,7 @@ pub enum Action {
 pub enum Event<M, E: StdSyncSendError> {
     Response(u64, Result<M, Error<(), E>>),
     Synchronized(Result<(), Error<(), E>>),
+    InitFailed(Error<(), E>),
     Stats(Stats),
     Flushed,
     Exited,
@@ -178,20 +177,30 @@ where
     M: Message,
     R: Message,
     E: StdSyncSendError,
-    S: ReciveTypedReceiver<R, E> + Send + Sync + 'static,
+    S: SendUntypedReceiver + ReciveTypedReceiver<R, E> + Send + Sync + 'static,
 {
     fn start_polling_events(
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
-        Box::new(move |_| {
+        Box::new(move |bus| {
             Box::pin(async move {
                 loop {
                     let this = self.clone();
-                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx)).await;
+                    let bus = bus.clone();
+                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx, &bus)).await;
 
                     match event {
-                        Event::Pause => self.context.ready.store(false, Ordering::SeqCst),
-                        Event::Ready => self.context.ready.store(true, Ordering::SeqCst),
+                        Event::Pause => self.context.ready_flag.store(false, Ordering::SeqCst),
+                        Event::Ready => {
+                            self.context.ready.notify_waiters();
+                            self.context.ready_flag.store(true, Ordering::SeqCst);
+                        },
+                        Event::InitFailed(err) => {
+                            error!("Receiver init failed: {}", err);
+
+                            self.context.ready.notify_waiters();
+                            self.context.ready_flag.store(false, Ordering::SeqCst);
+                        },
                         Event::Exited => {
                             self.context.closed.notify_waiters();
                             break;
@@ -310,13 +319,14 @@ where
         &self,
         mid: u64,
         boxed_msg: Box<dyn Message>,
+        bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>> {
         let boxed = boxed_msg
             .as_any_boxed()
             .downcast::<M>()
             .map_err(|_| Error::MessageCastError)?;
 
-        Ok(SendTypedReceiver::send(&self.inner, mid, *boxed)
+        Ok(SendTypedReceiver::send(&self.inner, mid, *boxed, bus)
             .map_err(|err| Error::from(err.into_boxed()))?)
     }
 
@@ -324,24 +334,16 @@ where
         unimplemented!()
     }
 
-    fn close(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Close)?)
+    fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, action, bus)?)
     }
 
     fn close_notify(&self) -> &Notify {
         &self.context.closed
     }
 
-    fn sync(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Sync)?)
-    }
-
     fn sync_notify(&self) -> &Notify {
         &self.context.synchronized
-    }
-
-    fn flush(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Flush)?)
     }
 
     fn flush_notify(&self) -> &Notify {
@@ -356,6 +358,18 @@ where
             .waiters
             .insert(Waiter::Boxed(listener))
             .ok_or_else(|| Error::AddListenerError)? as _)
+    }
+
+    fn ready_notify(&self) -> &Notify {
+        &self.context.ready
+    }
+
+    fn is_ready(&self) -> bool {
+        self.context.ready_flag.load(Ordering::SeqCst)
+    }
+    
+    fn is_init_sent(&self) -> bool {
+        self.context.init_sent.load(Ordering::SeqCst)
     }
 
     fn need_flush(&self) -> bool {
@@ -395,10 +409,6 @@ where
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
         self.start_polling_events()
-    }
-
-    fn ready(&self) -> bool {
-        self.context.ready.load(Ordering::SeqCst)
     }
 }
 
@@ -553,11 +563,13 @@ struct ReceiverContext {
     limit: u64,
     processing: AtomicU64,
     need_flush: AtomicBool,
-    ready: AtomicBool,
+    ready_flag: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
+    ready: Notify,
     response: Arc<Notify>,
+    init_sent: AtomicBool,
 }
 
 impl PermitDrop for ReceiverContext {
@@ -609,10 +621,12 @@ impl Receiver {
                     limit,
                     processing: AtomicU64::new(0),
                     need_flush: AtomicBool::new(false),
-                    ready: AtomicBool::new(false),
+                    ready_flag: AtomicBool::new(false),
+                    init_sent: AtomicBool::new(false),
                     flushed: Notify::new(),
                     synchronized: Notify::new(),
                     closed: Notify::new(),
+                    ready: Notify::new(),
                     response: Arc::new(Notify::new()),
                 }),
                 _m: Default::default(),
@@ -662,16 +676,16 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn send<M: Message>(&self, mid: u64, msg: M, mut permit: Permit) -> Result<(), Error<M>> {
+    pub fn send<M: Message>(&self, bus: &Bus, mid: u64, msg: M, mut permit: Permit) -> Result<(), Error<M>> {
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
                 .unwrap()
-                .send(mid, msg)
+                .send(mid, msg, bus)
                 .map_err(Into::into)
         } else {
             self.inner
-                .send_boxed(mid, msg.into_boxed())
+                .send_boxed(mid, msg.into_boxed(), bus)
                 .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
                 .map(|_| ())
         };
@@ -682,16 +696,16 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn force_send<M: Message + Clone>(&self, mid: u64, msg: M) -> Result<(), Error<M>> {
+    pub fn force_send<M: Message + Clone>(&self, bus: &Bus, mid: u64, msg: M) -> Result<(), Error<M>> {
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
                 .unwrap()
-                .send(mid, msg)
+                .send(mid, msg, bus)
                 .map_err(Into::into)
         } else {
             self.inner
-                .send_boxed(mid, msg.into_boxed())
+                .send_boxed(mid, msg.into_boxed(), bus)
                 .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
                 .map(|_| ())
         };
@@ -701,12 +715,13 @@ impl Receiver {
 
     #[inline]
     pub fn send_boxed(
-        &self,
+        &self, 
+        bus: &Bus,
         mid: u64,
         msg: Box<dyn Message>,
         mut permit: Permit,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        let res = self.inner.send_boxed(mid, msg);
+        let res = self.inner.send_boxed(mid, msg, bus);
         permit.fuse = true;
         res
     }
@@ -795,10 +810,27 @@ impl Receiver {
     }
 
     #[inline]
-    pub async fn close(&self) {
+    pub fn init(&self, bus: &Bus) -> Result<(), Error<Action>> {
+        if !self.inner.is_init_sent() {
+            self.inner.send_action(bus, Action::Init)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    pub async fn ready(&self) {
+        let notify = self.inner.ready_notify().notified();
+        if !self.inner.is_ready() {
+            notify.await;
+        }
+    }
+
+    #[inline]
+    pub async fn close(&self, bus: &Bus) {
         let notify = self.inner.close_notify().notified();
 
-        if self.inner.close().is_ok() {
+        if self.inner.send_action(bus, Action::Close).is_ok() {
             notify.await;
         } else {
             warn!("close failed!");
@@ -806,10 +838,10 @@ impl Receiver {
     }
 
     #[inline]
-    pub async fn sync(&self) {
+    pub async fn sync(&self, bus: &Bus) {
         let notify = self.inner.sync_notify().notified();
 
-        if self.inner.sync().is_ok() {
+        if self.inner.send_action(bus, Action::Sync).is_ok() {
             notify.await;
         } else {
             warn!("sync failed!");
@@ -817,10 +849,10 @@ impl Receiver {
     }
 
     #[inline]
-    pub async fn flush(&self) {
+    pub async fn flush(&self, bus: &Bus) {
         let notify = self.inner.flush_notify().notified();
 
-        if self.inner.flush().is_ok() {
+        if self.inner.send_action(bus, Action::Flush).is_ok() {
             notify.await;
         } else {
             warn!("flush failed!");

@@ -22,6 +22,15 @@ pub struct GenericError {
     pub description: String,
 }
 
+impl GenericError {
+    pub fn from_any<T: TypeTagged + fmt::Display>(err: T) -> Self {
+        GenericError {
+            type_tag: err.type_tag(),
+            description: format!("{}", err),
+        }
+    }
+}
+
 impl fmt::Display for GenericError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "GenericError({}): {}", self.type_tag, self.description)

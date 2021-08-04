@@ -273,6 +273,13 @@ impl Module {
             }
         });
 
+        if !receiver_added {
+            self.receivers
+                .entry("".into())
+                .or_insert_with(SmallVec::new)
+                .push(receiver);
+        }
+
         self
     }
 
@@ -326,8 +333,13 @@ impl Module {
 
     pub fn add_module(mut self, module: Module) -> Self {
         self.message_types.extend(module.message_types);
-        self.receivers.extend(module.receivers);
         self.pollings.extend(module.pollings);
+
+        for (k, v) in module.receivers {
+            self.receivers.entry(k)
+                .or_insert_with(Default::default)
+                .extend(v);
+        }
 
         self
     }
@@ -442,6 +454,8 @@ impl BusBuilder {
         }
 
         let poller = futures::future::join_all(futs).map(|_| ()).map(|_| ());
+
+        bus.init();
 
         (bus, poller)
     }

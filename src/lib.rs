@@ -72,13 +72,43 @@ impl BusInner {
             closed: AtomicBool::new(false),
         }
     }
+}
+
+
+#[derive(Clone)]
+pub struct Bus {
+    inner: Arc<BusInner>,
+}
+
+impl Bus {
+    #[inline]
+    pub fn build() -> BusBuilder {
+        BusBuilder::new()
+    }
+
+    pub(crate) fn init(&self) {
+        for (_, rs) in &self.inner.receivers {
+            for r in rs {
+                println!("init {}", r.name());
+                r.init(self).unwrap();
+            }
+        }
+    }
+
+    pub async fn ready(&self) {
+        for (_, rs) in &self.inner.receivers {
+            for r in rs {
+                r.ready().await;
+            }
+        }
+    }
 
     pub async fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.inner.closed.store(true, Ordering::SeqCst);
 
-        for (_, rs) in &self.receivers {
+        for (_, rs) in &self.inner.receivers {
             for r in rs {
-                r.close().await;
+                r.close(self).await;
             }
         }
     }
@@ -90,11 +120,11 @@ impl BusInner {
         for _ in 0..fuse_count {
             iters += 1;
             let mut flushed = false;
-            for (_, rs) in &self.receivers {
+            for (_, rs) in &self.inner.receivers {
                 for r in rs {
                     if r.need_flush() {
                         flushed = true;
-                        r.flush().await;
+                        r.flush(self).await;
                     }
                 }
             }
@@ -118,9 +148,9 @@ impl BusInner {
     pub async fn flush_and_sync(&self) {
         self.flush().await;
 
-        for (_, rs) in &self.receivers {
+        for (_, rs) in &self.inner.receivers {
             for r in rs {
-                r.sync().await;
+                r.sync(self).await;
             }
         }
     }
@@ -149,14 +179,14 @@ impl BusInner {
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt) {
+        if let Some(rs) = self.inner.receivers.get(&tt) {
             let permits = if let Some(x) = self.try_reserve(&tt, rs) {
                 x
             } else {
@@ -169,13 +199,13 @@ impl BusInner {
 
             while counter < total {
                 let (p, r) = iter.next().unwrap();
-                let _ = r.send(mid, msg.clone(), p);
+                let _ = r.send(self, mid, msg.clone(), p);
 
                 counter += 1;
             }
 
             if let Some((p, r)) = iter.next() {
-                let _ = r.send(mid, msg, p);
+                let _ = r.send(self, mid, msg, p);
                 return Ok(());
             }
         }
@@ -212,11 +242,11 @@ impl BusInner {
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
-        for r in &self.receivers {
+        for r in &self.inner.receivers {
             println!("{:?}: ", r.0);
             for i in r.1 {
                 println!("  {:?}: ", i.name());
@@ -226,13 +256,13 @@ impl BusInner {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt) {
+        if let Some(rs) = self.inner.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.send(mid, msg.clone(), r.reserve(&tt).await);
+                    let _ = r.send(self, mid, msg.clone(), r.reserve(&tt).await);
                 }
 
-                let _ = last.send(mid, msg, last.reserve(&tt).await);
+                let _ = last.send(self, mid, msg, last.reserve(&tt).await);
 
                 return Ok(());
             }
@@ -256,20 +286,20 @@ impl BusInner {
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt) {
+        if let Some(rs) = self.inner.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.force_send(mid, msg.clone());
+                    let _ = r.force_send(self, mid, msg.clone());
                 }
 
-                let _ = last.force_send(mid, msg);
+                let _ = last.force_send(self, mid, msg);
 
                 return Ok(());
             }
@@ -285,36 +315,36 @@ impl BusInner {
 
     #[inline]
     pub fn try_send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
             let permits = if let Some(x) = rs.try_reserve(&tt) {
                 x
             } else {
                 return Err(SendError::Full(msg).into());
             };
 
-            Ok(rs.send(mid, msg, permits)?)
+            Ok(rs.send(self, mid, msg, permits)?)
         } else {
             Err(Error::NoReceivers)
         }
     }
 
     pub async fn send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
-            Ok(rs.send(mid, msg, rs.reserve(&tt).await)?)
+        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
+            Ok(rs.send(self, mid, msg, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -341,7 +371,7 @@ impl BusInner {
 
             let mid = mid | 1 << (u64::BITS - 1);
 
-            rc.send(mid, req, rc.reserve(&tid).await)?;
+            rc.send(self, mid, req, rc.reserve(&tid).await)?;
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -365,7 +395,7 @@ impl BusInner {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send(mid | 1 << (u64::BITS - 1), req, rc.reserve(&tid).await)
+            rc.send(self, mid | 1 << (u64::BITS - 1), req, rc.reserve(&tid).await)
                 .map_err(|x| x.map_err(|_| unimplemented!()))?;
 
             rx.await.map_err(|x| x.specify::<M>())
@@ -379,20 +409,20 @@ impl BusInner {
         msg: Box<dyn Message>,
         _options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt) {
+        if let Some(rs) = self.inner.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.send_boxed(mid, msg.try_clone_boxed().unwrap(), r.reserve(&tt).await);
+                    let _ = r.send_boxed(self, mid, msg.try_clone_boxed().unwrap(), r.reserve(&tt).await);
                 }
 
-                let _ = last.send_boxed(mid, msg, last.reserve(&tt).await);
+                let _ = last.send_boxed(self, mid, msg, last.reserve(&tt).await);
 
                 return Ok(());
             }
@@ -408,15 +438,15 @@ impl BusInner {
         msg: Box<dyn Message>,
         _options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
         }
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
-            Ok(rs.send_boxed(mid, msg, rs.reserve(&tt).await)?)
+        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
+            Ok(rs.send_boxed(self, mid, msg, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -427,7 +457,7 @@ impl BusInner {
         req: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(req).into());
         }
 
@@ -440,7 +470,7 @@ impl BusInner {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(mid | 1 << (usize::BITS - 1), req, rc.reserve(&tt).await)?;
+            rc.send_boxed(self, mid | 1 << (usize::BITS - 1), req, rc.reserve(&tt).await)?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -454,16 +484,16 @@ impl BusInner {
         de: &'b mut dyn erased_serde::Deserializer<'c>,
         _options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             println!("closed message bus");
             return Err(Error::NoResponse);
         }
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.receivers.get(&tt).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
             let msg = self.deserialize_message(tt.clone(), de)?;
-            Ok(rs.send_boxed(mid, msg, rs.reserve(&tt).await)?)
+            Ok(rs.send_boxed(self, mid, msg, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -475,7 +505,7 @@ impl BusInner {
         de: &'b mut dyn erased_serde::Deserializer<'c>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::SeqCst) {
             println!("closed message bus");
             return Err(Error::NoResponse);
         }
@@ -485,7 +515,7 @@ impl BusInner {
             let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
             let msg = self.deserialize_message(tt.clone(), de)?;
 
-            rc.send_boxed(mid | 1 << (usize::BITS - 1), msg, rc.reserve(&tt).await)?;
+            rc.send_boxed(self, mid | 1 << (usize::BITS - 1), msg, rc.reserve(&tt).await)?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -499,6 +529,7 @@ impl BusInner {
         de: &mut dyn erased_serde::Deserializer<'_>,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
         let md = self
+            .inner
             .message_types
             .get(&tt)
             .ok_or_else(|| Error::TypeTagNotRegistered(tt))?;
@@ -515,31 +546,11 @@ impl BusInner {
         rid: Option<&'c TypeTag>,
         eid: Option<&'d TypeTag>,
     ) -> impl Iterator<Item = &Receiver> + 'a {
-        self.receivers
+        self.inner.receivers
             .get(tid)
             .into_iter()
             .map(|item| item.iter())
             .flatten()
             .filter(move |x| x.accept(tid, rid, eid))
-    }
-}
-
-#[derive(Clone)]
-pub struct Bus {
-    inner: Arc<BusInner>,
-}
-
-impl core::ops::Deref for Bus {
-    type Target = BusInner;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.as_ref()
-    }
-}
-
-impl Bus {
-    #[inline]
-    pub fn build() -> BusBuilder {
-        BusBuilder::new()
     }
 }

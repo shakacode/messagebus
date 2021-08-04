@@ -30,10 +30,12 @@ type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 pub(crate) struct RelayContext {
     receivers: DashMap<TypeTag, Arc<RelayReceiverContext>>,
     need_flush: AtomicBool,
-    ready: AtomicBool,
+    ready_flag: AtomicBool,
+    init_sent: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
+    ready: Notify,
 }
 
 pub struct RelayReceiverContext {
@@ -73,10 +75,12 @@ impl<S> RelayWrapper<S> {
             context: Arc::new(RelayContext {
                 receivers: DashMap::new(),
                 need_flush: AtomicBool::new(false),
-                ready: AtomicBool::new(false),
+                ready_flag: AtomicBool::new(false),
+                init_sent: AtomicBool::new(false),
                 flushed: Notify::new(),
                 synchronized: Notify::new(),
                 closed: Notify::new(),
+                ready: Notify::new(),
             }),
             waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
         }
@@ -115,8 +119,9 @@ where
         &self,
         mid: u64,
         boxed_msg: Box<dyn Message>,
+        bus: &Bus
     ) -> Result<(), Error<Box<dyn Message>>> {
-        Ok(self.inner.send_msg(mid, boxed_msg)?)
+        Ok(self.inner.send_msg(mid, boxed_msg, bus)?)
     }
 
     fn need_flush(&self) -> bool {
@@ -127,24 +132,16 @@ where
         unimplemented!()
     }
 
-    fn close(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Close)?)
+    fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>> {
+        Ok(SendUntypedReceiver::send(&self.inner, action, bus)?)
     }
 
     fn close_notify(&self) -> &Notify {
         &self.context.closed
     }
 
-    fn sync(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Sync)?)
-    }
-
     fn sync_notify(&self) -> &Notify {
         &self.context.synchronized
-    }
-
-    fn flush(&self) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, Action::Flush)?)
     }
 
     fn flush_notify(&self) -> &Notify {
@@ -203,22 +200,40 @@ where
         self.context.receivers.get(tt).unwrap().response.clone()
     }
 
-    fn ready(&self) -> bool {
-        self.context.ready.load(Ordering::SeqCst)
+    fn ready_notify(&self) -> &Notify {
+        &self.context.ready
+    }
+
+    fn is_ready(&self) -> bool {
+        self.context.ready_flag.load(Ordering::SeqCst)
+    }
+
+    fn is_init_sent(&self) -> bool {
+        self.context.init_sent.load(Ordering::SeqCst)
     }
 
     fn start_polling(
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
-        Box::new(move |_| {
+        Box::new(move |bus| {
             Box::pin(async move {
                 loop {
                     let this = self.clone();
-                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx)).await;
+                    let bus = bus.clone();
+                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx, &bus)).await;
 
                     match event {
-                        Event::Pause => self.context.ready.store(false, Ordering::SeqCst),
-                        Event::Ready => self.context.ready.store(true, Ordering::SeqCst),
+                        Event::Pause => self.context.ready_flag.store(false, Ordering::SeqCst),
+                        Event::Ready => {
+                            self.context.ready.notify_waiters();
+                            self.context.ready_flag.store(true, Ordering::SeqCst)
+                        },
+                        Event::InitFailed(err) => {
+                            error!("Relay init failed: {}", err);
+                            
+                            self.context.ready.notify_waiters();
+                            self.context.ready_flag.store(false, Ordering::SeqCst);
+                        },
                         Event::Exited => {
                             self.context.closed.notify_waiters();
                             break;

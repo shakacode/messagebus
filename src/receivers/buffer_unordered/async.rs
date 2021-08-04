@@ -100,7 +100,7 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, m: Action) -> Result<(), SendError<Action>> {
+    fn send(&self, m: Action, _bus: &Bus) -> Result<(), SendError<Action>> {
         match self.tx.send(Request::Action(m)) {
             Ok(_) => Ok(()),
             Err(mpsc::error::SendError(Request::Action(msg))) => Err(SendError::Closed(msg)),
@@ -115,7 +115,7 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, mid: u64, m: M) -> Result<(), SendError<M>> {
+    fn send(&self, mid: u64, m: M, _bus: &Bus) -> Result<(), SendError<M>> {
         match self.tx.send(Request::Request(mid, m)) {
             Ok(_) => {
                 self.stats.buffer.fetch_add(1, Ordering::Relaxed);
@@ -134,7 +134,7 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn poll_events(&self, ctx: &mut Context<'_>) -> Poll<Event<R, E>> {
+    fn poll_events(&self, ctx: &mut Context<'_>, _bus: &Bus) -> Poll<Event<R, E>> {
         let poll = self.srx.lock().poll_recv(ctx);
         match poll {
             Poll::Pending => Poll::Pending,

@@ -72,7 +72,7 @@ macro_rules! buffer_unordered_poller_macro {
                                 }
                                 Request::Action(Action::Init) => {
                                     stx.send(Event::Ready).ok();
-                                },
+                                }
                                 Request::Action(Action::Flush) => need_flush = true,
                                 Request::Action(Action::Close) => rx.close(),
                                 Request::Action(Action::Sync) => {

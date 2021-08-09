@@ -6,7 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use messagebus::{
     derive::{Error as MbError, Message},
-    error, AsyncHandler, Bus, Message,
+    error, AsyncHandler, Bus, Message, MessageBounds,
 };
 use thiserror::Error;
 
@@ -27,7 +27,7 @@ struct Msg;
 
 #[derive(Debug, Clone, serde_derive::Serialize, serde_derive::Deserialize, Message)]
 #[message(clone, shared)]
-struct SharedMsg<T: core::fmt::Debug + Clone + serde::Serialize + Send + Sync + Unpin + 'static>(
+struct SharedMsg<T: serde::Serialize + MessageBounds + Clone>(
     #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))] T,
 );
 

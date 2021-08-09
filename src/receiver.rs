@@ -37,14 +37,14 @@ pub trait SendUntypedReceiver: Send + Sync {
         &self,
         _mid: u64,
         _msg: Box<dyn Message>,
-        _bus: &Bus
+        _bus: &Bus,
     ) -> Result<(), SendError<Box<dyn Message>>> {
         unimplemented!()
     }
 }
 
 pub trait SendTypedReceiver<M: Message>: Sync {
-    fn send(&self, mid: u64, msg: M, bus: &Bus,) -> Result<(), SendError<M>>;
+    fn send(&self, mid: u64, msg: M, bus: &Bus) -> Result<(), SendError<M>>;
 }
 
 pub trait ReciveTypedReceiver<M, E>: Sync
@@ -56,7 +56,11 @@ where
 }
 
 pub trait ReciveUnypedReceiver: Sync {
-    fn poll_events(&self, ctx: &mut Context<'_>, bus: &Bus) -> Poll<Event<Box<dyn Message>, GenericError>>;
+    fn poll_events(
+        &self,
+        ctx: &mut Context<'_>,
+        bus: &Bus,
+    ) -> Poll<Event<Box<dyn Message>, GenericError>>;
 }
 
 pub trait WrapperReturnTypeOnly<R: Message>: Send + Sync {
@@ -87,14 +91,19 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn typed(&self) -> Option<AnyReceiver<'_>>;
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>>;
 
-    fn send_boxed(&self, mid: u64, msg: Box<dyn Message>, bus: &Bus) -> Result<(), Error<Box<dyn Message>>>;
+    fn send_boxed(
+        &self,
+        mid: u64,
+        msg: Box<dyn Message>,
+        bus: &Bus,
+    ) -> Result<(), Error<Box<dyn Message>>>;
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
     ) -> Result<u64, Error>;
 
     fn stats(&self) -> Result<Stats, Error<Action>>;
-    
+
     fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>>;
     fn close_notify(&self) -> &Notify;
     fn sync_notify(&self) -> &Notify;
@@ -194,13 +203,13 @@ where
                         Event::Ready => {
                             self.context.ready.notify_waiters();
                             self.context.ready_flag.store(true, Ordering::SeqCst);
-                        },
+                        }
                         Event::InitFailed(err) => {
                             error!("Receiver init failed: {}", err);
 
                             self.context.ready.notify_waiters();
                             self.context.ready_flag.store(false, Ordering::SeqCst);
-                        },
+                        }
                         Event::Exited => {
                             self.context.closed.notify_waiters();
                             break;
@@ -367,7 +376,7 @@ where
     fn is_ready(&self) -> bool {
         self.context.ready_flag.load(Ordering::SeqCst)
     }
-    
+
     fn is_init_sent(&self) -> bool {
         self.context.init_sent.load(Ordering::SeqCst)
     }
@@ -676,7 +685,13 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn send<M: Message>(&self, bus: &Bus, mid: u64, msg: M, mut permit: Permit) -> Result<(), Error<M>> {
+    pub fn send<M: Message>(
+        &self,
+        bus: &Bus,
+        mid: u64,
+        msg: M,
+        mut permit: Permit,
+    ) -> Result<(), Error<M>> {
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
@@ -696,7 +711,12 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn force_send<M: Message + Clone>(&self, bus: &Bus, mid: u64, msg: M) -> Result<(), Error<M>> {
+    pub fn force_send<M: Message + Clone>(
+        &self,
+        bus: &Bus,
+        mid: u64,
+        msg: M,
+    ) -> Result<(), Error<M>> {
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
@@ -715,7 +735,7 @@ impl Receiver {
 
     #[inline]
     pub fn send_boxed(
-        &self, 
+        &self,
         bus: &Bus,
         mid: u64,
         msg: Box<dyn Message>,

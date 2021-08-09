@@ -4,8 +4,8 @@ use std::any::type_name;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-pub trait MessageBounds: fmt::Debug + Unpin + Send + Sync + 'static {}
-impl<T: fmt::Debug + Unpin + Send + Sync + 'static> MessageBounds for T {}
+pub trait MessageBounds: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static {}
+impl<T: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static> MessageBounds for T {}
 
 pub type TypeTag = Cow<'static, str>;
 
@@ -18,7 +18,7 @@ pub trait TypeTagged {
     fn type_name(&self) -> Cow<str>;
 }
 
-pub trait Message: TypeTagged + MessageBounds {
+pub trait Message: MessageBounds {
     fn as_any_ref(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn as_any_boxed(self: Box<Self>) -> Box<dyn Any>;
@@ -33,16 +33,47 @@ pub trait Message: TypeTagged + MessageBounds {
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>>;
 }
 
-impl TypeTagged for () {
-    fn type_tag_() -> TypeTag {
-        type_name::<Self>().into()
-    }
-    fn type_tag(&self) -> TypeTag {
-        type_name::<Self>().into()
-    }
-    fn type_name(&self) -> Cow<str> {
-        type_name::<Self>().into()
-    }
+macro_rules! gen_impls {
+    ($t:ty, $($rest:tt)*) => {
+        impl TypeTagged for $t {
+            fn type_tag_() -> TypeTag {
+                type_name::<$t>().into()
+            }
+            fn type_tag(&self) -> TypeTag {
+                type_name::<$t>().into()
+            }
+            fn type_name(&self) -> Cow<str> {
+                type_name::<$t>().into()
+            }
+        }
+
+        gen_impls!{ $($rest)* }
+    };
+
+    ($t:ty) => {
+        impl TypeTagged for $t {
+            fn type_tag_() -> TypeTag {
+                type_name::<$t>().into()
+            }
+            fn type_tag(&self) -> TypeTag {
+                type_name::<$t>().into()
+            }
+            fn type_name(&self) -> Cow<str> {
+                type_name::<$t>().into()
+            }
+        }
+    };
+}
+
+gen_impls! {
+    (), bool,
+    i8, u8,
+    i16, u16,
+    i32, u32,
+    i64, u64,
+    i128, u128,
+    f32, f64,
+    String
 }
 
 impl<T: TypeTagged> TypeTagged for Arc<T> {

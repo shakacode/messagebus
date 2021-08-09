@@ -119,7 +119,7 @@ where
         &self,
         mid: u64,
         boxed_msg: Box<dyn Message>,
-        bus: &Bus
+        bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>> {
         Ok(self.inner.send_msg(mid, boxed_msg, bus)?)
     }
@@ -227,13 +227,13 @@ where
                         Event::Ready => {
                             self.context.ready.notify_waiters();
                             self.context.ready_flag.store(true, Ordering::SeqCst)
-                        },
+                        }
                         Event::InitFailed(err) => {
                             error!("Relay init failed: {}", err);
-                            
+
                             self.context.ready.notify_waiters();
                             self.context.ready_flag.store(false, Ordering::SeqCst);
-                        },
+                        }
                         Event::Exited => {
                             self.context.closed.notify_waiters();
                             break;

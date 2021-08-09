@@ -74,7 +74,6 @@ impl BusInner {
     }
 }
 
-
 #[derive(Clone)]
 pub struct Bus {
     inner: Arc<BusInner>,
@@ -395,8 +394,13 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send(self, mid | 1 << (u64::BITS - 1), req, rc.reserve(&tid).await)
-                .map_err(|x| x.map_err(|_| unimplemented!()))?;
+            rc.send(
+                self,
+                mid | 1 << (u64::BITS - 1),
+                req,
+                rc.reserve(&tid).await,
+            )
+            .map_err(|x| x.map_err(|_| unimplemented!()))?;
 
             rx.await.map_err(|x| x.specify::<M>())
         } else {
@@ -419,7 +423,12 @@ impl Bus {
         if let Some(rs) = self.inner.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.send_boxed(self, mid, msg.try_clone_boxed().unwrap(), r.reserve(&tt).await);
+                    let _ = r.send_boxed(
+                        self,
+                        mid,
+                        msg.try_clone_boxed().unwrap(),
+                        r.reserve(&tt).await,
+                    );
                 }
 
                 let _ = last.send_boxed(self, mid, msg, last.reserve(&tt).await);
@@ -470,7 +479,12 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(self, mid | 1 << (usize::BITS - 1), req, rc.reserve(&tt).await)?;
+            rc.send_boxed(
+                self,
+                mid | 1 << (usize::BITS - 1),
+                req,
+                rc.reserve(&tt).await,
+            )?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -515,7 +529,12 @@ impl Bus {
             let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
             let msg = self.deserialize_message(tt.clone(), de)?;
 
-            rc.send_boxed(self, mid | 1 << (usize::BITS - 1), msg, rc.reserve(&tt).await)?;
+            rc.send_boxed(
+                self,
+                mid | 1 << (usize::BITS - 1),
+                msg,
+                rc.reserve(&tt).await,
+            )?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -546,7 +565,8 @@ impl Bus {
         rid: Option<&'c TypeTag>,
         eid: Option<&'d TypeTag>,
     ) -> impl Iterator<Item = &Receiver> + 'a {
-        self.inner.receivers
+        self.inner
+            .receivers
             .get(tid)
             .into_iter()
             .map(|item| item.iter())

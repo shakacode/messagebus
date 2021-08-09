@@ -336,7 +336,8 @@ impl Module {
         self.pollings.extend(module.pollings);
 
         for (k, v) in module.receivers {
-            self.receivers.entry(k)
+            self.receivers
+                .entry(k)
                 .or_insert_with(Default::default)
                 .extend(v);
         }

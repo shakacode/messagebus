@@ -56,7 +56,19 @@ fn clone_part(ast: &syn::DeriveInput, has_clone: bool) -> proc_macro2::TokenStre
 
 fn type_tag_part(ast: &syn::DeriveInput, type_tag: Option<LitStr>) -> proc_macro2::TokenStream {
     let name = &ast.ident;
-    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
+    let (_, ty_generics, where_clause) = ast.generics.split_for_impl();
+    let mut impl_generics = ast.generics.clone();
+
+    for mut param in impl_generics.params.pairs_mut() {       
+        match &mut param.value_mut() {
+            syn::GenericParam::Lifetime(_) => continue,
+            syn::GenericParam::Type(param) => {
+                let bound: syn::TypeParamBound = syn::parse_str("messagebus::TypeTagged").unwrap();
+                param.bounds.push(bound);
+            }
+            syn::GenericParam::Const(_) => {}
+        }
+    }
 
     if let Some(type_tag) = type_tag {
         quote! {
@@ -200,7 +212,6 @@ pub fn derive_error(input: TokenStream) -> TokenStream {
     }
 
     let type_tag_part = type_tag_part(&ast, type_tag);
-    
     let tokens = quote! {
         #type_tag_part
     };

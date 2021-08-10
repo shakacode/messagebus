@@ -1,12 +1,13 @@
-#![recursion_limit="128"]
+#![recursion_limit = "128"]
 
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use syn::{LitStr, Result, parenthesized};
-use syn::{DeriveInput, punctuated::Punctuated, token::Comma};
-use syn::parse::{Parse, ParseStream};
 use quote::quote;
+use std::fmt::Write;
+use syn::parse::{Parse, ParseStream};
+use syn::{parenthesized, LitStr, Result};
+use syn::{punctuated::Punctuated, token::Comma, DeriveInput};
 
 fn shared_part(_ast: &syn::DeriveInput, has_shared: bool) -> proc_macro2::TokenStream {
     if has_shared {
@@ -38,7 +39,7 @@ fn clone_part(ast: &syn::DeriveInput, has_clone: bool) -> proc_macro2::TokenStre
                 } else {
                     return false;
                 };
-    
+
                 into.replace(core::clone::Clone::clone(self));
                 true
             }
@@ -55,35 +56,74 @@ fn clone_part(ast: &syn::DeriveInput, has_clone: bool) -> proc_macro2::TokenStre
 }
 
 fn type_tag_part(ast: &syn::DeriveInput, type_tag: Option<LitStr>) -> proc_macro2::TokenStream {
-    let name = &ast.ident;
+    let class_name = &ast.ident;
+    let name = if let Some(tt) = type_tag {
+        tt.value()
+    } else {
+        class_name.to_string()
+    };
+
     let (_, ty_generics, where_clause) = ast.generics.split_for_impl();
     let mut impl_generics = ast.generics.clone();
 
-    for mut param in impl_generics.params.pairs_mut() {       
+    let mut type_name = String::new();
+    let mut type_values = String::from("(");
+    let mut need_close = false;
+
+    write!(&mut type_name, "{}", name).unwrap();
+    for mut param in impl_generics.params.pairs_mut() {
         match &mut param.value_mut() {
             syn::GenericParam::Lifetime(_) => continue,
             syn::GenericParam::Type(param) => {
+                if !need_close {
+                    type_name.push('<');
+                    need_close = true;
+                } else {
+                    type_name.push(',');
+                    type_values.push(',');
+                }
+
+                type_name.push_str("{}");
+
+                write!(
+                    &mut type_values,
+                    "<{} as messagebus::TypeTagged>::type_tag_()",
+                    param.ident
+                )
+                .unwrap();
+
                 let bound: syn::TypeParamBound = syn::parse_str("messagebus::TypeTagged").unwrap();
                 param.bounds.push(bound);
             }
-            syn::GenericParam::Const(_) => {}
+            syn::GenericParam::Const(_param) => {
+                unimplemented!()
+            }
         }
     }
 
-    if let Some(type_tag) = type_tag {
+    if need_close {
+        type_name.push('>');
+    }
+
+    if type_values.len() > 1 {
+        type_values.push_str(",)");
+
+        let type_values: syn::ExprTuple = syn::parse_str(&type_values).unwrap();
+        let type_values = type_values.elems;
+
         quote! {
-            impl #impl_generics messagebus::TypeTagged for #name #ty_generics #where_clause {
-                fn type_tag_() -> messagebus::TypeTag { #type_tag.into() }
-                fn type_tag(&self) -> messagebus::TypeTag {  #type_tag.into() }
-                fn type_name(&self) -> std::borrow::Cow<str> {  #type_tag.into() }
+            impl #impl_generics messagebus::TypeTagged for #class_name #ty_generics #where_clause {
+                fn type_tag_() -> messagebus::TypeTag { format!(#type_name, #type_values).into() }
+                fn type_tag(&self) -> messagebus::TypeTag {  Self::type_tag_() }
+                fn type_name(&self) -> std::borrow::Cow<str> {  Self::type_tag_() }
             }
         }
     } else {
         quote! {
-            impl #impl_generics messagebus::TypeTagged for #name #ty_generics #where_clause {
-                fn type_tag_() -> messagebus::TypeTag { std::any::type_name::<Self>().into() }
-                fn type_tag(&self) -> messagebus::TypeTag { std::any::type_name::<Self>().into() }
-                fn type_name(&self) -> std::borrow::Cow<str> { std::any::type_name::<Self>().into() }
+            impl #impl_generics messagebus::TypeTagged for #class_name #ty_generics #where_clause {
+                fn type_tag_() -> messagebus::TypeTag { #type_name.into() }
+                fn type_tag(&self) -> messagebus::TypeTag {  Self::type_tag_() }
+                fn type_name(&self) -> std::borrow::Cow<str> {  Self::type_tag_() }
             }
         }
     }
@@ -103,9 +143,11 @@ impl Parse for TypeTag {
         for pair in punctuated.pairs() {
             inner = Some(pair.into_value());
             break;
-        } 
+        }
 
-        Ok(TypeTag { inner: inner.unwrap().to_owned() })
+        Ok(TypeTag {
+            inner: inner.unwrap().to_owned(),
+        })
     }
 }
 
@@ -126,7 +168,7 @@ impl Parse for Tags {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut has_shared = false;
         let mut has_clone = false;
-        
+
         let content;
         parenthesized!(content in input);
         let punctuated = Punctuated::<syn::Ident, Comma>::parse_terminated(&content)?;
@@ -136,9 +178,9 @@ impl Parse for Tags {
             match val.as_str() {
                 "shared" => has_shared = true,
                 "clone" => has_clone = true,
-                _ => ()
+                _ => (),
             }
-        } 
+        }
 
         Ok(Tags {
             has_clone,
@@ -168,7 +210,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
                     type_tag = Some(tt.inner);
                 }
 
-                _ => ()
+                _ => (),
             }
         }
     }
@@ -206,7 +248,7 @@ pub fn derive_error(input: TokenStream) -> TokenStream {
                     type_tag = Some(tt.inner);
                 }
 
-                _ => ()
+                _ => (),
             }
         }
     }

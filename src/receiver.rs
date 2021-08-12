@@ -70,6 +70,13 @@ pub trait WrapperReturnTypeOnly<R: Message>: Send + Sync {
     ) -> Result<u64, Error>;
 }
 
+pub trait WrapperErrorTypeOnly<E: StdSyncSendError>: Send + Sync {
+    fn add_response_listener(
+        &self,
+        listener: oneshot::Sender<Result<Box<dyn Message>, Error<(), E>>>,
+    ) -> Result<u64, Error>;
+}
+
 pub trait WrapperReturnTypeAndError<R: Message, E: StdSyncSendError>: Send + Sync {
     fn start_polling_events(
         self: Arc<Self>,
@@ -252,6 +259,10 @@ where
                 Waiter::Boxed(sender) => sender
                     .send(resp.map_err(|e| e.into_dyn()).map(|x| x.into_boxed()))
                     .unwrap(),
+
+                Waiter::BoxedWithError(sender) => sender
+                    .send(resp.map(|x| x.into_boxed()))
+                    .unwrap(),
             }
         }
 
@@ -273,6 +284,24 @@ where
         Ok(self
             .waiters
             .insert(Waiter::WithoutErrorType(listener))
+            .ok_or_else(|| Error::AddListenerError)? as _)
+    }
+}
+
+impl<M, R, E, S> WrapperErrorTypeOnly<E> for ReceiverWrapper<M, R, E, S>
+where
+    M: Message,
+    R: Message,
+    E: StdSyncSendError,
+    S: ReciveTypedReceiver<R, E> + Send + Sync + 'static,
+{
+    fn add_response_listener(
+        &self,
+        listener: oneshot::Sender<Result<Box<dyn Message>, Error<(), E>>>,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .waiters
+            .insert(Waiter::BoxedWithError(listener))
             .ok_or_else(|| Error::AddListenerError)? as _)
     }
 }
@@ -481,6 +510,7 @@ unsafe impl Send for AnyReceiver<'_> {}
 pub struct AnyWrapperRef<'a> {
     data: *mut (),
     wrapper_r: (TypeId, *mut ()),
+    wrapper_e: (TypeId, *mut ()),
     wrapper_re: (TypeId, *mut ()),
     _m: PhantomData<&'a usize>,
 }
@@ -490,12 +520,14 @@ impl<'a> AnyWrapperRef<'a> {
     where
         R: Message,
         E: StdSyncSendError,
-        S: WrapperReturnTypeOnly<R> + WrapperReturnTypeAndError<R, E> + 'static,
+        S: WrapperReturnTypeOnly<R> + WrapperErrorTypeOnly<E> + WrapperReturnTypeAndError<R, E> + 'static,
     {
         let wrapper_r = rcvr as &(dyn WrapperReturnTypeOnly<R>);
+        let wrapper_e = rcvr as &(dyn WrapperErrorTypeOnly<E>);
         let wrapper_re = rcvr as &(dyn WrapperReturnTypeAndError<R, E>);
 
         let wrapper_r: TraitObject = unsafe { mem::transmute(wrapper_r) };
+        let wrapper_e: TraitObject = unsafe { mem::transmute(wrapper_e) };
         let wrapper_re: TraitObject = unsafe { mem::transmute(wrapper_re) };
 
         Self {
@@ -503,6 +535,10 @@ impl<'a> AnyWrapperRef<'a> {
             wrapper_r: (
                 TypeId::of::<dyn WrapperReturnTypeOnly<R>>(),
                 wrapper_r.vtable,
+            ),
+            wrapper_e: (
+                TypeId::of::<dyn WrapperErrorTypeOnly<E>>(),
+                wrapper_e.vtable,
             ),
             wrapper_re: (
                 TypeId::of::<dyn WrapperReturnTypeAndError<R, E>>(),
@@ -522,6 +558,20 @@ impl<'a> AnyWrapperRef<'a> {
             mem::transmute(TraitObject {
                 data: self.data,
                 vtable: self.wrapper_r.1,
+            })
+        })
+    }
+
+    #[inline]
+    pub fn cast_error_only<E: StdSyncSendError>(&'a self) -> Option<&'a dyn WrapperErrorTypeOnly<E>> {
+        if self.wrapper_e.0 != TypeId::of::<dyn WrapperErrorTypeOnly<E>>() {
+            return None;
+        }
+
+        Some(unsafe {
+            mem::transmute(TraitObject {
+                data: self.data,
+                vtable: self.wrapper_e.1,
             })
         })
     }
@@ -591,6 +641,7 @@ enum Waiter<R: Message, E: StdSyncSendError> {
     WithErrorType(oneshot::Sender<Result<R, Error<(), E>>>),
     WithoutErrorType(oneshot::Sender<Result<R, Error>>),
     Boxed(oneshot::Sender<Result<Box<dyn Message>, Error>>),
+    BoxedWithError(oneshot::Sender<Result<Box<dyn Message>, Error<(), E>>>),
 }
 
 #[derive(Clone)]
@@ -766,6 +817,28 @@ impl Receiver {
                 Err(err) => Err(Error::from(err)),
             }
         }))
+    }
+
+    #[inline]
+    pub(crate) fn add_response_waiter_boxed_we<E: StdSyncSendError>(
+        &self,
+    ) -> Result<(u64, impl Future<Output = Result<Box<dyn Message>, Error<(), E>>>), Error> {
+        if let Some(any_wrapper) = self.inner.wrapper() {
+            let (tx, rx) = oneshot::channel();
+            let mid = any_wrapper
+                .cast_error_only::<E>()
+                .unwrap()
+                .add_response_listener(tx)?;
+
+            Ok((mid, async move {
+                match rx.await {
+                    Ok(x) => x,
+                    Err(err) => Err(Error::from(err)),
+                }
+            }))
+        } else {
+            unimplemented!()
+        }
     }
 
     #[inline]

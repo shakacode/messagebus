@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{any::type_name, borrow::Cow};
+use std::{any::type_name};
 
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -26,7 +26,7 @@ impl GenericError {
     pub fn from_any<T: TypeTagged + fmt::Display>(err: T) -> Self {
         GenericError {
             type_tag: err.type_tag(),
-            description: format!("{}", err),
+            description: format!("{}[{}]", err.type_tag(), err),
         }
     }
 }
@@ -40,7 +40,7 @@ impl fmt::Display for GenericError {
 impl std::error::Error for GenericError {}
 
 impl TypeTagged for GenericError {
-    fn type_name(&self) -> Cow<str> {
+    fn type_tag_() -> TypeTag {
         type_name::<GenericError>().into()
     }
 
@@ -48,10 +48,7 @@ impl TypeTagged for GenericError {
         type_name::<GenericError>().into()
     }
 
-    fn type_tag_() -> TypeTag
-    where
-        Self: Sized,
-    {
+    fn type_name(&self) -> TypeTag {
         type_name::<GenericError>().into()
     }
 }
@@ -156,6 +153,14 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
             Error::NotReady => Error::NotReady,
         }
     }
+
+    pub fn try_unwrap(self) -> Option<E> {
+        match self {
+            Error::Other(inner) => Some(inner),
+            Error::OtherBoxed(_) => None,
+            _ => None,
+        }
+    }
 }
 
 impl<M: Message, E: StdSyncSendError> Error<M, E> {
@@ -242,3 +247,12 @@ impl Error<Box<dyn Message>> {
         }
     }
 }
+
+// impl<M: fmt::Debug> Error<M> {
+//     pub fn downcast<E>(self) -> Result<E, Self> {
+//         match self {
+//             Error::OtherBoxed(inner) => Ok(),
+//             err => Err(err) 
+//         }
+//     }
+// }

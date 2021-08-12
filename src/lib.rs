@@ -492,6 +492,38 @@ impl Bus {
         }
     }
 
+    pub async fn request_boxed_we<E: StdSyncSendError>(
+        &self,
+        req: Box<dyn Message>,
+        options: SendOptions,
+    ) -> Result<Box<dyn Message>, Error<Box<dyn Message>, E>> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(SendError::Closed(req).into());
+        }
+
+        let tt = req.type_tag();
+        let eid = E::type_tag_();
+
+        let mut iter = self.select_receivers(&tt, options, None, Some(&eid));
+        if let Some(rc) = iter.next() {
+            let (mid, rx) = rc.add_response_waiter_boxed_we().map_err(|x| {
+                x.map_err(|_| unimplemented!())
+                    .map_msg(|_| unimplemented!())
+            })?;
+
+            rc.send_boxed(
+                self,
+                mid | 1 << (usize::BITS - 1),
+                req,
+                rc.reserve(&tt).await,
+            ).map_err(|x| x.map_err(|_| unimplemented!()))?;
+
+            rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
+        } else {
+            Err(Error::NoReceivers)
+        }
+    }
+
     pub async fn send_deserialize_one<'a, 'b: 'a, 'c: 'a>(
         &'a self,
         tt: TypeTag,

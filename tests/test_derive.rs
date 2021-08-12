@@ -17,12 +17,12 @@ impl<M: Message> From<error::Error<M>> for Error {
 }
 
 #[derive(Debug, Clone, Message)]
-#[type_tag("api::Msg")]
-pub struct Msg<F: MessageBounds + Clone>(pub F);
+#[namespace("api")]
+pub struct Msg<F>(pub F);
 
 #[derive(Debug, Clone, Message)]
 #[type_tag("api::Query")]
-pub struct Qqq<F: MessageBounds + Clone, G: MessageBounds + Clone, H: MessageBounds + Clone>(
+pub struct Qqq<F, G, H>(
     pub F,
     pub G,
     pub H,

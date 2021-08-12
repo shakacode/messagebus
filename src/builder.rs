@@ -244,6 +244,7 @@ impl Module {
     >(
         mut self,
     ) -> Self {
+        println!("insert {}", M::type_tag_());
         self.message_types.insert(
             M::type_tag_(),
             MessageTypeDescriptor {

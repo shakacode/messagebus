@@ -154,11 +154,10 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
         }
     }
 
-    pub fn try_unwrap(self) -> Option<E> {
+    pub fn try_unwrap(self) -> Result<E, Self> {
         match self {
-            Error::Other(inner) => Some(inner),
-            Error::OtherBoxed(_) => None,
-            _ => None,
+            Error::Other(inner) => Ok(inner),
+            s  => Err(s),
         }
     }
 }

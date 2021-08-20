@@ -88,7 +88,6 @@ impl Bus {
     pub(crate) fn init(&self) {
         for (_, rs) in &self.inner.receivers {
             for r in rs {
-                println!("init {}", r.name());
                 r.init(self).unwrap();
             }
         }
@@ -243,13 +242,6 @@ impl Bus {
     ) -> core::result::Result<(), Error<M>> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
-        }
-
-        for r in &self.inner.receivers {
-            println!("{:?}: ", r.0);
-            for i in r.1 {
-                println!("  {:?}: ", i.name());
-            }
         }
 
         let tt = msg.type_tag();
@@ -531,7 +523,7 @@ impl Bus {
         _options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
         if self.inner.closed.load(Ordering::SeqCst) {
-            println!("closed message bus");
+            warn!("closed message bus");
             return Err(Error::NoResponse);
         }
 
@@ -552,7 +544,7 @@ impl Bus {
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
         if self.inner.closed.load(Ordering::SeqCst) {
-            println!("closed message bus");
+            warn!("closed message bus");
             return Err(Error::NoResponse);
         }
 

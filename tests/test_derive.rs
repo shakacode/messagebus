@@ -1,6 +1,6 @@
 use messagebus::{
     derive::{Error as MbError, Message},
-    error, Message, MessageBounds, TypeTagged,
+    error, Message, TypeTagged,
 };
 use thiserror::Error;
 

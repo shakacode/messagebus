@@ -1,4 +1,5 @@
 use crate::relay::RelayWrapper;
+use crate::stats::Stats;
 use crate::{
     envelop::{IntoBoxedMessage, TypeTag},
     error::{GenericError, SendError, StdSyncSendError},
@@ -109,7 +110,7 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
         listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
     ) -> Result<u64, Error>;
 
-    fn stats(&self) -> Result<Stats, Error<Action>>;
+    fn stats(&self) -> Stats;
 
     fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>>;
     fn close_notify(&self) -> &Notify;
@@ -135,21 +136,6 @@ pub trait ReceiverPollerBuilder {
 
 pub trait PermitDrop {
     fn permit_drop(&self);
-}
-
-#[derive(Debug, Clone)]
-pub struct Stats {
-    pub has_queue: bool,
-    pub queue_capacity: u64,
-    pub queue_size: u64,
-
-    pub has_parallel: bool,
-    pub parallel_capacity: u64,
-    pub parallel_size: u64,
-
-    pub has_batch: bool,
-    pub batch_capacity: u64,
-    pub batch_size: u64,
 }
 
 #[non_exhaustive]
@@ -368,8 +354,18 @@ where
             .map_err(|err| Error::from(err.into_boxed()))?)
     }
 
-    fn stats(&self) -> Result<Stats, Error<Action>> {
-        unimplemented!()
+    fn stats(&self) -> Stats {
+        Stats {
+            msg_type_tag: M::type_tag_(),
+            resp_type_tag: Some(R::type_tag_()),
+            err_type_tag: Some(E::type_tag_()),
+            
+            has_queue: true,
+            queue_capacity: self.context.limit as _,
+            queue_size: self.context.processing.load(Ordering::Relaxed) as _,
+            
+            ..Default::default()
+        }
     }
 
     fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>> {
@@ -707,6 +703,11 @@ impl Receiver {
     #[inline]
     pub fn name(&self) -> &str {
         self.inner.name()
+    }
+
+    #[inline]
+    pub fn stats(&self) -> Stats {
+        self.inner.stats()
     }
 
     #[inline]

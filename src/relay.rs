@@ -1,11 +1,7 @@
-use crate::{
-    error::Error,
-    receiver::{
-        Action, AnyReceiver, AnyWrapperRef, PermitDrop, ReceiverTrait, SendUntypedReceiver, Stats,
+use crate::{Bus, Event, Message, Permit, ReciveUnypedReceiver, TypeTag, error::Error, receiver::{
+        Action, AnyReceiver, AnyWrapperRef, PermitDrop, ReceiverTrait, SendUntypedReceiver,
         TypeTagAccept,
-    },
-    Bus, Event, Message, Permit, ReciveUnypedReceiver, TypeTag,
-};
+    }, stats::Stats};
 use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
 use std::{
@@ -128,7 +124,7 @@ where
         self.context.need_flush.load(Ordering::SeqCst)
     }
 
-    fn stats(&self) -> Result<Stats, Error<Action>> {
+    fn stats(&self) -> Stats {
         unimplemented!()
     }
 

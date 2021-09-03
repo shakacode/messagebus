@@ -7,6 +7,7 @@ pub mod receivers;
 mod relay;
 pub mod relays;
 mod trait_object;
+mod stats;
 
 #[macro_use]
 extern crate log;
@@ -18,6 +19,7 @@ pub mod derive {
 use crate::receiver::Permit;
 pub use builder::Module;
 use builder::{BusBuilder, MessageTypeDescriptor};
+use stats::Stats;
 use core::any::Any;
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 use error::{Error, SendError, StdSyncSendError};
@@ -83,6 +85,10 @@ impl Bus {
     #[inline]
     pub fn build() -> BusBuilder {
         BusBuilder::new()
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.inner.closed.load(Ordering::SeqCst)
     }
 
     pub(crate) fn init(&self) {
@@ -579,6 +585,12 @@ impl Bus {
 
         md.deserialize_boxed(de)
             .map_err(|err| err.specify::<Box<dyn Message>>())
+    }
+
+    pub fn stats(&self) -> impl Iterator<Item = Stats> + '_ {
+        self.inner.receivers.iter()
+            .map(|(_, r)|r.into_iter().map(|x| x.stats()))
+            .flatten()
     }
 
     #[inline]

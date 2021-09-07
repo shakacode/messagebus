@@ -155,6 +155,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                             ))
                                             .ok();
                                         }
+                                        stx.send(Event::Error(er)).ok();
                                     }
                                 },
                                 Poll::Ready(None) => break,

@@ -124,6 +124,10 @@ where
         self.context.need_flush.load(Ordering::SeqCst)
     }
 
+    fn set_need_flush(&self) {
+        self.context.need_flush.store(true, Ordering::SeqCst);
+    }
+
     fn stats(&self) -> Stats {
         unimplemented!()
     }
@@ -219,6 +223,7 @@ where
                     let event = poll_fn(move |ctx| this.inner.poll_events(ctx, &bus)).await;
 
                     match event {
+                        Event::Error(err) => error!("Batch Error: {}", err),
                         Event::Pause => self.context.ready_flag.store(false, Ordering::SeqCst),
                         Event::Ready => {
                             self.context.ready.notify_waiters();
@@ -234,7 +239,10 @@ where
                             self.context.closed.notify_waiters();
                             break;
                         }
-                        Event::Flushed => self.context.flushed.notify_waiters(),
+                        Event::Flushed => {
+                            self.context.need_flush.store(true, Ordering::SeqCst);
+                            self.context.flushed.notify_waiters()
+                        }
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {
                             let tt = if let Ok(bm) = &resp {

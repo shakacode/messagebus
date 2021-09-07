@@ -86,6 +86,7 @@ macro_rules! batch_synchronized_poller_macro {
                                     stx.send(Event::Response(mid, Err(Error::Other(er.clone()))))
                                         .ok();
                                 }
+                                stx.send(Event::Error(er)).ok();
                             }
                         },
                     }

@@ -13,27 +13,21 @@ use crate::{
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
     receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
+    receivers::Request,
     BatchHandler, Bus, Message, Untyped,
 };
 
-use futures::{stream::FuturesUnordered, Future, StreamExt};
+use futures::Future;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 buffer_unordered_batch_poller_macro!(
     T,
     BatchHandler,
-    |buffer_clone, bus, ut: Arc<T>, stats: Arc<BufferUnorderedBatchedStats>, buffer_mid_clone| {
-        async move {
-            let resp = tokio::task::spawn_blocking(move || {
-                (buffer_mid_clone, ut.handle(buffer_clone, &bus))
-            })
+    |msgs, bus, ut: Arc<T>| async move {
+        tokio::task::spawn_blocking(move || ut.handle(msgs, &bus))
             .await
-            .unwrap();
-            stats.parallel.fetch_sub(1, Ordering::Relaxed);
-            resp
-        }
+            .unwrap()
     },
     |bus, ut: Arc<T>| {
         async move {

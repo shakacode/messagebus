@@ -13,18 +13,22 @@ use crate::{
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
     receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
+    receivers::Request,
     Bus, Handler, Message, Untyped,
 };
 
-use futures::{stream::FuturesUnordered, Future, StreamExt};
+use futures::Future;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 buffer_unordered_poller_macro!(
     T,
     Handler,
-    |msg, bus, ut: Arc<T>| tokio::task::spawn_blocking(move || ut.handle(msg, &bus)),
+    |msg, bus, ut: Arc<T>| async move { 
+        tokio::task::spawn_blocking(move || ut.handle(msg, &bus))
+            .await
+            .unwrap() 
+    },
     |bus, ut: Arc<T>| async move {
         tokio::task::spawn_blocking(move || ut.sync(&bus))
             .await

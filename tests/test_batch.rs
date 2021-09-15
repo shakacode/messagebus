@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use messagebus::{
-    derive::{Error as MbError, Message},
-    error, AsyncBatchHandler, BatchHandler, Bus, Message,
-};
+use messagebus::{AsyncBatchHandler, Bus, Message, derive::{Error as MbError, Message}, error, receivers::BufferUnorderedBatchedConfig};
+use parking_lot::Mutex;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, MbError)]
@@ -27,7 +25,9 @@ struct MsgI32(i32);
 #[message(clone)]
 struct MsgI16(i16);
 
-struct TmpReceiver;
+struct TmpReceiver {
+    batches: Arc<Mutex<Vec<Vec<i32>>>>
+}
 
 #[async_trait]
 impl AsyncBatchHandler<MsgI32> for TmpReceiver {
@@ -41,47 +41,57 @@ impl AsyncBatchHandler<MsgI32> for TmpReceiver {
         msg: Vec<MsgI32>,
         _bus: &Bus,
     ) -> Result<Vec<Self::Response>, Self::Error> {
-        println!("---> [i32; {}] {:?}", msg.len(), msg);
+        self.batches.lock().push(msg.into_iter().map(|x|x.0).collect());
 
         Ok(vec![])
     }
 }
 
-impl BatchHandler<MsgI16> for TmpReceiver {
-    type Error = Error;
-    type Response = ();
-    type InBatch = Vec<MsgI16>;
-    type OutBatch = Vec<()>;
+#[tokio::test]
+async fn test_batch() {
+    let batches = Arc::new(Mutex::new(Vec::new()));
 
-    fn handle(&self, msg: Vec<MsgI16>, _bus: &Bus) -> Result<Vec<Self::Response>, Self::Error> {
-        println!("---> [i16; {}] {:?}", msg.len(), msg);
-        Ok(vec![])
-    }
-}
-
-#[tokio::main]
-async fn main() {
     let (b, poller) = Bus::build()
-        .register(TmpReceiver)
-        .subscribe_batch_async::<MsgI32>(16, Default::default())
-        .subscribe_batch_sync::<MsgI16>(16, Default::default())
+        .register(TmpReceiver { batches: batches.clone() })
+        .subscribe_batch_async::<MsgI32>(16, BufferUnorderedBatchedConfig {
+            batch_size: 8,
+            ..Default::default()
+        })
         .done()
         .build();
 
     for i in 1..100i32 {
         b.send(MsgI32(i)).await.unwrap();
     }
+        
+    let mut re = Vec::new();
+    let mut counter = 1i32;
+    for _ in 1..100i32 {
+        let mut v = Vec::new();
+        for _ in 0..8 {
+            if counter >= 100 {
+                break;
+            }
 
-    b.send(MsgI16(1i16)).await.unwrap();
-    b.send(MsgI16(2i16)).await.unwrap();
-    b.send(MsgI16(3i16)).await.unwrap();
-    b.send(MsgI16(4i16)).await.unwrap();
-    b.send(MsgI16(5i16)).await.unwrap();
-    b.send(MsgI16(6i16)).await.unwrap();
-    b.send(MsgI16(7i16)).await.unwrap();
+            v.push(counter);
+
+            counter += 1;
+        }
+
+        re.push(v);
+
+        if counter >= 100 {
+            break;
+        }
+    }
 
     println!("flush");
     b.flush().await;
+
+    let mut lock = batches.lock();
+    lock.sort_by(|a, b| a[0].cmp(&b[0]));
+
+    assert_eq!(lock.as_slice(), re.as_slice());
 
     println!("close");
     b.close().await;

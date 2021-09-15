@@ -40,84 +40,38 @@ macro_rules! synchronized_poller_macro {
             R: Message,
         {
             let ut = ut.downcast::<Mutex<T>>().unwrap();
-            let mut handle_future = None;
-            let mut sync_future = None;
-            let mut need_sync = false;
-            let mut rx_closed = false;
 
-            futures::future::poll_fn(move |cx| loop {
-                if let Some(fut) = handle_future.as_mut() {
-                    // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
-                    match unsafe { fix_type(fut) }.poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready((mid, _req, resp)) => {
-                            let resp: Result<_, $t::Error> = resp;
-                            stx.send(Event::Response(mid, resp.map_err(Error::Other)))
-                                .ok();
+            async move {
+                while let Some(msg) = rx.recv().await {
+                    match msg {
+                        Request::Request(mid, msg, _req) => {
+                            let bus = bus.clone();
+                            let ut = ut.clone();
+                            let stx = stx.clone();
+
+                            tokio::spawn(async move {
+                                let resp = ($st1)(msg, bus, ut)
+                                    .await;
+
+                                stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                                    .unwrap();
+                            })
+                            .await
+                            .unwrap();
                         }
+                        Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
+                        Request::Action(Action::Close) => { rx.close(); }
+                        Request::Action(Action::Flush) => { stx.send(Event::Flushed).unwrap(); }
+                        Request::Action(Action::Sync) => {
+                            let resp = ($st2)(bus.clone(), ut.clone()).await;
+                            stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                                .unwrap();
+                        }
+
+                        _ => unimplemented!(),
                     }
                 }
-                handle_future = None;
-
-                if !rx_closed && !need_sync {
-                    match rx.poll_recv(cx) {
-                        Poll::Ready(Some(a)) => match a {
-                            Request::Request(mid, msg, req) => {
-                                handle_future.replace(($st1)(
-                                    mid,
-                                    msg,
-                                    bus.clone(),
-                                    ut.clone(),
-                                    req,
-                                ));
-                                continue;
-                            }
-                            Request::Action(Action::Flush) => {
-                                stx.send(Event::Flushed).ok();
-                                continue;
-                            }
-                            Request::Action(Action::Init) => {
-                                stx.send(Event::Ready).ok();
-                            }
-                            Request::Action(Action::Sync) => need_sync = true,
-                            Request::Action(Action::Close) => {
-                                rx.close();
-                                continue;
-                            }
-                            _ => unimplemented!(),
-                        },
-                        Poll::Ready(None) => {
-                            need_sync = true;
-                            rx_closed = true;
-                        }
-                        Poll::Pending => {}
-                    }
-                }
-
-                if need_sync {
-                    if let Some(fut) = sync_future.as_mut() {
-                        // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
-                        match unsafe { fix_type(fut) }.poll(cx) {
-                            Poll::Pending => return Poll::Pending,
-                            Poll::Ready(resp) => {
-                                need_sync = false;
-                                let resp: Result<_, $t::Error> = resp;
-                                stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                                    .ok();
-                            }
-                        }
-                        sync_future = None;
-                    } else {
-                        sync_future.replace(($st2)(bus.clone(), ut.clone()));
-                    }
-                }
-
-                return if rx_closed {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                };
-            })
+            }
         }
     };
 }

@@ -167,7 +167,6 @@ impl Bus {
     }
 
     pub async fn flush_and_sync(&self) {
-        self.flush().await;
         let _handle = self.inner.maintain.lock().await;
 
         for (_, rs) in &self.inner.receivers {

@@ -125,6 +125,7 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
 
     fn try_reserve(&self, tt: &TypeTag) -> Option<Permit>;
     fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify>;
+    fn increment_processing(&self, tt: &TypeTag);
 
     fn start_polling(
         self: Arc<Self>,
@@ -466,6 +467,10 @@ where
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
         self.start_polling_events()
     }
+
+    fn increment_processing(&self, _tt: &TypeTag) {
+        self.context.processing.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 pub struct Permit {
@@ -799,6 +804,8 @@ impl Receiver {
         msg: M,
         req: bool,
     ) -> Result<(), Error<M>> {
+        self.inner.increment_processing(&M::type_tag_());
+        
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
@@ -826,8 +833,8 @@ impl Receiver {
         mut permit: Permit,
     ) -> Result<(), Error<Box<dyn Message>>> {
         let res = self.inner.send_boxed(mid, msg, req, bus);
-        self.inner.set_need_flush();
         permit.fuse = true;
+        self.inner.set_need_flush();
         res
     }
 

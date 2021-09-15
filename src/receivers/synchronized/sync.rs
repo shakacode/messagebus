@@ -12,7 +12,7 @@ use crate::{
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
     receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_type, Request},
+    receivers::Request,
     Bus, Message, SynchronizedHandler, Untyped,
 };
 use tokio::sync::{mpsc, Mutex};
@@ -20,17 +20,15 @@ use tokio::sync::{mpsc, Mutex};
 synchronized_poller_macro! {
     T,
     SynchronizedHandler,
-    |mid, msg, bus, ut: Arc<Mutex<T>>, req: bool| async move {
-        (mid, req, tokio::task::spawn_blocking(move || {
-            block_on(ut.lock()).handle(msg, &bus)
-        })
-        .await
-        .unwrap())
+    |msg, bus, ut: Arc<Mutex<T>>| async move {
+        tokio::task::spawn_blocking(move || block_on(ut.lock()).handle(msg, &bus))
+            .await
+            .unwrap()
     },
     |bus, ut: Arc<Mutex<T>>| async move {
         tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus))
-                        .await
-                        .unwrap()
+            .await
+            .unwrap()
     }
 }
 

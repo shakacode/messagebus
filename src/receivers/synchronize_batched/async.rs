@@ -9,7 +9,7 @@ use crate::{
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
     receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
-    receivers::{fix_into_iter, fix_type, Request},
+    receivers::Request,
     AsyncBatchSynchronizedHandler, Bus, Message, Untyped,
 };
 
@@ -22,10 +22,8 @@ use tokio::sync::{mpsc, Mutex};
 batch_synchronized_poller_macro! {
     T,
     AsyncBatchSynchronizedHandler,
-    |mids, buffer, bus, ut: Arc<Mutex<T>>| {
-        async move {
-            (mids, ut.lock().await.handle(buffer, &bus).await)
-        }
+    |msgs, bus, ut: Arc<Mutex<T>>| async move {
+        ut.lock().await.handle(msgs, &bus).await
     },
     |bus, ut: Arc<Mutex<T>>| { async move { ut.lock().await.sync(&bus).await } }
 }

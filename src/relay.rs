@@ -216,6 +216,10 @@ where
         self.context.init_sent.load(Ordering::SeqCst)
     }
 
+    fn increment_processing(&self, tt: &TypeTag) {
+        self.context.receivers.get(tt).map(|r|r.processing.fetch_add(1, Ordering::SeqCst));
+    }
+
     fn start_polling(
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {

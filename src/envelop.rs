@@ -1,8 +1,12 @@
-use core::any::Any;
-use core::fmt;
-use std::any::type_name;
-use std::borrow::Cow;
-use std::sync::Arc;
+use core::{
+    fmt,
+    any::{Any, type_name},
+};
+
+use std::{
+    borrow::Cow,
+    sync::Arc,
+};
 
 pub trait MessageBounds: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static {}
 impl<T: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static> MessageBounds for T {}

@@ -7,24 +7,22 @@ use crate::{
     Bus, Error, Message, Relay,
 };
 use core::{
-    any::TypeId,
+    any::{Any, TypeId},
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     fmt,
     marker::PhantomData,
     mem,
     pin::Pin,
     task::{Context, Poll},
 };
-use futures::Future;
-use futures::{future::poll_fn, FutureExt};
+use futures::{Future, future::poll_fn, FutureExt};
 use std::{
-    any::Any,
     borrow::Cow,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 use tokio::sync::{oneshot, Notify};
+
+
 struct SlabCfg;
 impl sharded_slab::Config for SlabCfg {
     const RESERVED_BITS: usize = 1;
@@ -38,6 +36,7 @@ pub trait SendUntypedReceiver: Send + Sync {
         &self,
         _mid: u64,
         _msg: Box<dyn Message>,
+        _req: bool,
         _bus: &Bus,
     ) -> Result<(), SendError<Box<dyn Message>>> {
         unimplemented!()
@@ -45,7 +44,7 @@ pub trait SendUntypedReceiver: Send + Sync {
 }
 
 pub trait SendTypedReceiver<M: Message>: Sync {
-    fn send(&self, mid: u64, msg: M, bus: &Bus) -> Result<(), SendError<M>>;
+    fn send(&self, mid: u64, msg: M, req: bool, bus: &Bus) -> Result<(), SendError<M>>;
 }
 
 pub trait ReciveTypedReceiver<M, E>: Sync
@@ -103,6 +102,7 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
         &self,
         mid: u64,
         msg: Box<dyn Message>,
+        req: bool,
         bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>>;
     fn add_response_listener(
@@ -154,6 +154,7 @@ pub enum Action {
 pub enum Event<M, E: StdSyncSendError> {
     Response(u64, Result<M, Error<(), E>>),
     Synchronized(Result<(), Error<(), E>>),
+    Finished(u64),
     Error(E),
     InitFailed(Error<(), E>),
     Stats(Stats),
@@ -224,6 +225,16 @@ where
                             }
                         }
 
+                        Event::Finished(n) => {
+                            self.context.processing.fetch_sub(n as _, Ordering::SeqCst);
+
+                            if n > 1 {
+                                self.context.response.notify_waiters();
+                            } else {
+                                self.context.response.notify_one();
+                            }
+                        }
+
                         _ => unimplemented!(),
                     }
                 }
@@ -252,9 +263,9 @@ where
                     .send(resp.map_err(|e| e.into_dyn()).map(|x| x.into_boxed()))
                     .unwrap(),
 
-                Waiter::BoxedWithError(sender) => sender
-                    .send(resp.map(|x| x.into_boxed()))
-                    .unwrap(),
+                Waiter::BoxedWithError(sender) => {
+                    sender.send(resp.map(|x| x.into_boxed())).unwrap()
+                }
             }
         }
 
@@ -349,6 +360,7 @@ where
         &self,
         mid: u64,
         boxed_msg: Box<dyn Message>,
+        req: bool,
         bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>> {
         let boxed = boxed_msg
@@ -356,7 +368,7 @@ where
             .downcast::<M>()
             .map_err(|_| Error::MessageCastError)?;
 
-        Ok(SendTypedReceiver::send(&self.inner, mid, *boxed, bus)
+        Ok(SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
             .map_err(|err| Error::from(err.into_boxed()))?)
     }
 
@@ -365,11 +377,11 @@ where
             msg_type_tag: M::type_tag_(),
             resp_type_tag: Some(R::type_tag_()),
             err_type_tag: Some(E::type_tag_()),
-            
+
             has_queue: true,
             queue_capacity: self.context.limit as _,
             queue_size: self.context.processing.load(Ordering::Relaxed) as _,
-            
+
             ..Default::default()
         }
     }
@@ -424,7 +436,7 @@ where
         loop {
             let count = self.context.processing.load(Ordering::Relaxed);
 
-            if count < self.context.limit {
+            if count < self.context.limit as _ {
                 let res = self.context.processing.compare_exchange(
                     count,
                     count + 1,
@@ -526,7 +538,10 @@ impl<'a> AnyWrapperRef<'a> {
     where
         R: Message,
         E: StdSyncSendError,
-        S: WrapperReturnTypeOnly<R> + WrapperErrorTypeOnly<E> + WrapperReturnTypeAndError<R, E> + 'static,
+        S: WrapperReturnTypeOnly<R>
+            + WrapperErrorTypeOnly<E>
+            + WrapperReturnTypeAndError<R, E>
+            + 'static,
     {
         let wrapper_r = rcvr as &(dyn WrapperReturnTypeOnly<R>);
         let wrapper_e = rcvr as &(dyn WrapperErrorTypeOnly<E>);
@@ -569,7 +584,9 @@ impl<'a> AnyWrapperRef<'a> {
     }
 
     #[inline]
-    pub fn cast_error_only<E: StdSyncSendError>(&'a self) -> Option<&'a dyn WrapperErrorTypeOnly<E>> {
+    pub fn cast_error_only<E: StdSyncSendError>(
+        &'a self,
+    ) -> Option<&'a dyn WrapperErrorTypeOnly<E>> {
         if self.wrapper_e.0 != TypeId::of::<dyn WrapperErrorTypeOnly<E>>() {
             return None;
         }
@@ -626,7 +643,7 @@ impl fmt::Display for ReceiverStats {
 
 struct ReceiverContext {
     limit: u64,
-    processing: AtomicU64,
+    processing: AtomicI64,
     need_flush: AtomicBool,
     ready_flag: AtomicBool,
     flushed: Notify,
@@ -685,7 +702,7 @@ impl Receiver {
                 waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
                 context: Arc::new(ReceiverContext {
                     limit,
-                    processing: AtomicU64::new(0),
+                    processing: AtomicI64::new(0),
                     need_flush: AtomicBool::new(false),
                     ready_flag: AtomicBool::new(false),
                     init_sent: AtomicBool::new(false),
@@ -752,17 +769,18 @@ impl Receiver {
         bus: &Bus,
         mid: u64,
         msg: M,
+        req: bool,
         mut permit: Permit,
     ) -> Result<(), Error<M>> {
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
                 .unwrap()
-                .send(mid, msg, bus)
+                .send(mid, msg, req, bus)
                 .map_err(Into::into)
         } else {
             self.inner
-                .send_boxed(mid, msg.into_boxed(), bus)
+                .send_boxed(mid, msg.into_boxed(), req, bus)
                 .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
                 .map(|_| ())
         };
@@ -779,16 +797,17 @@ impl Receiver {
         bus: &Bus,
         mid: u64,
         msg: M,
+        req: bool,
     ) -> Result<(), Error<M>> {
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
                 .unwrap()
-                .send(mid, msg, bus)
+                .send(mid, msg, req, bus)
                 .map_err(Into::into)
         } else {
             self.inner
-                .send_boxed(mid, msg.into_boxed(), bus)
+                .send_boxed(mid, msg.into_boxed(), req, bus)
                 .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
                 .map(|_| ())
         };
@@ -803,9 +822,10 @@ impl Receiver {
         bus: &Bus,
         mid: u64,
         msg: Box<dyn Message>,
+        req: bool,
         mut permit: Permit,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        let res = self.inner.send_boxed(mid, msg, bus);
+        let res = self.inner.send_boxed(mid, msg, req, bus);
         self.inner.set_need_flush();
         permit.fuse = true;
         res
@@ -836,7 +856,13 @@ impl Receiver {
     #[inline]
     pub(crate) fn add_response_waiter_boxed_we<E: StdSyncSendError>(
         &self,
-    ) -> Result<(u64, impl Future<Output = Result<Box<dyn Message>, Error<(), E>>>), Error> {
+    ) -> Result<
+        (
+            u64,
+            impl Future<Output = Result<Box<dyn Message>, Error<(), E>>>,
+        ),
+        Error,
+    > {
         if let Some(any_wrapper) = self.inner.wrapper() {
             let (tx, rx) = oneshot::channel();
             let mid = any_wrapper

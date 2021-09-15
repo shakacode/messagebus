@@ -103,10 +103,10 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, mid: u64, m: M, _bus: &Bus) -> Result<(), SendError<M>> {
-        match self.tx.send(Request::Request(mid, m)) {
+    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), SendError<M>> {
+        match self.tx.send(Request::Request(mid, m, req)) {
             Ok(_) => Ok(()),
-            Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(SendError::Closed(msg)),
             _ => unimplemented!(),
         }
     }

@@ -1,4 +1,9 @@
-use std::{collections::HashMap, marker::PhantomData, pin::Pin, sync::Arc};
+use core::{
+    marker::PhantomData, 
+    pin::Pin
+};
+
+use std::{collections::HashMap, sync::Arc};
 
 use futures::{Future, FutureExt};
 use smallvec::SmallVec;

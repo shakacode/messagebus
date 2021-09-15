@@ -1,4 +1,4 @@
-use std::iter::FromIterator;
+use core::iter::FromIterator;
 
 use crate::{error::StdSyncSendError, Bus, Message};
 use async_trait::async_trait;

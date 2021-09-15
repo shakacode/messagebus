@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, Mutex};
 synchronized_poller_macro! {
     T,
     SynchronizedHandler,
-    |mid, msg, bus, ut: Arc<Mutex<T>>| async move {
-        (mid, tokio::task::spawn_blocking(move || {
+    |mid, msg, bus, ut: Arc<Mutex<T>>, req: bool| async move {
+        (mid, req, tokio::task::spawn_blocking(move || {
             block_on(ut.lock()).handle(msg, &bus)
         })
         .await
@@ -102,10 +102,10 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, mid: u64, m: M, _bus: &Bus) -> Result<(), SendError<M>> {
-        match self.tx.send(Request::Request(mid, m)) {
+    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), SendError<M>> {
+        match self.tx.send(Request::Request(mid, m, req)) {
             Ok(_) => Ok(()),
-            Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(SendError::Closed(msg)),
             _ => unimplemented!(),
         }
     }

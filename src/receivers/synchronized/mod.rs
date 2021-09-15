@@ -50,7 +50,7 @@ macro_rules! synchronized_poller_macro {
                     // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
                     match unsafe { fix_type(fut) }.poll(cx) {
                         Poll::Pending => return Poll::Pending,
-                        Poll::Ready((mid, resp)) => {
+                        Poll::Ready((mid, _req, resp)) => {
                             let resp: Result<_, $t::Error> = resp;
                             stx.send(Event::Response(mid, resp.map_err(Error::Other)))
                                 .ok();
@@ -62,8 +62,14 @@ macro_rules! synchronized_poller_macro {
                 if !rx_closed && !need_sync {
                     match rx.poll_recv(cx) {
                         Poll::Ready(Some(a)) => match a {
-                            Request::Request(mid, msg) => {
-                                handle_future.replace(($st1)(mid, msg, bus.clone(), ut.clone()));
+                            Request::Request(mid, msg, req) => {
+                                handle_future.replace(($st1)(
+                                    mid,
+                                    msg,
+                                    bus.clone(),
+                                    ut.clone(),
+                                    req,
+                                ));
                                 continue;
                             }
                             Request::Action(Action::Flush) => {

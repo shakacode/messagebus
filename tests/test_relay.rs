@@ -135,6 +135,7 @@ impl SendUntypedReceiver for TestRelay {
         &self,
         mid: u64,
         msg: Box<dyn Message>,
+        _req: bool,
         _bus: &Bus,
     ) -> Result<(), error::SendError<Box<dyn Message>>> {
         println!("TestRelay::send_msg [{}] {:?}", mid, msg);

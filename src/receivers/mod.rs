@@ -38,5 +38,5 @@ pub(crate) fn fix_into_iter<I, T: IntoIterator<Item = I> + Send>(
 #[derive(Debug)]
 pub(crate) enum Request<M> {
     Action(Action),
-    Request(u64, M),
+    Request(u64, M, bool),
 }

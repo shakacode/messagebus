@@ -6,8 +6,8 @@ mod receiver;
 pub mod receivers;
 mod relay;
 pub mod relays;
-mod trait_object;
 mod stats;
+mod trait_object;
 
 #[macro_use]
 extern crate log;
@@ -16,27 +16,34 @@ pub mod derive {
     pub use messagebus_derive::*;
 }
 
-use crate::receiver::Permit;
-pub use builder::Module;
-use builder::{BusBuilder, MessageTypeDescriptor};
-use stats::Stats;
-use core::any::Any;
-pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
-use error::{Error, SendError, StdSyncSendError};
-pub use handler::*;
-use receiver::Receiver;
-pub use receiver::{
-    Action, Event, ReciveTypedReceiver, ReciveUnypedReceiver, SendTypedReceiver,
-    SendUntypedReceiver, TypeTagAccept,
+// privavte
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::Duration,
 };
-pub use relay::Relay;
-use smallvec::SmallVec;
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
+};
+use tokio::sync::Mutex;
+use smallvec::SmallVec;
+
+use builder::{BusBuilder, MessageTypeDescriptor};
+use receiver::{Receiver, Permit};
+use error::{Error, SendError, StdSyncSendError};
+use stats::Stats;
+
+
+// public
+pub use builder::Module;
+pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
+pub use handler::*;
+pub use relay::Relay;
+pub use receiver::{
+    Action, Event, ReciveTypedReceiver, 
+    ReciveUnypedReceiver, SendTypedReceiver,
+    SendUntypedReceiver, TypeTagAccept,
 };
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
@@ -61,6 +68,7 @@ pub struct BusInner {
     message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
+    maintain: Mutex<()>,
 }
 
 impl BusInner {
@@ -72,6 +80,7 @@ impl BusInner {
             message_types,
             receivers,
             closed: AtomicBool::new(false),
+            maintain: Mutex::new(()),
         }
     }
 }
@@ -108,16 +117,23 @@ impl Bus {
     }
 
     pub async fn close(&self) {
+        let _handle = self.inner.maintain.lock().await;
+
         self.inner.closed.store(true, Ordering::SeqCst);
 
         for (_, rs) in &self.inner.receivers {
             for r in rs {
-                r.close(self).await;
+                let err = tokio::time::timeout(Duration::from_secs(20), r.close(self)).await;
+
+                if let Err(err) = err {
+                    error!("Close timeout on {}: {}", r.name(), err);
+                }
             }
         }
     }
 
     pub async fn flush(&self) {
+        let _handle = self.inner.maintain.lock().await;
         let fuse_count = 32i32;
         let mut breaked = false;
         let mut iters = 0usize;
@@ -128,6 +144,7 @@ impl Bus {
                 for r in rs {
                     if r.need_flush() {
                         flushed = true;
+
                         r.flush(self).await;
                     }
                 }
@@ -151,10 +168,15 @@ impl Bus {
 
     pub async fn flush_and_sync(&self) {
         self.flush().await;
+        let _handle = self.inner.maintain.lock().await;
 
         for (_, rs) in &self.inner.receivers {
             for r in rs {
-                r.sync(self).await;
+                let err = tokio::time::timeout(Duration::from_secs(60), r.sync(self)).await;
+
+                if let Err(err) = err {
+                    error!("Sync timeout on {}: {}", r.name(), err);
+                }
             }
         }
     }
@@ -203,13 +225,13 @@ impl Bus {
 
             while counter < total {
                 let (p, r) = iter.next().unwrap();
-                let _ = r.send(self, mid, msg.clone(), p);
+                let _ = r.send(self, mid, msg.clone(), false, p);
 
                 counter += 1;
             }
 
             if let Some((p, r)) = iter.next() {
-                let _ = r.send(self, mid, msg, p);
+                let _ = r.send(self, mid, msg, false, p);
                 return Ok(());
             }
         }
@@ -256,10 +278,10 @@ impl Bus {
         if let Some(rs) = self.inner.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.send(self, mid, msg.clone(), r.reserve(&tt).await);
+                    let _ = r.send(self, mid, msg.clone(), false, r.reserve(&tt).await);
                 }
 
-                let _ = last.send(self, mid, msg, last.reserve(&tt).await);
+                let _ = last.send(self, mid, msg, false, last.reserve(&tt).await);
 
                 return Ok(());
             }
@@ -293,10 +315,10 @@ impl Bus {
         if let Some(rs) = self.inner.receivers.get(&tt) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
-                    let _ = r.force_send(self, mid, msg.clone());
+                    let _ = r.force_send(self, mid, msg.clone(), false);
                 }
 
-                let _ = last.force_send(self, mid, msg);
+                let _ = last.force_send(self, mid, msg, false);
 
                 return Ok(());
             }
@@ -326,7 +348,7 @@ impl Bus {
                 return Err(SendError::Full(msg).into());
             };
 
-            Ok(rs.send(self, mid, msg, permits)?)
+            Ok(rs.send(self, mid, msg, false, permits)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -341,7 +363,7 @@ impl Bus {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
-            Ok(rs.send(self, mid, msg, rs.reserve(&tt).await)?)
+            Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -368,7 +390,7 @@ impl Bus {
 
             let mid = mid | 1 << (u64::BITS - 1);
 
-            rc.send(self, mid, req, rc.reserve(&tid).await)?;
+            rc.send(self, mid, req, true, rc.reserve(&tid).await)?;
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -396,6 +418,7 @@ impl Bus {
                 self,
                 mid | 1 << (u64::BITS - 1),
                 req,
+                true,
                 rc.reserve(&tid).await,
             )
             .map_err(|x| x.map_err(|_| unimplemented!()))?;
@@ -425,11 +448,12 @@ impl Bus {
                         self,
                         mid,
                         msg.try_clone_boxed().unwrap(),
+                        false,
                         r.reserve(&tt).await,
                     );
                 }
 
-                let _ = last.send_boxed(self, mid, msg, last.reserve(&tt).await);
+                let _ = last.send_boxed(self, mid, msg, false, last.reserve(&tt).await);
 
                 return Ok(());
             }
@@ -453,7 +477,7 @@ impl Bus {
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
-            Ok(rs.send_boxed(self, mid, msg, rs.reserve(&tt).await)?)
+            Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -481,6 +505,7 @@ impl Bus {
                 self,
                 mid | 1 << (usize::BITS - 1),
                 req,
+                true,
                 rc.reserve(&tt).await,
             )?;
 
@@ -513,8 +538,10 @@ impl Bus {
                 self,
                 mid | 1 << (usize::BITS - 1),
                 req,
+                true,
                 rc.reserve(&tt).await,
-            ).map_err(|x| x.map_err(|_| unimplemented!()))?;
+            )
+            .map_err(|x| x.map_err(|_| unimplemented!()))?;
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -537,7 +564,7 @@ impl Bus {
 
         if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
             let msg = self.deserialize_message(tt.clone(), de)?;
-            Ok(rs.send_boxed(self, mid, msg, rs.reserve(&tt).await)?)
+            Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -563,6 +590,7 @@ impl Bus {
                 self,
                 mid | 1 << (usize::BITS - 1),
                 msg,
+                true,
                 rc.reserve(&tt).await,
             )?;
 
@@ -588,8 +616,10 @@ impl Bus {
     }
 
     pub fn stats(&self) -> impl Iterator<Item = Stats> + '_ {
-        self.inner.receivers.iter()
-            .map(|(_, r)|r.into_iter().map(|x| x.stats()))
+        self.inner
+            .receivers
+            .iter()
+            .map(|(_, r)| r.into_iter().map(|x| x.stats()))
             .flatten()
     }
 

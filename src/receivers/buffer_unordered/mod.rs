@@ -54,27 +54,40 @@ macro_rules! buffer_unordered_poller_macro {
             let mut rx_closed = false;
             let mut need_flush = false;
 
-            futures::future::poll_fn(move |cx| loop {
+            futures::future::poll_fn(move |cx| 'main: loop {
                 if !rx_closed && !need_flush && !need_sync {
                     while queue.len() < cfg.max_parallel {
                         match rx.poll_recv(cx) {
                             Poll::Ready(Some(a)) => match a {
-                                Request::Request(mid, msg) => {
+                                Request::Request(mid, msg, req) => {
                                     stats.buffer.fetch_sub(1, Ordering::Relaxed);
                                     stats.parallel.fetch_add(1, Ordering::Relaxed);
-                                    queue.push(($st1)(
-                                        mid,
-                                        msg,
-                                        bus.clone(),
-                                        ut.clone(),
-                                        stats.clone(),
-                                    ));
+
+                                    let bus = bus.clone();
+                                    let ut = ut.clone();
+
+                                    queue.push(
+                                        async move {
+                                            let resp = ($st1)(
+                                                msg, bus, ut,
+                                            ).await.unwrap();
+
+                                            (mid, req, resp)
+                                        }
+                                    );
                                 }
+
                                 Request::Action(Action::Init) => {
                                     stx.send(Event::Ready).ok();
                                 }
-                                Request::Action(Action::Flush) => need_flush = true,
-                                Request::Action(Action::Close) => rx.close(),
+
+                                Request::Action(Action::Flush) => {
+                                    need_flush = true
+                                },
+
+                                Request::Action(Action::Close) => {
+                                    rx.close()
+                                }
                                 Request::Action(Action::Sync) => {
                                     need_sync = true;
                                     break;
@@ -95,16 +108,33 @@ macro_rules! buffer_unordered_poller_macro {
 
                 loop {
                     if queue_len != 0 {
+                        let mut finished = 0;
                         loop {
                             match queue.poll_next_unpin(cx) {
-                                Poll::Pending => return Poll::Pending,
-                                Poll::Ready(Some((mid, resp))) => {
-                                    let resp: Result<_, $t::Error> = resp;
-                                    stx.send(Event::Response(mid, resp.map_err(Error::Other)))
-                                        .ok();
+                                Poll::Ready(Some((mid, req, resp))) => {
+                                    if req {
+                                        let resp: Result<_, $t::Error> = resp;
+                                        stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                                            .ok();
+                                    } else {
+                                        finished += 1;
+                                    }
                                 }
+
+                                Poll::Pending => {
+                                    if finished > 0 {
+                                        stx.send(Event::Finished(finished)).ok();
+                                    }
+
+                                    return Poll::Pending
+                                },
+                                
                                 Poll::Ready(None) => break,
                             }
+                        }
+
+                        if finished > 0 {
+                            stx.send(Event::Finished(finished)).ok();
                         }
                     }
 
@@ -116,7 +146,9 @@ macro_rules! buffer_unordered_poller_macro {
                     if need_sync {
                         if let Some(fut) = sync_future.as_mut() {
                             match unsafe { fix_type(fut) }.poll(cx) {
-                                Poll::Pending => return Poll::Pending,
+                                Poll::Pending => {
+                                    return Poll::Pending
+                                },
                                 Poll::Ready(resp) => {
                                     let resp: Result<_, E> = resp;
                                     stx.send(Event::Synchronized(resp.map_err(Error::Other)))
@@ -125,7 +157,7 @@ macro_rules! buffer_unordered_poller_macro {
                             }
                             need_sync = false;
                             sync_future = None;
-                            continue;
+                            continue 'main;
                         } else {
                             sync_future.replace(($st2)(bus.clone(), ut.clone()));
                         }

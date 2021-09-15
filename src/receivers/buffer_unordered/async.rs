@@ -25,9 +25,7 @@ use tokio::sync::mpsc;
 buffer_unordered_poller_macro!(
     T,
     AsyncHandler,
-    |mid, msg, bus, ut: Arc<T>, _stats: Arc<BufferUnorderedStats>| {
-        async move { (mid, ut.handle(msg, &bus).await) }
-    },
+    |msg, bus, ut: Arc<T>| tokio::spawn(async move { ut.handle(msg, &bus).await }),
     |bus, ut: Arc<T>| { async move { ut.sync(&bus).await } }
 );
 
@@ -115,14 +113,14 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, mid: u64, m: M, _bus: &Bus) -> Result<(), SendError<M>> {
-        match self.tx.send(Request::Request(mid, m)) {
+    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), SendError<M>> {
+        match self.tx.send(Request::Request(mid, m, req)) {
             Ok(_) => {
                 self.stats.buffer.fetch_add(1, Ordering::Relaxed);
 
                 Ok(())
             }
-            Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(SendError::Closed(msg)),
             _ => unimplemented!(),
         }
     }
@@ -138,7 +136,9 @@ where
         let poll = self.srx.lock().poll_recv(ctx);
         match poll {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(event)) => Poll::Ready(event),
+            Poll::Ready(Some(event)) => {
+                Poll::Ready(event)
+            }
             Poll::Ready(None) => Poll::Ready(Event::Exited),
         }
     }

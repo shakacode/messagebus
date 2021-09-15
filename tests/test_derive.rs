@@ -22,11 +22,7 @@ pub struct Msg<F>(pub F);
 
 #[derive(Debug, Clone, Message)]
 #[type_tag("api::Query")]
-pub struct Qqq<F, G, H>(
-    pub F,
-    pub G,
-    pub H,
-);
+pub struct Qqq<F, G, H>(pub F, pub G, pub H);
 
 fn main() {
     assert_eq!(

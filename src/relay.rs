@@ -1,16 +1,19 @@
-use crate::{Bus, Event, Message, Permit, ReciveUnypedReceiver, TypeTag, error::Error, receiver::{
+use crate::{
+    error::Error,
+    receiver::{
         Action, AnyReceiver, AnyWrapperRef, PermitDrop, ReceiverTrait, SendUntypedReceiver,
         TypeTagAccept,
-    }, stats::Stats};
-use dashmap::DashMap;
-use futures::{future::poll_fn, Future};
-use std::{
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
     },
+    stats::Stats,
+    Bus, Event, Message, Permit, ReciveUnypedReceiver, TypeTag,
 };
+use dashmap::DashMap;
+use std::sync::Arc;
+use core::{
+    pin::Pin,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+use futures::{future::poll_fn, Future};
 use tokio::sync::{oneshot, Notify};
 
 pub trait Relay: TypeTagAccept + SendUntypedReceiver + ReciveUnypedReceiver + 'static {}
@@ -115,9 +118,10 @@ where
         &self,
         mid: u64,
         boxed_msg: Box<dyn Message>,
+        req: bool,
         bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        Ok(self.inner.send_msg(mid, boxed_msg, bus)?)
+        Ok(self.inner.send_msg(mid, boxed_msg, req, bus)?)
     }
 
     fn need_flush(&self) -> bool {

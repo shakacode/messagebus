@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{any::type_name};
+use std::any::type_name;
 
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -117,6 +117,9 @@ pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = GenericError>
 
     #[error("TypeTagNotRegistered({0})")]
     TypeTagNotRegistered(TypeTag),
+
+    #[error("Unknown Error: {0}")]
+    Unknown(String),
 }
 
 impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
@@ -134,6 +137,7 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
             Error::NotReady => Error::NotReady,
+            Error::Unknown(msg) => Error::Unknown(msg),
         }
     }
 
@@ -151,13 +155,14 @@ impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
             Error::NotReady => Error::NotReady,
+            Error::Unknown(msg) => Error::Unknown(msg),
         }
     }
 
     pub fn try_unwrap(self) -> Result<E, Self> {
         match self {
             Error::Other(inner) => Ok(inner),
-            s  => Err(s),
+            s => Err(s),
         }
     }
 }
@@ -177,6 +182,7 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
             Error::NotReady => Error::NotReady,
+            Error::Unknown(msg) => Error::Unknown(msg),
         }
     }
 
@@ -194,6 +200,7 @@ impl<M: Message, E: StdSyncSendError> Error<M, E> {
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
             Error::NotReady => Error::NotReady,
+            Error::Unknown(msg) => Error::Unknown(msg),
         }
     }
 }
@@ -213,6 +220,7 @@ impl<E: StdSyncSendError> Error<(), E> {
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
             Error::NotReady => Error::NotReady,
+            Error::Unknown(msg) => Error::Unknown(msg),
         }
     }
 }
@@ -243,6 +251,7 @@ impl Error<Box<dyn Message>> {
             Error::MessageCastError => Error::MessageCastError,
             Error::TypeTagNotRegistered(tt) => Error::TypeTagNotRegistered(tt),
             Error::NotReady => Error::NotReady,
+            Error::Unknown(msg) => Error::Unknown(msg),
         }
     }
 }
@@ -251,7 +260,7 @@ impl Error<Box<dyn Message>> {
 //     pub fn downcast<E>(self) -> Result<E, Self> {
 //         match self {
 //             Error::OtherBoxed(inner) => Ok(),
-//             err => Err(err) 
+//             err => Err(err)
 //         }
 //     }
 // }

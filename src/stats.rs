@@ -3,7 +3,7 @@ use std::borrow::Cow;
 #[derive(Default, Debug, Clone)]
 pub struct Stats {
     pub msg_type_tag: Cow<'static, str>,
-    
+
     pub resp_type_tag: Option<Cow<'static, str>>,
     pub err_type_tag: Option<Cow<'static, str>>,
 

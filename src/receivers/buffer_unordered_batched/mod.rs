@@ -61,7 +61,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
             let mut rx_closed = false;
             let mut need_flush = false;
 
-            futures::future::poll_fn(move |cx| loop {
+            futures::future::poll_fn(move |cx| 'main: loop {
                 if !rx_closed && !need_flush && !need_sync {
                     while queue.len() < cfg.max_parallel {
                         let mut do_break = false;
@@ -69,11 +69,11 @@ macro_rules! buffer_unordered_batch_poller_macro {
 
                         match rx.poll_recv(cx) {
                             Poll::Ready(Some(a)) => match a {
-                                Request::Request(mid, msg) => {
+                                Request::Request(mid, msg, req) => {
                                     stats.buffer.fetch_sub(1, Ordering::Relaxed);
                                     stats.batch.fetch_add(1, Ordering::Relaxed);
 
-                                    buffer_mid.push(mid);
+                                    buffer_mid.push((mid, req));
                                     buffer.push(msg);
                                 }
                                 Request::Action(Action::Init) => {
@@ -127,39 +127,58 @@ macro_rules! buffer_unordered_batch_poller_macro {
 
                 loop {
                     if queue_len != 0 {
+                        let mut finished = 0;
                         loop {
                             match queue.poll_next_unpin(cx) {
-                                Poll::Pending => return Poll::Pending,
                                 Poll::Ready(Some((mids, res))) => match res {
                                     Ok(re) => {
                                         let mut mids = mids.into_iter();
                                         let mut re = re.into_iter();
 
-                                        while let Some(mid) = mids.next() {
-                                            if let Some(r) = re.next() {
-                                                stx.send(Event::Response(mid, Ok(r))).ok();
+                                        while let Some((mid, req)) = mids.next() {
+                                            if req {
+                                                if let Some(r) = re.next() {
+                                                    stx.send(Event::Response(mid, Ok(r))).ok();
+                                                } else {
+                                                    stx.send(Event::Response(
+                                                        mid,
+                                                        Err(Error::NoResponse),
+                                                    ))
+                                                    .ok();
+                                                }
                                             } else {
-                                                stx.send(Event::Response(
-                                                    mid,
-                                                    Err(Error::NoResponse),
-                                                ))
-                                                .ok();
+                                                finished += 1;
                                             }
                                         }
                                     }
                                     Err(er) => {
-                                        for mid in mids {
-                                            stx.send(Event::Response(
-                                                mid,
-                                                Err(Error::Other(er.clone())),
-                                            ))
-                                            .ok();
+                                        for (mid, req) in mids {
+                                            if req {
+                                                stx.send(Event::Response(
+                                                    mid,
+                                                    Err(Error::Other(er.clone())),
+                                                ))
+                                                .ok();
+                                            } else {
+                                                finished += 1
+                                            }
                                         }
                                         stx.send(Event::Error(er)).ok();
                                     }
                                 },
                                 Poll::Ready(None) => break,
+                                Poll::Pending => {
+                                    if finished > 0 {
+                                        stx.send(Event::Finished(finished)).ok();
+                                    }
+
+                                    return Poll::Pending
+                                },
                             }
+                        }
+                        
+                        if finished > 0 {
+                            stx.send(Event::Finished(finished)).ok();
                         }
                     }
 
@@ -180,7 +199,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             }
                             need_sync = false;
                             sync_future = None;
-                            continue;
+                            continue 'main;
                         } else {
                             sync_future.replace(($st2)(bus.clone(), ut.clone()));
                         }

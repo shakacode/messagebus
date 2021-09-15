@@ -24,11 +24,7 @@ use tokio::sync::mpsc;
 buffer_unordered_poller_macro!(
     T,
     Handler,
-    |mid, msg, bus, ut: Arc<T>, _stats: Arc<BufferUnorderedStats>| async move {
-        tokio::task::spawn_blocking(move || (mid, ut.handle(msg, &bus)))
-            .await
-            .unwrap()
-    },
+    |msg, bus, ut: Arc<T>| tokio::task::spawn_blocking(move || ut.handle(msg, &bus)),
     |bus, ut: Arc<T>| async move {
         tokio::task::spawn_blocking(move || ut.sync(&bus))
             .await
@@ -120,14 +116,14 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, mid: u64, m: M, _bus: &Bus) -> Result<(), SendError<M>> {
-        match self.tx.send(Request::Request(mid, m)) {
+    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), SendError<M>> {
+        match self.tx.send(Request::Request(mid, m, req)) {
             Ok(_) => {
                 self.stats.buffer.fetch_add(1, Ordering::Relaxed);
 
                 Ok(())
             }
-            Err(mpsc::error::SendError(Request::Request(_, msg))) => Err(SendError::Closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(SendError::Closed(msg)),
             _ => unimplemented!(),
         }
     }

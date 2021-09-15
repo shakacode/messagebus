@@ -62,45 +62,71 @@ macro_rules! batch_synchronized_poller_macro {
                 if let Some(fut) = handle_future.as_mut() {
                     // SAFETY: safe bacause pinnet to async generator `stack` which should be pinned
                     match unsafe { fix_type(fut) }.poll(cx) {
-                        Poll::Pending => return Poll::Pending,
                         Poll::Ready((mids, res)) => match res {
                             Ok(re) => {
-                                let mids: Vec<u64> = mids;
+                                let mids: Vec<(u64, bool)> = mids;
                                 let re = fix_into_iter::<R, _>(re);
 
                                 let mut mids = mids.into_iter();
                                 let mut re = re.into_iter();
+                                let mut finished = 0;
 
-                                while let Some(mid) = mids.next() {
-                                    if let Some(r) = re.next() {
-                                        stx.send(Event::Response(mid, Ok(r))).ok();
+                                while let Some((mid, req)) = mids.next() {
+                                    if req {
+                                        if let Some(r) = re.next() {
+                                            stx.send(Event::Response(mid, Ok(r))).ok();
+                                        } else {
+                                            stx.send(Event::Response(mid, Err(Error::NoResponse)))
+                                                .ok();
+                                        }
                                     } else {
-                                        stx.send(Event::Response(mid, Err(Error::NoResponse))).ok();
+                                        finished += 1;
                                     }
+                                }
+
+                                if finished > 0 {
+                                    stx.send(Event::Finished(finished)).ok();
                                 }
                             }
 
                             Err(er) => {
                                 let er: $t::Error = er;
-                                for mid in mids {
-                                    stx.send(Event::Response(mid, Err(Error::Other(er.clone()))))
+                                let mut finished = 0;
+
+                                for (mid, req) in mids {
+                                    if req {
+                                        stx.send(Event::Response(
+                                            mid,
+                                            Err(Error::Other(er.clone())),
+                                        ))
                                         .ok();
+                                    } else {
+                                        finished += 1;
+                                    }
                                 }
                                 stx.send(Event::Error(er)).ok();
+
+                                if finished > 0 {
+                                    stx.send(Event::Finished(finished)).ok();
+                                }
                             }
-                        },
+                        }
+
+                        Poll::Pending => return Poll::Pending
                     }
                 }
+
+
                 handle_future = None;
 
                 while !rx_closed && !need_sync && !need_flush {
                     match rx.poll_recv(cx) {
                         Poll::Ready(Some(a)) => match a {
-                            Request::Request(mid, msg) => {
+                            Request::Request(mid, msg, req) => {
                                 // stats.buffer.fetch_sub(1, Ordering::Relaxed);
                                 // stats.batch.fetch_add(1, Ordering::Relaxed);
 
-                                buffer_mid.push(mid);
+                                buffer_mid.push((mid, req));
                                 buffer.push(msg);
                             }
                             Request::Action(Action::Init) => {

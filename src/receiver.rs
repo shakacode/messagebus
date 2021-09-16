@@ -55,7 +55,7 @@ where
     fn poll_events(&self, ctx: &mut Context<'_>, bus: &Bus) -> Poll<Event<M, E>>;
 }
 
-pub trait ReciveUnypedReceiver: Sync {
+pub trait ReciveUntypedReceiver: Sync {
     fn poll_events(
         &self,
         ctx: &mut Context<'_>,

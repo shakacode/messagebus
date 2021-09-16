@@ -5,7 +5,6 @@ mod handler;
 mod receiver;
 pub mod receivers;
 mod relay;
-pub mod relays;
 mod stats;
 mod trait_object;
 
@@ -42,7 +41,7 @@ pub use handler::*;
 pub use relay::Relay;
 pub use receiver::{
     Action, Event, ReciveTypedReceiver, 
-    ReciveUnypedReceiver, SendTypedReceiver,
+    ReciveUntypedReceiver, SendTypedReceiver,
     SendUntypedReceiver, TypeTagAccept,
 };
 

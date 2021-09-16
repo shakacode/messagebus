@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use messagebus::{
     derive::{Error as MbError, Message},
     error::{self, GenericError},
-    receivers, Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUnypedReceiver,
+    receivers, Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUntypedReceiver,
     SendUntypedReceiver, TypeTagAccept, TypeTagged,
 };
 use parking_lot::Mutex;
@@ -153,7 +153,7 @@ impl SendUntypedReceiver for TestRelay {
     }
 }
 
-impl ReciveUnypedReceiver for TestRelay {
+impl ReciveUntypedReceiver for TestRelay {
     fn poll_events(
         &self,
         ctx: &mut Context<'_>,

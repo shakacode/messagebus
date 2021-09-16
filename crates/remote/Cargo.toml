@@ -1,0 +1,21 @@
+[package]
+name = "messagebus_remote"
+version = "0.1.0"
+authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
+repository = "https://github.com/andreytkachenko/messagebus.git"
+keywords = ["futures", "async", "tokio", "message", "bus", "quic", "remote", "rpc", "parallel", "computing"]
+categories = ["network-programming", "asynchronous"]
+description = "MessageBus remote allows intercommunicate by messages between instances"
+license = "MIT OR Apache-2.0"
+exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
+edition = "2018"
+
+# [features]
+# quic = ["quinn"]
+
+[dependencies]
+messagebus = "0.9"
+tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
+parking_lot = "0.11"
+quinn = { version = "0.7" }
+thiserror = "1.0.29"

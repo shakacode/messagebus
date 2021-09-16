@@ -5,7 +5,7 @@ use crate::{
         TypeTagAccept,
     },
     stats::Stats,
-    Bus, Event, Message, Permit, ReciveUnypedReceiver, TypeTag,
+    Bus, Event, Message, Permit, ReciveUntypedReceiver, TypeTag,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use core::{
 use futures::{future::poll_fn, Future};
 use tokio::sync::{oneshot, Notify};
 
-pub trait Relay: TypeTagAccept + SendUntypedReceiver + ReciveUnypedReceiver + 'static {}
-impl<T: TypeTagAccept + SendUntypedReceiver + ReciveUnypedReceiver + 'static> Relay for T {}
+pub trait Relay: TypeTagAccept + SendUntypedReceiver + ReciveUntypedReceiver + 'static {}
+impl<T: TypeTagAccept + SendUntypedReceiver + ReciveUntypedReceiver + 'static> Relay for T {}
 
 struct SlabCfg;
 impl sharded_slab::Config for SlabCfg {

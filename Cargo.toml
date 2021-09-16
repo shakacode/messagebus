@@ -10,9 +10,6 @@ license = "MIT OR Apache-2.0"
 exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2018"
 
-[features]
-quic = ["quinn"]
-
 [dependencies]
 messagebus_derive = "0.1"
 tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
@@ -27,8 +24,6 @@ erased-serde = "0.3"
 serde = "1"
 serde_derive = "1"
 dashmap = "4.0.2"
-quinn = { version = "0.7", optional = true }
-
 
 [dev-dependencies]
 anyhow = "1.0"

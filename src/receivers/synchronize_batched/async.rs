@@ -17,13 +17,17 @@ use futures::Future;
 
 use super::SynchronizedBatchedConfig;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc::{self, UnboundedSender}};
 
 batch_synchronized_poller_macro! {
     T,
     AsyncBatchSynchronizedHandler,
-    |msgs, bus, ut: Arc<Mutex<T>>| async move {
-        ut.lock().await.handle(msgs, &bus).await
+    |mids: Vec<_>, msgs, bus, ut: Arc<Mutex<T>>, stx: UnboundedSender<_>| {
+        tokio::spawn(async move {
+            let resp = ut.lock().await.handle(msgs, &bus).await;
+
+            crate::process_batch_result!(resp, mids, stx);
+        })
     },
     |bus, ut: Arc<Mutex<T>>| { async move { ut.lock().await.sync(&bus).await } }
 }

@@ -67,22 +67,13 @@ macro_rules! buffer_unordered_poller_macro {
                         Request::Request(mid, msg, _req) => {
                             let bus = bus.clone();
                             let ut = ut.clone();
-                            let state = state.clone();
                             let stx = stx.clone();
+                            let state = state.clone();
 
-                            let task_permit = state.semaphore.acquire_owned().await;
                             let flush_permit = state.flush_lock.read_owned().await;
+                            let task_permit = state.semaphore.acquire_owned().await;
 
-                            let _ = tokio::spawn(async move {
-                                let resp = ($st1)(msg, bus, ut)
-                                    .await;
-                                
-                                drop(task_permit);
-                                drop(flush_permit);
-
-                                stx.send(Event::Response(mid, resp.map_err(Error::Other)))
-                                    .unwrap();
-                            });
+                            let _ = ($st1)(mid, msg, bus, ut, stx, task_permit, flush_permit);
                         }
                         Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
                         Request::Action(Action::Close) => { rx.close(); }
@@ -95,6 +86,7 @@ macro_rules! buffer_unordered_poller_macro {
                             let lock = state.flush_lock.write().await; 
                             let resp = ($st2)(bus.clone(), ut.clone()).await;
                             drop(lock);
+                            
                             stx.send(Event::Synchronized(resp.map_err(Error::Other)))
                                 .unwrap();
                         }

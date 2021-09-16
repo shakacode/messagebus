@@ -19,16 +19,21 @@ use crate::{
 
 use futures::Future;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 buffer_unordered_poller_macro!(
     T,
     Handler,
-    |msg, bus, ut: Arc<T>| async move { 
-        tokio::task::spawn_blocking(move || ut.handle(msg, &bus))
-            .await
-            .unwrap() 
-    },
+    |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>, task_permit, flush_permit| 
+        tokio::task::spawn_blocking(move || {
+            let resp = ut.handle(msg, &bus);
+
+            drop(task_permit);
+            drop(flush_permit);
+
+            stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                .unwrap();
+        }),
     |bus, ut: Arc<T>| async move {
         tokio::task::spawn_blocking(move || ut.sync(&bus))
             .await

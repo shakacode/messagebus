@@ -20,12 +20,22 @@ use super::{BufferUnorderedConfig, BufferUnorderedStats};
 
 use futures::Future;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 buffer_unordered_poller_macro!(
     T,
     AsyncHandler,
-    |msg, bus, ut: Arc<T>| async move { ut.handle(msg, &bus).await },
+    |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>, task_permit, flush_permit| {
+        tokio::spawn(async move {
+            let resp = ut.handle(msg, &bus).await;
+        
+            drop(task_permit);
+            drop(flush_permit);
+
+            stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                .unwrap();
+        })
+    },
     |bus, ut: Arc<T>| { async move { ut.sync(&bus).await } }
 );
 

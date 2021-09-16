@@ -45,19 +45,9 @@ macro_rules! synchronized_poller_macro {
                 while let Some(msg) = rx.recv().await {
                     match msg {
                         Request::Request(mid, msg, _req) => {
-                            let bus = bus.clone();
-                            let ut = ut.clone();
-                            let stx = stx.clone();
-
-                            tokio::spawn(async move {
-                                let resp = ($st1)(msg, bus, ut)
-                                    .await;
-
-                                stx.send(Event::Response(mid, resp.map_err(Error::Other)))
-                                    .unwrap();
-                            })
-                            .await
-                            .unwrap();
+                            ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone())
+                                .await
+                                .unwrap()
                         }
                         Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
                         Request::Action(Action::Close) => { rx.close(); }

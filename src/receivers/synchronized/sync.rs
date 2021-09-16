@@ -15,15 +15,18 @@ use crate::{
     receivers::Request,
     Bus, Message, SynchronizedHandler, Untyped,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc::{self, UnboundedSender}};
 
 synchronized_poller_macro! {
     T,
     SynchronizedHandler,
-    |msg, bus, ut: Arc<Mutex<T>>| async move {
-        tokio::task::spawn_blocking(move || block_on(ut.lock()).handle(msg, &bus))
-            .await
-            .unwrap()
+    |mid, msg, bus, ut: Arc<Mutex<T>>, stx: UnboundedSender<_>| {
+        tokio::task::spawn_blocking(move || {
+            let resp = block_on(ut.lock()).handle(msg, &bus);
+
+            stx.send(Event::Response(mid, resp.map_err(Error::Other)))
+                .unwrap();
+        })
     },
     |bus, ut: Arc<Mutex<T>>| async move {
         tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus))

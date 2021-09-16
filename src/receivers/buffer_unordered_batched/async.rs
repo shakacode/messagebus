@@ -19,12 +19,21 @@ use crate::{
 use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
 use futures::Future;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 buffer_unordered_batch_poller_macro!(
     T,
     AsyncBatchHandler,
-    |msgs, bus, ut: Arc<T>| async move { ut.handle(msgs, &bus).await },
+    |mids: Vec<_>, msgs, bus, ut: Arc<T>, flush_permit, task_permit, stx: UnboundedSender<_>| {
+        tokio::spawn(async move {
+            let resp = ut.handle(msgs, &bus).await;
+            
+            drop(task_permit);
+            drop(flush_permit);
+
+            crate::process_batch_result!(resp, mids, stx);
+        })
+    },
     |bus, ut: Arc<T>| { async move { ut.sync(&bus).await } }
 );
 

@@ -69,37 +69,7 @@ macro_rules! batch_synchronized_poller_macro {
                                 let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                                 let buffer_clone = buffer.drain(..).collect();
 
-                                tokio::spawn(async move {
-                                    let resp = ($st1)(buffer_clone, bus, ut).await;
-                                    let mids = buffer_mid_clone.into_iter();
-                                    
-                                    match resp {
-                                        Ok(re) => {
-                                            let mut mids = mids.into_iter();
-                                            let mut re = re.into_iter();
-
-                                            while let Some((mid, _req)) = mids.next() {
-                                                if let Some(r) = re.next() {
-                                                    stx.send(Event::Response(mid, Ok(r)))
-                                                        .unwrap();
-                                                } else {
-                                                    stx.send(Event::Response(mid, Err(Error::NoResponse)))
-                                                        .unwrap();
-                                                }
-                                            }
-                                        }
-                                        Err(er) => {
-                                            for (mid, _req) in mids {
-                                                stx.send(Event::Response(
-                                                    mid,
-                                                    Err(Error::Other(er.clone())),
-                                                )).unwrap();
-                                            }
-
-                                            stx.send(Event::Error(er)).unwrap();
-                                        }
-                                    }
-                                }).await.unwrap();
+                                let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                             }
                         }
                         Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
@@ -111,37 +81,7 @@ macro_rules! batch_synchronized_poller_macro {
                                 let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                                 let buffer_clone = buffer.drain(..).collect();
 
-                                let _ = tokio::spawn(async move {
-                                    let resp = ($st1)(buffer_clone, bus, ut).await;
-                                    let mids = buffer_mid_clone.into_iter();
-                                    
-                                    match resp {
-                                        Ok(re) => {
-                                            let mut mids = mids.into_iter();
-                                            let mut re = re.into_iter();
-
-                                            while let Some((mid, _req)) = mids.next() {
-                                                if let Some(r) = re.next() {
-                                                    stx.send(Event::Response(mid, Ok(r)))
-                                                        .unwrap();
-                                                } else {
-                                                    stx.send(Event::Response(mid, Err(Error::NoResponse)))
-                                                        .unwrap();
-                                                }
-                                            }
-                                        }
-                                        Err(er) => {
-                                            for (mid, _req) in mids {
-                                                stx.send(Event::Response(
-                                                    mid,
-                                                    Err(Error::Other(er.clone())),
-                                                )).unwrap();
-                                            }
-
-                                            stx.send(Event::Error(er)).unwrap();
-                                        }
-                                    }
-                                });
+                                let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                             }
 
                             stx_clone.send(Event::Flushed).unwrap();

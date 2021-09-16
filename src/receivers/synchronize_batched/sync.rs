@@ -15,15 +15,17 @@ use crate::{
 
 use super::SynchronizedBatchedConfig;
 use futures::{executor::block_on, Future};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc::{self, UnboundedSender}};
 
 batch_synchronized_poller_macro! {
     T,
     BatchSynchronizedHandler,
-    |msgs, bus, ut: Arc<Mutex<T>>| async move  {
-        tokio::task::spawn_blocking(move || block_on(ut.lock()).handle(msgs, &bus))
-            .await
-            .unwrap()
+    |mids: Vec<_>, msgs, bus, ut: Arc<Mutex<T>>, stx: UnboundedSender<_>| {
+        tokio::task::spawn_blocking(move || {
+            let resp = block_on(ut.lock()).handle(msgs, &bus);
+
+            crate::process_batch_result!(resp, mids, stx);
+        })
     },
     |bus, ut: Arc<Mutex<T>>| async move {
         tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus))

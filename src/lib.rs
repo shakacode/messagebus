@@ -118,7 +118,6 @@ impl Bus {
 
     pub async fn close(&self) {
         let _handle = self.inner.maintain.lock().await;
-
         self.inner.closed.store(true, Ordering::SeqCst);
 
         for (_, rs) in &self.inner.receivers {
@@ -167,11 +166,12 @@ impl Bus {
     }
 
     pub async fn flush_and_sync(&self) {
+        self.flush().await;
         let _handle = self.inner.maintain.lock().await;
 
         for (_, rs) in &self.inner.receivers {
             for r in rs {
-                let err = tokio::time::timeout(Duration::from_secs(60), r.sync(self)).await;
+                let err = tokio::time::timeout(Duration::from_secs(30), r.sync(self)).await;
 
                 if let Err(err) = err {
                     error!("Sync timeout on {}: {}", r.name(), err);

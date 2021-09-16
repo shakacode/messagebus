@@ -14,8 +14,15 @@ edition = "2018"
 # quic = ["quinn"]
 
 [dependencies]
-messagebus = "0.9"
+thiserror = "1.0"
+messagebus = { path="../../" }
 tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
 parking_lot = "0.11"
-quinn = { version = "0.7" }
-thiserror = "1.0.29"
+quinn = "0.7"
+rmp = "0.8.10"
+rmp-serde = "0.15.5"
+erased-serde = "0.3.16"
+serde_derive = "1.0.130"
+serde = "1.0.130"
+# quinn = { version = "0.7", optional = true }
+

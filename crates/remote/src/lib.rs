@@ -1,2 +1,2 @@
-pub mod relays;
 pub mod error;
+pub mod relays;

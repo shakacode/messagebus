@@ -248,7 +248,7 @@ where
                             break;
                         }
                         Event::Flushed => {
-                            self.context.need_flush.store(true, Ordering::SeqCst);
+                            self.context.need_flush.store(false, Ordering::SeqCst);
                             self.context.flushed.notify_waiters()
                         }
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),

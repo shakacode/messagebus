@@ -171,11 +171,7 @@ impl Bus {
 
         for (_, rs) in &self.inner.receivers {
             for r in rs {
-                let err = tokio::time::timeout(Duration::from_secs(30), r.sync(self)).await;
-
-                if let Err(err) = err {
-                    error!("Sync timeout on {}: {}", r.name(), err);
-                }
+                r.sync(self).await;
             }
         }
     }

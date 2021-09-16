@@ -2,6 +2,7 @@ use core::iter::FromIterator;
 
 use crate::{error::StdSyncSendError, Bus, Message};
 use async_trait::async_trait;
+use futures::Future;
 
 pub trait Handler<M: Message>: Send + Sync {
     type Error: StdSyncSendError;
@@ -13,15 +14,15 @@ pub trait Handler<M: Message>: Send + Sync {
     }
 }
 
-#[async_trait]
 pub trait AsyncHandler<M: Message>: Send + Sync {
     type Error: StdSyncSendError;
     type Response: Message;
 
-    async fn handle(&self, msg: M, bus: &Bus) -> Result<Self::Response, Self::Error>;
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        Ok(())
-    }
+    type AsyncHandleFuture<'a>: Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a>: Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
+
+    fn handle(&self, msg: M, bus: &Bus) -> Self::AsyncHandleFuture<'_>;
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_>;
 }
 
 pub trait SynchronizedHandler<M: Message>: Send {

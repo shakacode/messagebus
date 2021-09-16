@@ -1,4 +1,6 @@
-use async_trait::async_trait;
+#![feature(associated_type_defaults, generic_associated_types, type_alias_impl_trait)]
+
+use futures::Future;
 use messagebus::{derive::Message, error, AsyncHandler, Bus, Handler, Message, TypeTagged};
 use thiserror::Error;
 
@@ -37,115 +39,164 @@ struct MsgI32(i32);
 #[message(clone)]
 struct MsgI16(i16);
 
-#[async_trait]
 impl AsyncHandler<MsgF32> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgF32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgU16(1)).await?;
+    type AsyncHandleFuture<'a> = impl Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a> = impl Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
 
-        println!("TmpReceiver ---> {:?} {}", msg, msg.type_tag());
+    fn handle(&self, msg: MsgF32, bus: &Bus) -> Self::AsyncHandleFuture<'_> {
+        let bus = bus.clone();
 
-        Ok(())
+        async move {
+            bus.send(MsgU16(1)).await?;
+
+            println!("TmpReceiver ---> {:?} {}", msg, msg.type_tag());
+
+            Ok(())
+        }
     }
 
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        println!("TmpReceiver f32: sync");
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_> {
+        async move {
+            println!("TmpReceiver f32: sync");
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 
-#[async_trait]
 impl AsyncHandler<MsgU16> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgU16, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgU32(2)).await?;
-        println!("TmpReceiver ---> {:?}", msg);
+    type AsyncHandleFuture<'a> = impl Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a> = impl Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
 
-        Ok(())
+    fn handle(&self, msg: MsgU16, bus: &Bus) -> Self::AsyncHandleFuture<'_> {
+        let bus = bus.clone();
+
+        async move {
+            bus.send(MsgU32(2)).await?;
+            println!("TmpReceiver ---> {:?}", msg);
+
+            Ok(())
+        }
     }
 
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        println!("TmpReceiver u16: sync");
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_> {
+        async move {
+            println!("TmpReceiver u16: sync");
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 
-#[async_trait]
 impl AsyncHandler<MsgU32> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgU32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgI32(3)).await?;
-        println!("TmpReceiver ---> {:?}", msg);
+    type AsyncHandleFuture<'a> = impl Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a> = impl Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
 
-        Ok(())
+    fn handle(&self, msg: MsgU32, bus: &Bus) -> Self::AsyncHandleFuture<'_> {
+        let bus = bus.clone();
+
+        async move {
+            bus.send(MsgI32(3)).await?;
+            println!("TmpReceiver ---> {:?}", msg);
+
+            Ok(())
+        }
     }
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        println!("TmpReceiver u32: sync");
 
-        Ok(())
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_> {
+        async move {
+            println!("TmpReceiver u32: sync");
+
+            Ok(())
+        }
     }
 }
 
-#[async_trait]
 impl AsyncHandler<MsgI32> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgI32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        bus.send(MsgI16(4)).await?;
-        println!("TmpReceiver ---> {:?}", msg);
+    type AsyncHandleFuture<'a> = impl Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a> = impl Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
 
-        Ok(())
+    fn handle(&self, msg: MsgI32, bus: &Bus) -> Self::AsyncHandleFuture<'_> {
+        let bus = bus.clone();
+
+        async move {
+            bus.send(MsgI16(4)).await?;
+            println!("TmpReceiver ---> {:?}", msg);
+
+            Ok(())
+        }
     }
 
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        println!("TmpReceiver i32: sync");
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_> {
+        async move {
+            println!("TmpReceiver i32: sync");
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 
-#[async_trait]
 impl AsyncHandler<MsgI16> for TmpReceiver {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgI16, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("TmpReceiver ---> {:?}", msg);
+    type AsyncHandleFuture<'a> = impl Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a> = impl Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
 
-        Ok(())
+    fn handle(&self, msg: MsgI16, _bus: &Bus) -> Self::AsyncHandleFuture<'_> {
+        async move {
+            println!("TmpReceiver ---> {:?}", msg);
+
+            Ok(())
+        }
     }
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        println!("TmpReceiver i16: sync");
 
-        Ok(())
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_> {
+        async move {
+            println!("TmpReceiver i16: sync");
+
+            Ok(())
+        }
     }
 }
 
-#[async_trait]
+
 impl AsyncHandler<MsgI32> for TmpReceiver2 {
     type Error = Error;
     type Response = ();
 
-    async fn handle(&self, msg: MsgI32, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        println!("TmpReceiver2: ---> {:?}", msg);
+    type AsyncHandleFuture<'a> = impl Future<Output = Result<Self::Response, Self::Error>> + Send + Sync + 'a;
+    type AsyncSyncFuture<'a> = impl Future<Output = Result<(), Self::Error>> + Send + Sync + 'a;
 
-        bus.send(MsgI16(5)).await?;
+    fn handle(&self, msg: MsgI32, bus: &Bus) -> Self::AsyncHandleFuture<'_> {
+        let bus = bus.clone();
 
-        Ok(())
+        async move {
+            println!("TmpReceiver2: ---> {:?}", msg);
+
+            bus.send(MsgI16(5)).await?;
+
+            Ok(())
+        }
     }
-    async fn sync(&self, _bus: &Bus) -> Result<(), Self::Error> {
-        println!("TmpReceiver2: i32: sync");
+    fn sync(&self, _bus: &Bus) -> Self::AsyncSyncFuture<'_> {
+        async move {
+            println!("TmpReceiver2: i32: sync");
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 

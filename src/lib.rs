@@ -1,3 +1,5 @@
+#![feature(associated_type_defaults, generic_associated_types, type_alias_impl_trait)]
+
 mod builder;
 mod envelop;
 pub mod error;

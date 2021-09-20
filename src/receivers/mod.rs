@@ -15,7 +15,6 @@ pub use synchronize_batched::{
 
 use crate::receiver::Action;
 
-
 #[macro_export]
 macro_rules! process_batch_result {
     ($resp: expr, $mids: expr, $stx: expr) => {
@@ -28,8 +27,7 @@ macro_rules! process_batch_result {
 
                 while let Some((mid, _req)) = mids.next() {
                     if let Some(r) = re.next() {
-                        $stx.send(Event::Response(mid, Ok(r)))
-                            .unwrap();
+                        $stx.send(Event::Response(mid, Ok(r))).unwrap();
                     } else {
                         $stx.send(Event::Response(mid, Err(Error::NoResponse)))
                             .unwrap();
@@ -38,10 +36,8 @@ macro_rules! process_batch_result {
             }
             Err(er) => {
                 for (mid, _req) in mids {
-                    $stx.send(Event::Response(
-                        mid,
-                        Err(Error::Other(er.clone())),
-                    )).unwrap();
+                    $stx.send(Event::Response(mid, Err(Error::Other(er.clone()))))
+                        .unwrap();
                 }
 
                 $stx.send(Event::Error(er)).unwrap();

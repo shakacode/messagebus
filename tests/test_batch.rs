@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use messagebus::{AsyncBatchHandler, Bus, Message, derive::{Error as MbError, Message}, error, receivers::BufferUnorderedBatchedConfig};
+use messagebus::{
+    derive::{Error as MbError, Message},
+    error,
+    receivers::BufferUnorderedBatchedConfig,
+    AsyncBatchHandler, Bus, Message,
+};
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -26,7 +31,7 @@ struct MsgI32(i32);
 struct MsgI16(i16);
 
 struct TmpReceiver {
-    batches: Arc<Mutex<Vec<Vec<i32>>>>
+    batches: Arc<Mutex<Vec<Vec<i32>>>>,
 }
 
 #[async_trait]
@@ -41,7 +46,9 @@ impl AsyncBatchHandler<MsgI32> for TmpReceiver {
         msg: Vec<MsgI32>,
         _bus: &Bus,
     ) -> Result<Vec<Self::Response>, Self::Error> {
-        self.batches.lock().push(msg.into_iter().map(|x|x.0).collect());
+        self.batches
+            .lock()
+            .push(msg.into_iter().map(|x| x.0).collect());
 
         Ok(vec![])
     }
@@ -52,18 +59,23 @@ async fn test_batch() {
     let batches = Arc::new(Mutex::new(Vec::new()));
 
     let (b, poller) = Bus::build()
-        .register(TmpReceiver { batches: batches.clone() })
-        .subscribe_batch_async::<MsgI32>(16, BufferUnorderedBatchedConfig {
-            batch_size: 8,
-            ..Default::default()
+        .register(TmpReceiver {
+            batches: batches.clone(),
         })
+        .subscribe_batch_async::<MsgI32>(
+            16,
+            BufferUnorderedBatchedConfig {
+                batch_size: 8,
+                ..Default::default()
+            },
+        )
         .done()
         .build();
 
     for i in 1..100i32 {
         b.send(MsgI32(i)).await.unwrap();
     }
-        
+
     let mut re = Vec::new();
     let mut counter = 1i32;
     for _ in 1..100i32 {

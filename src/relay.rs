@@ -7,13 +7,13 @@ use crate::{
     stats::Stats,
     Bus, Event, Message, Permit, ReciveUntypedReceiver, TypeTag,
 };
-use dashmap::DashMap;
-use std::sync::Arc;
 use core::{
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
+use std::sync::Arc;
 use tokio::sync::{oneshot, Notify};
 
 pub trait Relay: TypeTagAccept + SendUntypedReceiver + ReciveUntypedReceiver + 'static {}
@@ -217,7 +217,10 @@ where
     }
 
     fn increment_processing(&self, tt: &TypeTag) {
-        self.context.receivers.get(tt).map(|r|r.processing.fetch_add(1, Ordering::SeqCst));
+        self.context
+            .receivers
+            .get(tt)
+            .map(|r| r.processing.fetch_add(1, Ordering::SeqCst));
     }
 
     fn start_polling(

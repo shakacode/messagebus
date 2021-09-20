@@ -27,13 +27,12 @@ impl Default for SynchronizedConfig {
 #[macro_export]
 macro_rules! synchronized_poller_macro {
     ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        fn synchronized_poller<$t, M, R>(
+        async fn synchronized_poller<$t, M, R>(
             mut rx: mpsc::UnboundedReceiver<Request<M>>,
             bus: Bus,
             ut: Untyped,
             stx: mpsc::UnboundedSender<Event<R, $t::Error>>,
-        ) -> impl Future<Output = ()>
-        where
+        ) where
             $t: $h<M, Response = R> + 'static,
             $t::Error: StdSyncSendError,
             M: Message,
@@ -41,25 +40,29 @@ macro_rules! synchronized_poller_macro {
         {
             let ut = ut.downcast::<Mutex<T>>().unwrap();
 
-            async move {
-                while let Some(msg) = rx.recv().await {
-                    match msg {
-                        Request::Request(mid, msg, _req) => {
-                            ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone())
-                                .await
-                                .unwrap()
-                        }
-                        Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
-                        Request::Action(Action::Close) => { rx.close(); }
-                        Request::Action(Action::Flush) => { stx.send(Event::Flushed).unwrap(); }
-                        Request::Action(Action::Sync) => {
-                            let resp = ($st2)(bus.clone(), ut.clone()).await;
-                            stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                                .unwrap();
-                        }
-
-                        _ => unimplemented!(),
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    Request::Request(mid, msg, _req) => {
+                        ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone())
+                            .await
+                            .unwrap()
                     }
+                    Request::Action(Action::Init) => {
+                        stx.send(Event::Ready).unwrap();
+                    }
+                    Request::Action(Action::Close) => {
+                        rx.close();
+                    }
+                    Request::Action(Action::Flush) => {
+                        stx.send(Event::Flushed).unwrap();
+                    }
+                    Request::Action(Action::Sync) => {
+                        let resp = ($st2)(bus.clone(), ut.clone()).await;
+                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                            .unwrap();
+                    }
+
+                    _ => unimplemented!(),
                 }
             }
         }

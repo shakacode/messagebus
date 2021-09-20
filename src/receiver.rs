@@ -8,20 +8,16 @@ use crate::{
 };
 use core::{
     any::{Any, TypeId},
-    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     fmt,
     marker::PhantomData,
     mem,
     pin::Pin,
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     task::{Context, Poll},
 };
-use futures::{Future, future::poll_fn, FutureExt};
-use std::{
-    borrow::Cow,
-    sync::Arc,
-};
+use futures::{future::poll_fn, Future, FutureExt};
+use std::{borrow::Cow, sync::Arc};
 use tokio::sync::{oneshot, Notify};
-
 
 struct SlabCfg;
 impl sharded_slab::Config for SlabCfg {
@@ -805,7 +801,7 @@ impl Receiver {
         req: bool,
     ) -> Result<(), Error<M>> {
         self.inner.increment_processing(&M::type_tag_());
-        
+
         let res = if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()

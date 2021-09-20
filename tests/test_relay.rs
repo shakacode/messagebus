@@ -1,6 +1,7 @@
-use std::task::{Context, Poll};
+use std::pin::Pin;
 
 use async_trait::async_trait;
+use futures::Stream;
 use messagebus::{
     derive::{Error as MbError, Message},
     error::{self, GenericError},
@@ -46,7 +47,7 @@ impl AsyncHandler<Msg<i32>> for TmpReceiver {
 
 pub struct TestRelay {
     stx: mpsc::UnboundedSender<Event<Box<dyn Message>, GenericError>>,
-    srx: Mutex<mpsc::UnboundedReceiver<Event<Box<dyn Message>, GenericError>>>,
+    srx: Mutex<Option<mpsc::UnboundedReceiver<Event<Box<dyn Message>, GenericError>>>>,
 }
 
 impl TypeTagAccept for TestRelay {
@@ -154,17 +155,12 @@ impl SendUntypedReceiver for TestRelay {
 }
 
 impl ReciveUntypedReceiver for TestRelay {
-    fn poll_events(
-        &self,
-        ctx: &mut Context<'_>,
-        _bus: &Bus,
-    ) -> Poll<Event<Box<dyn Message>, error::GenericError>> {
-        let poll = self.srx.lock().poll_recv(ctx);
-        match poll {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(event)) => Poll::Ready(event),
-            Poll::Ready(None) => Poll::Ready(Event::Exited),
-        }
+    type Stream = Pin<Box<dyn Stream<Item = Event<Box<dyn Message>, error::GenericError>> + Send>>;
+
+    fn event_stream(&self) -> Self::Stream {
+        let mut rx = self.srx.lock().take().unwrap();
+
+        Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }
 }
 
@@ -173,7 +169,7 @@ async fn test_relay() {
     let (stx, srx) = mpsc::unbounded_channel();
     let relay = TestRelay {
         stx,
-        srx: Mutex::new(srx),
+        srx: Mutex::new(Some(srx)),
     };
 
     let (b, poller) = Bus::build()

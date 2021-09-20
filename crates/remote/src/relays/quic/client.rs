@@ -1,5 +1,5 @@
 use crate::error::Error;
-use core::task::{Context, Poll};
+use futures::Stream;
 use messagebus::{
     error::{GenericError, SendError},
     Action, Bus, Event, Message, ReciveUntypedReceiver, SendUntypedReceiver, TypeTag,
@@ -8,6 +8,7 @@ use messagebus::{
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
+    pin::Pin,
 };
 
 pub const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
@@ -34,7 +35,6 @@ impl QuicClientRelayEndpoint {
 
         Ok(Self { endpoint })
     }
-
     pub async fn connect(
         &self,
         addr: SocketAddr,
@@ -63,6 +63,7 @@ pub struct QuicClientConnection {
 }
 
 impl QuicClientConnection {
+    #[inline]
     pub fn send(&self, req: Request) -> Result<(), Error> {
         Ok(())
     }
@@ -147,21 +148,15 @@ impl SendUntypedReceiver for QuicClientRelay {
         Ok(())
     }
 }
-
 impl ReciveUntypedReceiver for QuicClientRelay {
-    fn poll_events(
-        &self,
-        ctx: &mut Context<'_>,
-        _bus: &Bus,
-    ) -> Poll<Event<Box<dyn Message>, GenericError>> {
-        Poll::Pending
+    type Stream = Pin<Box<dyn Stream<Item = Event<Box<dyn Message>, GenericError>> + Send>>;
 
-        // let poll = self.srx.lock().poll_recv(ctx);
+    fn event_stream(&self) -> Self::Stream {
+        // let mut rx = self.srx.lock().take().unwrap();
 
-        // match poll {
-        //     Poll::Pending => Poll::Pending,
-        //     Poll::Ready(Some(event)) => Poll::Ready(event),
-        //     Poll::Ready(None) => Poll::Ready(Event::Exited),
-        // }
+        // Box::pin(futures::stream::poll_fn(move |cx|rx.poll_recv(cx)))
+        Box::pin(futures::stream::poll_fn(move |_cx| {
+            std::task::Poll::Pending
+        }))
     }
 }

@@ -12,7 +12,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use dashmap::DashMap;
-use futures::{future::poll_fn, Future};
+use futures::{pin_mut, Future, StreamExt};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Notify};
 
@@ -226,12 +226,19 @@ where
     fn start_polling(
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
-        Box::new(move |bus| {
+        Box::new(move |_| {
             Box::pin(async move {
+                let this = self.clone();
+                let events = this.inner.event_stream();
+                pin_mut!(events);
+
                 loop {
-                    let this = self.clone();
-                    let bus = bus.clone();
-                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx, &bus)).await;
+                    let event = if let Some(event) = events.next().await {
+                        event
+                    } else {
+                        self.context.closed.notify_waiters();
+                        break;
+                    };
 
                     match event {
                         Event::Error(err) => error!("Batch Error: {}", err),

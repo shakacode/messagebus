@@ -24,5 +24,9 @@ rmp-serde = "0.15.5"
 erased-serde = "0.3.16"
 serde_derive = "1.0.130"
 serde = "1.0.130"
+futures = "0.3.17"
+
+[dev-dependencies]
+tokio = { version = "1.11.0", features = ["full"] }
 # quinn = { version = "0.7", optional = true }
 

@@ -1,8 +1,4 @@
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{pin::Pin, sync::Arc};
 
 use crate::{
     batch_synchronized_poller_macro,
@@ -14,7 +10,7 @@ use crate::{
 };
 
 use super::SynchronizedBatchedConfig;
-use futures::{executor::block_on, Future};
+use futures::{executor::block_on, Future, Stream};
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
     Mutex,
@@ -44,7 +40,7 @@ where
     E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
-    srx: parking_lot::Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
+    srx: parking_lot::Mutex<Option<mpsc::UnboundedReceiver<Event<R, E>>>>,
 }
 
 impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
@@ -78,7 +74,7 @@ where
         (
             SynchronizedBatchedSync::<M, R, T::Error> {
                 tx,
-                srx: parking_lot::Mutex::new(srx),
+                srx: parking_lot::Mutex::new(Some(srx)),
             },
             poller,
         )
@@ -121,12 +117,11 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn poll_events(&self, ctx: &mut Context<'_>, _bus: &Bus) -> Poll<Event<R, E>> {
-        let poll = self.srx.lock().poll_recv(ctx);
-        match poll {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(event)) => Poll::Ready(event),
-            Poll::Ready(None) => Poll::Ready(Event::Exited),
-        }
+    type Stream = Pin<Box<dyn Stream<Item = Event<R, E>> + Send>>;
+
+    fn event_stream(&self) -> Self::Stream {
+        let mut rx = self.srx.lock().take().unwrap();
+
+        Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }
 }

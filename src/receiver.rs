@@ -13,9 +13,9 @@ use core::{
     mem,
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicI64, Ordering},
-    task::{Context, Poll},
 };
-use futures::{future::poll_fn, Future, FutureExt};
+use futures::{pin_mut, Stream};
+use futures::{Future, FutureExt, StreamExt};
 use std::{borrow::Cow, sync::Arc};
 use tokio::sync::{oneshot, Notify};
 
@@ -48,15 +48,15 @@ where
     M: Message,
     E: StdSyncSendError,
 {
-    fn poll_events(&self, ctx: &mut Context<'_>, bus: &Bus) -> Poll<Event<M, E>>;
+    type Stream: Stream<Item = Event<M, E>> + Send;
+
+    fn event_stream(&self) -> Self::Stream;
 }
 
 pub trait ReciveUntypedReceiver: Sync {
-    fn poll_events(
-        &self,
-        ctx: &mut Context<'_>,
-        bus: &Bus,
-    ) -> Poll<Event<Box<dyn Message>, GenericError>>;
+    type Stream: Stream<Item = Event<Box<dyn Message>, GenericError>> + Send;
+
+    fn event_stream(&self) -> Self::Stream;
 }
 
 pub trait WrapperReturnTypeOnly<R: Message>: Send + Sync {
@@ -184,12 +184,19 @@ where
     fn start_polling_events(
         self: Arc<Self>,
     ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
-        Box::new(move |bus| {
+        Box::new(move |_| {
             Box::pin(async move {
+                let this = self.clone();
+                let events = this.inner.event_stream();
+                pin_mut!(events);
+
                 loop {
-                    let this = self.clone();
-                    let bus = bus.clone();
-                    let event = poll_fn(move |ctx| this.inner.poll_events(ctx, &bus)).await;
+                    let event = if let Some(event) = events.next().await {
+                        event
+                    } else {
+                        self.context.closed.notify_waiters();
+                        break;
+                    };
 
                     match event {
                         Event::Error(err) => error!("Batch Error: {}", err),
@@ -489,12 +496,10 @@ pub struct AnyReceiver<'a> {
 }
 
 impl<'a> AnyReceiver<'a> {
-    pub fn new<M, R, E, S>(rcvr: &'a S) -> Self
+    pub fn new<M, S>(rcvr: &'a S) -> Self
     where
         M: Message,
-        R: Message,
-        E: StdSyncSendError,
-        S: SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
+        S: SendTypedReceiver<M> + 'static,
     {
         let send_typed_receiver = rcvr as &(dyn SendTypedReceiver<M>);
         let send_typed_receiver: TraitObject = unsafe { mem::transmute(send_typed_receiver) };

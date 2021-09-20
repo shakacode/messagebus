@@ -4,7 +4,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    task::{Context, Poll},
 };
 
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
 };
 
 use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
-use futures::Future;
+use futures::{Future, Stream};
 use parking_lot::Mutex;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -43,7 +42,7 @@ where
 {
     tx: mpsc::UnboundedSender<Request<M>>,
     stats: Arc<BufferUnorderedBatchedStats>,
-    srx: Mutex<mpsc::UnboundedReceiver<Event<R, E>>>,
+    srx: Mutex<Option<mpsc::UnboundedReceiver<Event<R, E>>>>,
 }
 
 impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
@@ -94,7 +93,7 @@ where
             BufferUnorderedBatchedAsync::<M, R, T::Error> {
                 tx,
                 stats,
-                srx: Mutex::new(srx),
+                srx: Mutex::new(Some(srx)),
             },
             poller,
         )
@@ -141,12 +140,11 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn poll_events(&self, ctx: &mut Context<'_>, _bus: &Bus) -> Poll<Event<R, E>> {
-        let poll = self.srx.lock().poll_recv(ctx);
-        match poll {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(event)) => Poll::Ready(event),
-            Poll::Ready(None) => Poll::Ready(Event::Exited),
-        }
+    type Stream = Pin<Box<dyn Stream<Item = Event<R, E>> + Send>>;
+
+    fn event_stream(&self) -> Self::Stream {
+        let mut rx = self.srx.lock().take().unwrap();
+
+        Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }
 }

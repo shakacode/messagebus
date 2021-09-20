@@ -25,11 +25,9 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 buffer_unordered_poller_macro!(
     T,
     AsyncHandler,
-    |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>, task_permit| {
+    |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>| {
         tokio::spawn(async move {
             let resp = ut.handle(msg, &bus).await;
-            drop(task_permit);
-
             stx.send(Event::Response(mid, resp.map_err(Error::Other)))
                 .unwrap();
         })

@@ -21,29 +21,24 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
-use tokio::sync::Mutex;
 use smallvec::SmallVec;
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::Mutex;
 
 use builder::{BusBuilder, MessageTypeDescriptor};
-use receiver::{Receiver, Permit};
 use error::{Error, SendError, StdSyncSendError};
+use receiver::{Permit, Receiver};
 use stats::Stats;
-
 
 // public
 pub use builder::Module;
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 pub use handler::*;
-pub use relay::Relay;
 pub use receiver::{
-    Action, Event, ReciveTypedReceiver, 
-    ReciveUntypedReceiver, SendTypedReceiver,
+    Action, Event, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
     SendUntypedReceiver, TypeTagAccept,
 };
+pub use relay::Relay;
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 

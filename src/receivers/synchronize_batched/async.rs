@@ -17,7 +17,10 @@ use futures::Future;
 
 use super::SynchronizedBatchedConfig;
 
-use tokio::sync::{Mutex, mpsc::{self, UnboundedSender}};
+use tokio::sync::{
+    mpsc::{self, UnboundedSender},
+    Mutex,
+};
 
 batch_synchronized_poller_macro! {
     T,

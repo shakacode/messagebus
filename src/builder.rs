@@ -1,7 +1,4 @@
-use core::{
-    marker::PhantomData, 
-    pin::Pin
-};
+use core::{marker::PhantomData, pin::Pin};
 
 use std::{collections::HashMap, sync::Arc};
 

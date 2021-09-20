@@ -15,7 +15,10 @@ use crate::{
     receivers::Request,
     AsyncSynchronizedHandler, Bus, Message, Untyped,
 };
-use tokio::sync::{Mutex, mpsc::{self, UnboundedSender}};
+use tokio::sync::{
+    mpsc::{self, UnboundedSender},
+    Mutex,
+};
 
 synchronized_poller_macro! {
     T,

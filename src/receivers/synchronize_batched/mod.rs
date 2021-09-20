@@ -35,15 +35,14 @@ impl Default for SynchronizedBatchedConfig {
 #[macro_export]
 macro_rules! batch_synchronized_poller_macro {
     ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        fn batch_synchronized_poller<$t, M, R>(
+        async fn batch_synchronized_poller<$t, M, R>(
             mut rx: mpsc::UnboundedReceiver<Request<M>>,
             bus: Bus,
             ut: Untyped,
             // stats: Arc<SynchronizedBatchedStats>,
             cfg: SynchronizedBatchedConfig,
             stx: mpsc::UnboundedSender<Event<R, $t::Error>>,
-        ) -> impl Future<Output = ()>
-        where
+        ) where
             $t: $h<M, Response = R> + 'static,
             $t::Error: StdSyncSendError + Clone,
             M: Message,
@@ -51,50 +50,52 @@ macro_rules! batch_synchronized_poller_macro {
         {
             let ut = ut.downcast::<Mutex<T>>().unwrap();
 
-            async move {
-                let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
-                let mut buffer = Vec::with_capacity(cfg.batch_size);
+            let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
+            let mut buffer = Vec::with_capacity(cfg.batch_size);
 
-                while let Some(msg) = rx.recv().await {
-                    let bus = bus.clone();
-                    let ut = ut.clone();
-                    let stx = stx.clone();
-                    
-                    match msg {
-                        Request::Request(mid, msg, req) => {
-                            buffer_mid.push((mid, req));
-                            buffer.push(msg);
+            while let Some(msg) = rx.recv().await {
+                let bus = bus.clone();
+                let ut = ut.clone();
+                let stx = stx.clone();
 
-                            if buffer_mid.len() >= cfg.batch_size {
-                                let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
-                                let buffer_clone = buffer.drain(..).collect();
+                match msg {
+                    Request::Request(mid, msg, req) => {
+                        buffer_mid.push((mid, req));
+                        buffer.push(msg);
 
-                                let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
-                            }
+                        if buffer_mid.len() >= cfg.batch_size {
+                            let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
+                            let buffer_clone = buffer.drain(..).collect();
+
+                            let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                         }
-                        Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
-                        Request::Action(Action::Close) => { rx.close(); }
-                        Request::Action(Action::Flush) => {
-                            let stx_clone = stx.clone();
-
-                            if !buffer_mid.is_empty() {
-                                let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
-                                let buffer_clone = buffer.drain(..).collect();
-
-                                let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
-                            }
-
-                            stx_clone.send(Event::Flushed).unwrap();
-                        }
-
-                        Request::Action(Action::Sync) => {
-                            let resp = ($st2)(bus.clone(), ut.clone()).await;
-                            stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                                .unwrap();
-                        }
-
-                        _ => unimplemented!(),
                     }
+                    Request::Action(Action::Init) => {
+                        stx.send(Event::Ready).unwrap();
+                    }
+                    Request::Action(Action::Close) => {
+                        rx.close();
+                    }
+                    Request::Action(Action::Flush) => {
+                        let stx_clone = stx.clone();
+
+                        if !buffer_mid.is_empty() {
+                            let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
+                            let buffer_clone = buffer.drain(..).collect();
+
+                            let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
+                        }
+
+                        stx_clone.send(Event::Flushed).unwrap();
+                    }
+
+                    Request::Action(Action::Sync) => {
+                        let resp = ($st2)(bus.clone(), ut.clone()).await;
+                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                            .unwrap();
+                    }
+
+                    _ => unimplemented!(),
                 }
             }
         }

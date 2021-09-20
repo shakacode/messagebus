@@ -1,12 +1,11 @@
 mod r#async;
 mod sync;
 
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedBatchedAsync;
 use serde_derive::{Deserialize, Serialize};
 pub use sync::BufferUnorderedBatchedSync;
-use tokio::sync::{RwLock, Semaphore};
 
 #[derive(Debug)]
 pub struct BufferUnorderedBatchedStats {
@@ -37,89 +36,80 @@ impl Default for BufferUnorderedBatchedConfig {
     }
 }
 
-#[derive(Clone)]
-struct ConcurrentState {
-    flush_lock: Arc<RwLock<()>>,
-    semaphore: Arc<Semaphore>,
-}
-
 #[macro_export]
 macro_rules! buffer_unordered_batch_poller_macro {
     ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        fn buffer_unordered_batch_poller<$t, M, R>(
+        async fn buffer_unordered_batch_poller<$t, M, R>(
             mut rx: mpsc::UnboundedReceiver<Request<M>>,
             bus: Bus,
             ut: Untyped,
             _stats: Arc<BufferUnorderedBatchedStats>,
             cfg: BufferUnorderedBatchedConfig,
             stx: mpsc::UnboundedSender<Event<R, $t::Error>>,
-        ) -> impl Future<Output = ()>
-        where
+        ) where
             $t: $h<M, Response = R> + 'static,
             M: Message,
             R: Message,
         {
             let ut = ut.downcast::<$t>().unwrap();
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
-            let state = super::ConcurrentState {
-                flush_lock: Arc::new(tokio::sync::RwLock::new(())),
-                semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel)),
-            };
+            let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
+            let mut buffer = Vec::with_capacity(cfg.batch_size);
 
-            async move {
-                let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
-                let mut buffer = Vec::with_capacity(cfg.batch_size);
+            while let Some(msg) = rx.recv().await {
+                let bus = bus.clone();
+                let ut = ut.clone();
+                let semaphore = semaphore.clone();
+                let stx = stx.clone();
 
-                while let Some(msg) = rx.recv().await {
-                    let bus = bus.clone();
-                    let ut = ut.clone();
-                    let state = state.clone();
-                    let stx = stx.clone();
-                    
-                    match msg {
-                        Request::Request(mid, msg, req) => {
-                            buffer_mid.push((mid, req));
-                            buffer.push(msg);
+                match msg {
+                    Request::Request(mid, msg, req) => {
+                        buffer_mid.push((mid, req));
+                        buffer.push(msg);
 
-                            if buffer_mid.len() >= cfg.batch_size {
-                                let task_permit = state.semaphore.acquire_owned().await;
-                                let flush_permit = state.flush_lock.read_owned().await;
+                        if buffer_mid.len() >= cfg.batch_size {
+                            let task_permit = semaphore.acquire_owned().await;
 
-                                let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
-                                let buffer_clone = buffer.drain(..).collect();
+                            let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
+                            let buffer_clone = buffer.drain(..).collect();
 
-                                let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, flush_permit, task_permit, stx);
-                            }
+                            let _ =
+                                ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
                         }
-                        Request::Action(Action::Init)  => { stx.send(Event::Ready).unwrap(); }
-                        Request::Action(Action::Close) => { rx.close(); }
-                        Request::Action(Action::Flush) => {
-                            let stx_clone = stx.clone();
-
-                            if !buffer_mid.is_empty() {
-                                let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
-                                let buffer_clone = buffer.drain(..).collect();
-
-                                let flush_permit = state.flush_lock.clone().read_owned().await;
-                                let task_permit = state.semaphore.acquire_owned().await;
-
-                                let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, flush_permit, task_permit, stx);
-                            }
-
-                            state.flush_lock.write().await; 
-                            stx_clone.send(Event::Flushed).unwrap();
-                        }
-
-                        Request::Action(Action::Sync) => {
-                            let lock = state.flush_lock.write().await; 
-                            let resp = ($st2)(bus.clone(), ut.clone()).await;
-                            drop(lock);
-                            stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                                .unwrap();
-                        }
-
-                        _ => unimplemented!(),
                     }
+                    Request::Action(Action::Init) => {
+                        stx.send(Event::Ready).unwrap();
+                    }
+                    Request::Action(Action::Close) => {
+                        rx.close();
+                    }
+                    Request::Action(Action::Flush) => {
+                        let stx_clone = stx.clone();
+
+                        if !buffer_mid.is_empty() {
+                            let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
+                            let buffer_clone = buffer.drain(..).collect();
+                            let task_permit = semaphore.clone().acquire_owned().await;
+
+                            let _ =
+                                ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
+                        }
+
+                        let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
+                        stx_clone.send(Event::Flushed).unwrap();
+                    }
+
+                    Request::Action(Action::Sync) => {
+                        let lock = semaphore.acquire_many(cfg.max_parallel as _).await;
+                        let resp = ($st2)(bus.clone(), ut.clone()).await;
+                        drop(lock);
+
+                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
+                            .unwrap();
+                    }
+
+                    _ => unimplemented!(),
                 }
             }
         }

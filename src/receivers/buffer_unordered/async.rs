@@ -25,12 +25,10 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 buffer_unordered_poller_macro!(
     T,
     AsyncHandler,
-    |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>, task_permit, flush_permit| {
+    |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>, task_permit| {
         tokio::spawn(async move {
             let resp = ut.handle(msg, &bus).await;
-        
             drop(task_permit);
-            drop(flush_permit);
 
             stx.send(Event::Response(mid, resp.map_err(Error::Other)))
                 .unwrap();
@@ -146,9 +144,7 @@ where
         let poll = self.srx.lock().poll_recv(ctx);
         match poll {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(event)) => {
-                Poll::Ready(event)
-            }
+            Poll::Ready(Some(event)) => Poll::Ready(event),
             Poll::Ready(None) => Poll::Ready(Event::Exited),
         }
     }

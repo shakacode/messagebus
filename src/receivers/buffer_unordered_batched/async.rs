@@ -24,12 +24,10 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 buffer_unordered_batch_poller_macro!(
     T,
     AsyncBatchHandler,
-    |mids: Vec<_>, msgs, bus, ut: Arc<T>, flush_permit, task_permit, stx: UnboundedSender<_>| {
+    |mids: Vec<_>, msgs, bus, ut: Arc<T>, task_permit, stx: UnboundedSender<_>| {
         tokio::spawn(async move {
             let resp = ut.handle(msgs, &bus).await;
-            
             drop(task_permit);
-            drop(flush_permit);
 
             crate::process_batch_result!(resp, mids, stx);
         })

@@ -95,7 +95,7 @@ impl Bus {
     }
 
     pub(crate) fn init(&self) {
-        for (_, rs) in &self.inner.receivers {
+        for rs in self.inner.receivers.values() {
             for r in rs {
                 r.init(self).unwrap();
             }
@@ -103,7 +103,7 @@ impl Bus {
     }
 
     pub async fn ready(&self) {
-        for (_, rs) in &self.inner.receivers {
+        for rs in self.inner.receivers.values() {
             for r in rs {
                 r.ready().await;
             }
@@ -114,7 +114,7 @@ impl Bus {
         let _handle = self.inner.maintain.lock().await;
         self.inner.closed.store(true, Ordering::SeqCst);
 
-        for (_, rs) in &self.inner.receivers {
+        for rs in self.inner.receivers.values() {
             for r in rs {
                 let err = tokio::time::timeout(Duration::from_secs(20), r.close(self)).await;
 
@@ -133,7 +133,7 @@ impl Bus {
         for _ in 0..fuse_count {
             iters += 1;
             let mut flushed = false;
-            for (_, rs) in &self.inner.receivers {
+            for rs in self.inner.receivers.values() {
                 for r in rs {
                     if r.need_flush() {
                         flushed = true;
@@ -163,7 +163,7 @@ impl Bus {
         self.flush().await;
         let _handle = self.inner.maintain.lock().await;
 
-        for (_, rs) in &self.inner.receivers {
+        for rs in self.inner.receivers.values() {
             for r in rs {
                 r.sync(self).await;
             }
@@ -598,7 +598,7 @@ impl Bus {
             .inner
             .message_types
             .get(&tt)
-            .ok_or_else(|| Error::TypeTagNotRegistered(tt))?;
+            .ok_or(Error::TypeTagNotRegistered(tt))?;
 
         md.deserialize_boxed(de)
             .map_err(|err| err.specify::<Box<dyn Message>>())

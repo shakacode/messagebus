@@ -5,7 +5,10 @@ use crate::{
     batch_synchronized_poller_macro,
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
-    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receiver::{
+        Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
+        UntypedPollerCallback,
+    },
     receivers::Request,
     AsyncBatchSynchronizedHandler, Bus, Message, Untyped,
 };
@@ -49,14 +52,7 @@ where
 {
     type Config = SynchronizedBatchedConfig;
 
-    fn build(
-        cfg: Self::Config,
-    ) -> (
-        Self,
-        Box<
-            dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-        >,
-    ) {
+    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
         let (stx, srx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::unbounded_channel();
 

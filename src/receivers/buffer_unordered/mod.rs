@@ -52,6 +52,7 @@ macro_rules! buffer_unordered_poller_macro {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     Request::Request(mid, msg, _req) => {
+                        #[allow(clippy::redundant_closure_call)]
                         let _ = ($st1)(
                             mid,
                             msg,
@@ -74,6 +75,8 @@ macro_rules! buffer_unordered_poller_macro {
 
                     Request::Action(Action::Sync) => {
                         let lock = semaphore.acquire_many(cfg.max_parallel as _).await;
+
+                        #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         drop(lock);
 

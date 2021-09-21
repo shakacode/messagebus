@@ -87,6 +87,6 @@ async fn test_shared() {
     b.close().await;
     poller.await;
 
-    assert_eq!(ctx.sync1.load(Ordering::Relaxed), true);
-    assert_eq!(ctx.sync2.load(Ordering::Relaxed), false);
+    assert!(ctx.sync1.load(Ordering::Relaxed));
+    assert!(!ctx.sync2.load(Ordering::Relaxed));
 }

@@ -141,15 +141,11 @@ struct TypeTag {
 
 impl Parse for TypeTag {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut inner = None;
         let content;
         parenthesized!(content in input);
         let punctuated = Punctuated::<syn::LitStr, Comma>::parse_terminated(&content)?;
 
-        for pair in punctuated.pairs() {
-            inner = Some(pair.into_value());
-            break;
-        }
+        let inner = punctuated.pairs().map(|x| x.into_value()).next();
 
         Ok(TypeTag {
             inner: inner.unwrap().to_owned(),

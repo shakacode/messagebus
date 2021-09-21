@@ -1,18 +1,15 @@
 use crate::{
     error::Error,
     receiver::{
-        Action, AnyReceiver, AnyWrapperRef, PermitDrop, ReceiverTrait, SendUntypedReceiver,
-        TypeTagAccept,
+        Action, AnyReceiver, AnyWrapperRef, BusPollerCallback, PermitDrop, ReceiverTrait,
+        SendUntypedReceiver, TypeTagAccept,
     },
     stats::Stats,
     Bus, Event, Message, Permit, ReciveUntypedReceiver, TypeTag,
 };
-use core::{
-    pin::Pin,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use dashmap::DashMap;
-use futures::{pin_mut, Future, StreamExt};
+use futures::{pin_mut, StreamExt};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Notify};
 
@@ -159,7 +156,7 @@ where
         Ok(self
             .waiters
             .insert(listener)
-            .ok_or_else(|| Error::AddListenerError)? as _)
+            .ok_or(Error::AddListenerError)? as _)
     }
 
     fn try_reserve(&self, tt: &TypeTag) -> Option<Permit> {
@@ -223,9 +220,7 @@ where
             .map(|r| r.processing.fetch_add(1, Ordering::SeqCst));
     }
 
-    fn start_polling(
-        self: Arc<Self>,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
+    fn start_polling(self: Arc<Self>) -> BusPollerCallback {
         Box::new(move |_| {
             Box::pin(async move {
                 let this = self.clone();

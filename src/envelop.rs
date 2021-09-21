@@ -136,11 +136,11 @@ impl Message for () {
             return false;
         };
 
-        into.replace(self.clone());
+        into.replace(());
         true
     }
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
-        Some(Box::new(self.clone()))
+        Some(Box::new(()))
     }
 }
 

@@ -42,7 +42,9 @@ macro_rules! synchronized_poller_macro {
 
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Request::Request(mid, msg, _req) => {
+                    Request::Request(mid, msg, _req) =>
+                    {
+                        #[allow(clippy::redundant_closure_call)]
                         ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone())
                             .await
                             .unwrap()
@@ -57,6 +59,7 @@ macro_rules! synchronized_poller_macro {
                         stx.send(Event::Flushed).unwrap();
                     }
                     Request::Action(Action::Sync) => {
+                        #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         stx.send(Event::Synchronized(resp.map_err(Error::Other)))
                             .unwrap();

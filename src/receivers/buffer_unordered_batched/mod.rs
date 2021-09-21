@@ -74,6 +74,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
+                            #[allow(clippy::redundant_closure_call)]
                             let _ =
                                 ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
                         }
@@ -92,6 +93,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             let buffer_clone = buffer.drain(..).collect();
                             let task_permit = semaphore.clone().acquire_owned().await;
 
+                            #[allow(clippy::redundant_closure_call)]
                             let _ =
                                 ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
                         }
@@ -102,6 +104,8 @@ macro_rules! buffer_unordered_batch_poller_macro {
 
                     Request::Action(Action::Sync) => {
                         let lock = semaphore.acquire_many(cfg.max_parallel as _).await;
+
+                        #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         drop(lock);
 

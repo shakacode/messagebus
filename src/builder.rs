@@ -9,11 +9,20 @@ use tokio::sync::Mutex;
 use crate::{
     envelop::TypeTag,
     error::{Error, StdSyncSendError},
-    receiver::{Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receiver::{
+        BusPollerCallback, Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
+        UntypedPollerCallback,
+    },
     receivers, AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler,
     AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler,
     IntoBoxedMessage, Message, Relay, SynchronizedHandler, Untyped,
 };
+
+type MessageDeserializerCallback = Box<
+    dyn Fn(&mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn Message>, Error>
+        + Send
+        + Sync,
+>;
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
     SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
@@ -25,14 +34,7 @@ where
 {
     type Config: Default;
 
-    fn build(
-        cfg: Self::Config,
-    ) -> (
-        Self,
-        Box<
-            dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-        >,
-    )
+    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback)
     where
         Self: Sized;
 }
@@ -47,14 +49,14 @@ pub struct RegisterEntry<K, T, F, P, B> {
     builder: F,
     poller: P,
     receivers: HashMap<TypeTag, Receiver>,
-    pollers: Vec<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
+    pollers: Vec<BusPollerCallback>,
     _m: PhantomData<(K, T)>,
 }
 
 impl<K, T: 'static, F, P, B> RegisterEntry<K, T, F, P, B>
 where
     F: FnMut(&mut B, TypeTag, Receiver),
-    P: FnMut(&mut B, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>),
+    P: FnMut(&mut B, BusPollerCallback),
 {
     pub fn done(mut self) -> B {
         for (tid, v) in self.receivers {
@@ -209,11 +211,7 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
 }
 
 pub struct MessageTypeDescriptor {
-    de: Box<
-        dyn Fn(&mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn Message>, Error>
-            + Send
-            + Sync,
-    >,
+    de: MessageDeserializerCallback,
 }
 
 impl MessageTypeDescriptor {
@@ -226,10 +224,11 @@ impl MessageTypeDescriptor {
     }
 }
 
+#[derive(Default)]
 pub struct Module {
     message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
-    pollings: Vec<Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>>,
+    pollings: Vec<BusPollerCallback>,
 }
 
 impl Module {

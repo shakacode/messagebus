@@ -1,6 +1,6 @@
 use std::{pin::Pin, sync::Arc};
 
-use crate::synchronized_poller_macro;
+use crate::{receiver::UntypedPollerCallback, synchronized_poller_macro};
 use futures::{Future, Stream};
 
 use super::SynchronizedConfig;
@@ -52,14 +52,7 @@ where
 {
     type Config = SynchronizedConfig;
 
-    fn build(
-        _cfg: Self::Config,
-    ) -> (
-        Self,
-        Box<
-            dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-        >,
-    ) {
+    fn build(_cfg: Self::Config) -> (Self, UntypedPollerCallback) {
         let (stx, srx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::unbounded_channel();
 

@@ -11,7 +11,10 @@ use crate::{
     buffer_unordered_batch_poller_macro,
     builder::ReceiverSubscriberBuilder,
     error::{Error, SendError, StdSyncSendError},
-    receiver::{Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver},
+    receiver::{
+        Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
+        UntypedPollerCallback,
+    },
     receivers::Request,
     BatchHandler, Bus, Message, Untyped,
 };
@@ -61,14 +64,7 @@ where
 {
     type Config = BufferUnorderedBatchedConfig;
 
-    fn build(
-        cfg: Self::Config,
-    ) -> (
-        Self,
-        Box<
-            dyn FnOnce(Untyped) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>,
-        >,
-    ) {
+    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
         let stats = Arc::new(BufferUnorderedBatchedStats {
             buffer: AtomicU64::new(0),
             buffer_total: AtomicU64::new(cfg.buffer_size as _),

@@ -1,5 +1,6 @@
 use crate::relay::RelayWrapper;
 use crate::stats::Stats;
+use crate::Untyped;
 use crate::{
     envelop::{IntoBoxedMessage, TypeTag},
     error::{GenericError, SendError, StdSyncSendError},
@@ -18,6 +19,9 @@ use futures::{pin_mut, Stream};
 use futures::{Future, FutureExt, StreamExt};
 use std::{borrow::Cow, sync::Arc};
 use tokio::sync::{oneshot, Notify};
+
+pub type BusPollerCallback = Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>;
+pub type UntypedPollerCallback = Box<dyn FnOnce(Untyped) -> BusPollerCallback>;
 
 struct SlabCfg;
 impl sharded_slab::Config for SlabCfg {
@@ -74,9 +78,7 @@ pub trait WrapperErrorTypeOnly<E: StdSyncSendError>: Send + Sync {
 }
 
 pub trait WrapperReturnTypeAndError<R: Message, E: StdSyncSendError>: Send + Sync {
-    fn start_polling_events(
-        self: Arc<Self>,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>;
+    fn start_polling_events(self: Arc<Self>) -> BusPollerCallback;
     fn add_response_listener(
         &self,
         listener: oneshot::Sender<Result<R, Error<(), E>>>,
@@ -123,9 +125,7 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify>;
     fn increment_processing(&self, tt: &TypeTag);
 
-    fn start_polling(
-        self: Arc<Self>,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>;
+    fn start_polling(self: Arc<Self>) -> BusPollerCallback;
 }
 
 pub trait ReceiverPollerBuilder {
@@ -181,9 +181,7 @@ where
     E: StdSyncSendError,
     S: SendUntypedReceiver + ReciveTypedReceiver<R, E> + Send + Sync + 'static,
 {
-    fn start_polling_events(
-        self: Arc<Self>,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
+    fn start_polling_events(self: Arc<Self>) -> BusPollerCallback {
         Box::new(move |_| {
             Box::pin(async move {
                 let this = self.clone();
@@ -253,7 +251,7 @@ where
         Ok(self
             .waiters
             .insert(Waiter::WithErrorType(listener))
-            .ok_or_else(|| Error::AddListenerError)? as _)
+            .ok_or(Error::AddListenerError)? as _)
     }
 
     fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<(), Error> {
@@ -291,7 +289,7 @@ where
         Ok(self
             .waiters
             .insert(Waiter::WithoutErrorType(listener))
-            .ok_or_else(|| Error::AddListenerError)? as _)
+            .ok_or(Error::AddListenerError)? as _)
     }
 }
 
@@ -309,7 +307,7 @@ where
         Ok(self
             .waiters
             .insert(Waiter::BoxedWithError(listener))
-            .ok_or_else(|| Error::AddListenerError)? as _)
+            .ok_or(Error::AddListenerError)? as _)
     }
 }
 
@@ -372,8 +370,8 @@ where
             .downcast::<M>()
             .map_err(|_| Error::MessageCastError)?;
 
-        Ok(SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
-            .map_err(|err| Error::from(err.into_boxed()))?)
+        SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
+            .map_err(|err| Error::from(err.into_boxed()))
     }
 
     fn stats(&self) -> Stats {
@@ -417,7 +415,7 @@ where
         Ok(self
             .waiters
             .insert(Waiter::Boxed(listener))
-            .ok_or_else(|| Error::AddListenerError)? as _)
+            .ok_or(Error::AddListenerError)? as _)
     }
 
     fn ready_notify(&self) -> &Notify {
@@ -465,9 +463,7 @@ where
         self.context.response.clone()
     }
 
-    fn start_polling(
-        self: Arc<Self>,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
+    fn start_polling(self: Arc<Self>) -> BusPollerCallback {
         self.start_polling_events()
     }
 
@@ -840,9 +836,7 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn start_polling(
-        &self,
-    ) -> Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>> {
+    pub fn start_polling(&self) -> BusPollerCallback {
         self.inner.clone().start_polling()
     }
 

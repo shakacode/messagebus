@@ -229,7 +229,7 @@ async fn test() {
         .await
         .unwrap();
 
-    assert_eq!(we_res.0, 1633.0f64);
+    assert!((we_res.0 - 1633.0f64).abs() < f64::EPSILON);
 
     let boxed_res = b
         .request_boxed(Box::new(MsgF64(1000.)), Default::default())
@@ -237,7 +237,8 @@ async fn test() {
         .unwrap();
 
     let val = boxed_res.as_any_ref().downcast_ref::<MsgF64>().unwrap().0;
-    assert_eq!(val, 1633.0);
+
+    assert!((val - 1633.0f64).abs() < f64::EPSILON);
 
     b.flush().await;
     b.close().await;

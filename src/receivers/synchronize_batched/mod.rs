@@ -67,6 +67,7 @@ macro_rules! batch_synchronized_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
+                            #[allow(clippy::redundant_closure_call)]
                             let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                         }
                     }
@@ -83,6 +84,7 @@ macro_rules! batch_synchronized_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
+                            #[allow(clippy::redundant_closure_call)]
                             let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                         }
 
@@ -90,6 +92,7 @@ macro_rules! batch_synchronized_poller_macro {
                     }
 
                     Request::Action(Action::Sync) => {
+                        #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         stx.send(Event::Synchronized(resp.map_err(Error::Other)))
                             .unwrap();

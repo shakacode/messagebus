@@ -45,9 +45,14 @@ impl AsyncHandler<Msg<i32>> for TmpReceiver {
     }
 }
 
+pub type TestRelayRxChannelCell =
+    Mutex<Option<mpsc::UnboundedReceiver<Event<Box<dyn Message>, GenericError>>>>;
+pub type TestRelayRxStream =
+    Pin<Box<dyn Stream<Item = Event<Box<dyn Message>, error::GenericError>> + Send>>;
+
 pub struct TestRelay {
     stx: mpsc::UnboundedSender<Event<Box<dyn Message>, GenericError>>,
-    srx: Mutex<Option<mpsc::UnboundedReceiver<Event<Box<dyn Message>, GenericError>>>>,
+    srx: TestRelayRxChannelCell,
 }
 
 impl TypeTagAccept for TestRelay {
@@ -104,9 +109,7 @@ impl TypeTagAccept for TestRelay {
             &Msg::<i32>::type_tag_(),
             &Msg::<i64>::type_tag_(),
             &Error::type_tag_(),
-        ) {
-            return;
-        }
+        ) {}
     }
 }
 
@@ -155,7 +158,7 @@ impl SendUntypedReceiver for TestRelay {
 }
 
 impl ReciveUntypedReceiver for TestRelay {
-    type Stream = Pin<Box<dyn Stream<Item = Event<Box<dyn Message>, error::GenericError>> + Send>>;
+    type Stream = TestRelayRxStream;
 
     fn event_stream(&self) -> Self::Stream {
         let mut rx = self.srx.lock().take().unwrap();

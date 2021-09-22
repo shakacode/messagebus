@@ -160,7 +160,7 @@ impl SendUntypedReceiver for TestRelay {
 impl ReciveUntypedReceiver for TestRelay {
     type Stream = TestRelayRxStream;
 
-    fn event_stream(&self) -> Self::Stream {
+    fn event_stream(&self, _: Bus) -> Self::Stream {
         let mut rx = self.srx.lock().take().unwrap();
 
         Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))

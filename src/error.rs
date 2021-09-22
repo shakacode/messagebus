@@ -130,6 +130,14 @@ pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = GenericError>
 }
 
 impl<M: fmt::Debug + 'static, E: StdSyncSendError> Error<M, E> {
+    pub fn send_closed(m: M) -> Self {
+        Error::SendError(SendError::Closed(m))
+    }
+
+    pub fn send_full(m: M) -> Self {
+        Error::SendError(SendError::Full(m))
+    }
+
     pub fn map_msg<UM: fmt::Debug + 'static, F: FnOnce(M) -> UM>(self, f: F) -> Error<UM, E> {
         match self {
             Error::SendError(inner) => Error::SendError(inner.map_msg(f)),

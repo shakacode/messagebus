@@ -10,7 +10,7 @@ use super::{BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats};
 use crate::{
     buffer_unordered_batch_poller_macro,
     builder::ReceiverSubscriberBuilder,
-    error::{Error, SendError, StdSyncSendError},
+    error::{Error, StdSyncSendError},
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
@@ -108,10 +108,10 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, msg: Action, _bus: &Bus) -> Result<(), SendError<Action>> {
+    fn send(&self, msg: Action, _bus: &Bus) -> Result<(), Error<Action>> {
         match self.tx.send(Request::Action(msg)) {
             Ok(_) => Ok(()),
-            Err(mpsc::error::SendError(Request::Action(msg))) => Err(SendError::Closed(msg)),
+            Err(mpsc::error::SendError(Request::Action(msg))) => Err(Error::send_closed(msg)),
             _ => unimplemented!(),
         }
     }
@@ -123,14 +123,14 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), SendError<M>> {
+    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
         match self.tx.send(Request::Request(mid, m, req)) {
             Ok(_) => {
                 self.stats.buffer.fetch_add(1, Ordering::Relaxed);
 
                 Ok(())
             }
-            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(SendError::Closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(Error::send_closed(msg)),
             _ => unimplemented!(),
         }
     }

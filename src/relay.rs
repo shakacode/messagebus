@@ -118,7 +118,7 @@ where
         req: bool,
         bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        Ok(self.inner.send_msg(mid, boxed_msg, req, bus)?)
+        self.inner.send_msg(mid, boxed_msg, req, bus)
     }
 
     fn need_flush(&self) -> bool {
@@ -134,7 +134,7 @@ where
     }
 
     fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, action, bus)?)
+        SendUntypedReceiver::send(&self.inner, action, bus)
     }
 
     fn close_notify(&self) -> &Notify {

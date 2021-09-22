@@ -114,7 +114,7 @@ impl TypeTagAccept for TestRelay {
 }
 
 impl SendUntypedReceiver for TestRelay {
-    fn send(&self, msg: Action, _bus: &Bus) -> Result<(), error::SendError<Action>> {
+    fn send(&self, msg: Action, _bus: &Bus) -> Result<(), error::Error<Action>> {
         match msg {
             Action::Init => {
                 self.stx.send(Event::Ready).unwrap();
@@ -141,7 +141,7 @@ impl SendUntypedReceiver for TestRelay {
         msg: Box<dyn Message>,
         _req: bool,
         _bus: &Bus,
-    ) -> Result<(), error::SendError<Box<dyn Message>>> {
+    ) -> Result<(), error::Error<Box<dyn Message>>> {
         println!("TestRelay::send_msg [{}] {:?}", mid, msg);
         if msg.type_tag().as_ref() == Msg::<i16>::type_tag_().as_ref() {
             self.stx

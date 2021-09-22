@@ -305,7 +305,7 @@ impl TypeTagAccept for QuicClientRelay {
 }
 
 impl SendUntypedReceiver for QuicClientRelay {
-    fn send(&self, msg: Action, _bus: &Bus) -> Result<(), SendError<Action>> {
+    fn send(&self, msg: Action, _bus: &Bus) -> Result<(), messagebus::error::Error<Action>> {
         match msg {
             Action::Init => {
                 let (sender, mut rx) = self.receiver_send.lock().take().unwrap();
@@ -335,11 +335,13 @@ impl SendUntypedReceiver for QuicClientRelay {
         msg: Box<dyn Message>,
         req: bool,
         _bus: &Bus,
-    ) -> Result<(), SendError<Box<dyn Message>>> {
-        msg.as_shared_boxed()
-        self.sender.send((req, mid, msg).into()).unwrap();
-
-        Ok(())
+    ) -> Result<(), messagebus::error::Error<Box<dyn Message>>> {
+        if let Ok(val) = msg.as_shared_boxed() {
+            self.sender.send((req, mid, msg).into()).unwrap();
+            Ok(())
+        } else {
+            Err(SendError:)
+        }
     }
 }
 

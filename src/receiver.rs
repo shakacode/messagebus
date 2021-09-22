@@ -3,7 +3,7 @@ use crate::stats::Stats;
 use crate::Untyped;
 use crate::{
     envelop::{IntoBoxedMessage, TypeTag},
-    error::{GenericError, SendError, StdSyncSendError},
+    error::{GenericError, StdSyncSendError},
     trait_object::TraitObject,
     Bus, Error, Message, Relay,
 };
@@ -31,20 +31,20 @@ impl sharded_slab::Config for SlabCfg {
 type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 
 pub trait SendUntypedReceiver: Send + Sync {
-    fn send(&self, msg: Action, bus: &Bus) -> Result<(), SendError<Action>>;
+    fn send(&self, msg: Action, bus: &Bus) -> Result<(), Error<Action>>;
     fn send_msg(
         &self,
         _mid: u64,
         _msg: Box<dyn Message>,
         _req: bool,
         _bus: &Bus,
-    ) -> Result<(), SendError<Box<dyn Message>>> {
+    ) -> Result<(), Error<Box<dyn Message>>> {
         unimplemented!()
     }
 }
 
 pub trait SendTypedReceiver<M: Message>: Sync {
-    fn send(&self, mid: u64, msg: M, req: bool, bus: &Bus) -> Result<(), SendError<M>>;
+    fn send(&self, mid: u64, msg: M, req: bool, bus: &Bus) -> Result<(), Error<M>>;
 }
 
 pub trait ReciveTypedReceiver<M, E>: Sync
@@ -371,7 +371,7 @@ where
             .map_err(|_| Error::MessageCastError)?;
 
         SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
-            .map_err(|err| Error::from(err.into_boxed()))
+            .map_err(|err| err.map_msg(|m|m.into_boxed()))
     }
 
     fn stats(&self) -> Stats {
@@ -389,7 +389,7 @@ where
     }
 
     fn send_action(&self, bus: &Bus, action: Action) -> Result<(), Error<Action>> {
-        Ok(SendUntypedReceiver::send(&self.inner, action, bus)?)
+        SendUntypedReceiver::send(&self.inner, action, bus)
     }
 
     fn set_need_flush(&self) {

@@ -29,6 +29,13 @@ impl GenericError {
             description: format!("{}[{}]", err.type_tag(), err),
         }
     }
+
+    pub fn from_err(tt: TypeTag, err: impl fmt::Display) -> Self {
+        GenericError {
+            description: format!("{}[{}]", tt, err),
+            type_tag: tt,
+        }
+    }
 }
 
 impl fmt::Display for GenericError {

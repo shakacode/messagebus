@@ -27,7 +27,7 @@ pub trait Message: MessageBounds {
 
     fn as_shared_ref(&self) -> Option<&dyn SharedMessage>;
     fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage>;
-    fn as_shared_boxed(self: Box<Self>) -> Option<Box<dyn SharedMessage>>;
+    fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>>;
     fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>>;
 
     fn try_clone_into(&self, into: &mut dyn Any) -> bool;
@@ -123,8 +123,8 @@ impl Message for () {
     fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
         Some(self)
     }
-    fn as_shared_boxed(self: Box<Self>) -> Option<Box<dyn SharedMessage>> {
-        Some(self)
+    fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
+        Ok(self)
     }
     fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
         Some(self)
@@ -221,8 +221,8 @@ mod tests {
         fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
             None
         }
-        fn as_shared_boxed(self: Box<Self>) -> Option<Box<dyn SharedMessage>> {
-            None
+        fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
+            Err(self)
         }
         fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
             None
@@ -270,8 +270,8 @@ mod tests {
         fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
             None
         }
-        fn as_shared_boxed(self: Box<Self>) -> Option<Box<dyn SharedMessage>> {
-            None
+        fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
+            Err(self)
         }
         fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
             None
@@ -328,8 +328,8 @@ mod tests {
         fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
             Some(self)
         }
-        fn as_shared_boxed(self: Box<Self>) -> Option<Box<dyn SharedMessage>> {
-            Some(self)
+        fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
+            Ok(self)
         }
         fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
             Some(self)

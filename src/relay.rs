@@ -221,10 +221,10 @@ where
     }
 
     fn start_polling(self: Arc<Self>) -> BusPollerCallback {
-        Box::new(move |_| {
+        Box::new(move |bus| {
             Box::pin(async move {
                 let this = self.clone();
-                let events = this.inner.event_stream();
+                let events = this.inner.event_stream(bus);
                 pin_mut!(events);
 
                 loop {

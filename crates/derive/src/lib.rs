@@ -14,15 +14,15 @@ fn shared_part(_ast: &syn::DeriveInput, has_shared: bool) -> proc_macro2::TokenS
         quote! {
             fn as_shared_ref(&self) -> std::option::Option<&dyn messagebus::SharedMessage> {Some(self)}
             fn as_shared_mut(&mut self) -> std::option::Option<&mut dyn messagebus::SharedMessage>{Some(self)}
-            fn as_shared_boxed(self: std::boxed::Box<Self>) -> Option<std::boxed::Box<dyn messagebus::SharedMessage>>{Some(self)}
+            fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {Ok(self)}
             fn as_shared_arc(self: std::sync::Arc<Self>) -> Option<std::sync::Arc<dyn messagebus::SharedMessage>>{Some(self)}
         }
     } else {
         quote! {
             fn as_shared_ref(&self) -> std::option::Option<&dyn messagebus::SharedMessage> {None}
-            fn as_shared_mut(&mut self) -> std::option::Option<&mut dyn messagebus::SharedMessage>{None}
-            fn as_shared_boxed(self: std::boxed::Box<Self>) -> Option<std::boxed::Box<dyn messagebus::SharedMessage>>{None}
-            fn as_shared_arc(self: std::sync::Arc<Self>) -> Option<std::sync::Arc<dyn messagebus::SharedMessage>>{None}
+            fn as_shared_mut(&mut self) -> std::option::Option<&mut dyn messagebus::SharedMessage> {None}
+            fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {Err(self)}
+            fn as_shared_arc(self: std::sync::Arc<Self>) -> Option<std::sync::Arc<dyn messagebus::SharedMessage>> {None}
         }
     }
 }

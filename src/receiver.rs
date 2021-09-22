@@ -54,13 +54,13 @@ where
 {
     type Stream: Stream<Item = Event<M, E>> + Send;
 
-    fn event_stream(&self) -> Self::Stream;
+    fn event_stream(&self, bus: Bus) -> Self::Stream;
 }
 
 pub trait ReciveUntypedReceiver: Sync {
     type Stream: Stream<Item = Event<Box<dyn Message>, GenericError>> + Send;
 
-    fn event_stream(&self) -> Self::Stream;
+    fn event_stream(&self, bus: Bus) -> Self::Stream;
 }
 
 pub trait WrapperReturnTypeOnly<R: Message>: Send + Sync {
@@ -182,10 +182,10 @@ where
     S: SendUntypedReceiver + ReciveTypedReceiver<R, E> + Send + Sync + 'static,
 {
     fn start_polling_events(self: Arc<Self>) -> BusPollerCallback {
-        Box::new(move |_| {
+        Box::new(move |bus| {
             Box::pin(async move {
                 let this = self.clone();
-                let events = this.inner.event_stream();
+                let events = this.inner.event_stream(bus);
                 pin_mut!(events);
 
                 loop {

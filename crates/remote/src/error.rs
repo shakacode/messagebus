@@ -24,4 +24,22 @@ pub enum Error {
 
     #[error("QuinnConnectError: {0}")]
     QuinnParseError(#[from] ParseError),
+
+    #[error("ConfigError: {0}")]
+    ConfigError(#[from] quinn_proto::ConfigError),
+
+    #[error("TLSError: {0}")]
+    TLSError(#[from] rustls::TLSError),
+
+    #[error("Redis: {0}")]
+    Redis(#[from] redis::RedisError),
+
+    #[error("ProtocolParseError")]
+    ProtocolParseError,
+    
+    #[error("UnknownCodec")]
+    UnknownCodec,
+
+    #[error("SerdeErased {0}")]
+    SerdeErased(#[from] erased_serde::Error),
 }

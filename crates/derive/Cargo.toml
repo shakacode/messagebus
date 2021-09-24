@@ -1,6 +1,6 @@
 [package]
 name = "messagebus_derive"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
@@ -8,7 +8,7 @@ categories = ["network-programming", "asynchronous"]
 description = "MessageBus allows intercommunicate with messages between modules"
 license = "MIT OR Apache-2.0"
 exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
-edition = "2021"
+edition = "2018"
 
 [lib]
 proc-macro = true

@@ -154,8 +154,29 @@ impl<T: Message> IntoBoxedMessage for T {
     }
 }
 
-pub trait SharedMessage: Message + erased_serde::Serialize {}
-impl<T: Message + erased_serde::Serialize> SharedMessage for T {}
+pub trait IntoSharedMessage {
+    fn into_shared(self) -> Box<dyn SharedMessage>;
+}
+
+impl<T: Message + serde::Serialize> IntoSharedMessage for T {
+    fn into_shared(self) -> Box<dyn SharedMessage> {
+        Box::new(self)
+    }
+}
+
+
+pub trait SharedMessage: Message + erased_serde::Serialize {
+    fn upcast_arc(self: Arc<Self>) -> Arc<dyn Message>;
+    fn upcast_box(self: Box<Self>) -> Box<dyn Message>;
+    fn upcast_ref(&self) -> &dyn Message;
+    fn upcast_mut(&mut self) -> &mut dyn Message;
+}
+impl<T: Message + erased_serde::Serialize> SharedMessage for T {
+    fn upcast_arc(self: Arc<Self>) -> Arc<dyn Message> { self }
+    fn upcast_box(self: Box<Self>) -> Box<dyn Message> { self }
+    fn upcast_ref(&self) -> &dyn Message { self }
+    fn upcast_mut(&mut self) -> &mut dyn Message { self }
+}
 
 // pub trait IntoTakeable {
 //     fn into_takeable(&mut self) -> Takeable<'_>;

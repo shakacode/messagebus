@@ -152,13 +152,30 @@ pub enum Event<M, E: StdSyncSendError> {
     Response(u64, Result<M, Error<(), E>>),
     Synchronized(Result<(), Error<(), E>>),
     Finished(u64),
-    Error(E),
+    Error(Error<(), E>),
     InitFailed(Error<(), E>),
     Stats(Stats),
     Flushed,
     Exited,
     Ready,
     Pause,
+}
+
+impl<M, E: StdSyncSendError> Event<M, E> {
+    pub fn map_msg<U, F: FnOnce(M) -> U>(self, f: F) -> Event<U, E> {
+        match self {
+            Event::Response(mid, res) => Event::Response(mid, res.map(f)),
+            Event::Synchronized(res) => Event::Synchronized(res),
+            Event::Finished(cnt) => Event::Finished(cnt),
+            Event::Error(err) => Event::Error(err),
+            Event::InitFailed(err) => Event::InitFailed(err),
+            Event::Stats(st) => Event::Stats(st),
+            Event::Flushed => Event::Flushed,
+            Event::Exited => Event::Exited,
+            Event::Ready => Event::Ready,
+            Event::Pause => Event::Pause,
+        }
+    }
 }
 
 struct ReceiverWrapper<M, R, E, S>

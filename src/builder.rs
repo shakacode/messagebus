@@ -6,20 +6,13 @@ use futures::{Future, FutureExt};
 use smallvec::SmallVec;
 use tokio::sync::Mutex;
 
-use crate::{
-    envelop::TypeTag,
-    error::{Error, StdSyncSendError},
-    receiver::{
+use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, Message, Relay, SharedMessage, SynchronizedHandler, Untyped, envelop::{IntoSharedMessage, TypeTag}, error::{Error, StdSyncSendError}, receiver::{
         BusPollerCallback, Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
-    },
-    receivers, AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler,
-    AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler,
-    IntoBoxedMessage, Message, Relay, SynchronizedHandler, Untyped,
-};
+    }, receivers};
 
 type MessageDeserializerCallback = Box<
-    dyn Fn(&mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn Message>, Error>
+    dyn Fn(&mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn SharedMessage>, Error>
         + Send
         + Sync,
 >;
@@ -219,7 +212,7 @@ impl MessageTypeDescriptor {
     pub fn deserialize_boxed(
         &self,
         de: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<Box<dyn Message>, Error> {
+    ) -> Result<Box<dyn SharedMessage>, Error> {
         (self.de)(de)
     }
 }
@@ -249,7 +242,7 @@ impl Module {
         self.message_types.insert(
             M::type_tag_(),
             MessageTypeDescriptor {
-                de: Box::new(move |de| Ok(M::deserialize(de)?.into_boxed())),
+                de: Box::new(move |de| Ok(M::deserialize(de)?.into_shared())),
             },
         );
 

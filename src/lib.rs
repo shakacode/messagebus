@@ -553,7 +553,7 @@ impl Bus {
 
         if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
             let msg = self.deserialize_message(tt.clone(), de)?;
-            Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
+            Ok(rs.send_boxed(self, mid, msg.upcast_box(), false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -578,7 +578,7 @@ impl Bus {
             rc.send_boxed(
                 self,
                 mid | 1 << (usize::BITS - 1),
-                msg,
+                msg.upcast_box(),
                 true,
                 rc.reserve(&tt).await,
             )?;
@@ -593,7 +593,7 @@ impl Bus {
         &self,
         tt: TypeTag,
         de: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
+    ) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
         let md = self
             .inner
             .message_types

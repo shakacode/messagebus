@@ -1,6 +1,8 @@
 // #[cfg(feature = "quic")]
 mod quic;
 
+// mod redis;
+
 use futures::Stream;
 use messagebus::{error::GenericError, Event, Message, TypeTag};
 use std::{collections::HashMap, pin::Pin};
@@ -11,21 +13,15 @@ pub use quic::*;
 pub(crate) type GenericEventStream =
     Pin<Box<dyn Stream<Item = Event<Box<dyn Message>, GenericError>> + Send>>;
 
-
 #[derive(Debug, Default)]
-pub(crate) struct MessageTable {
+pub struct MessageTable {
     table: HashMap<TypeTag, Vec<(TypeTag, TypeTag)>>,
 }
 
 impl MessageTable {
-    pub fn new() -> Self {
-        Self {
-            table: HashMap::new(),
-        }
-    }
-
     pub fn add(&mut self, req: TypeTag, resp: TypeTag, err: TypeTag) {
-        self.table.entry(req)
+        self.table
+            .entry(req)
             .or_insert_with(Vec::new)
             .push((resp, err));
     }
@@ -46,7 +42,6 @@ impl MessageTable {
             .flatten()
     }
 }
-
 
 impl From<Vec<(TypeTag, TypeTag, TypeTag)>> for MessageTable {
     fn from(table: Vec<(TypeTag, TypeTag, TypeTag)>) -> Self {

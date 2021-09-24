@@ -40,7 +40,7 @@ macro_rules! process_batch_result {
                         .unwrap();
                 }
 
-                $stx.send(Event::Error(er)).unwrap();
+                $stx.send(Event::Error(Error::Other(er))).unwrap();
             }
         }
     };

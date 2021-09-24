@@ -62,7 +62,7 @@ macro_rules! buffer_unordered_poller_macro {
                             semaphore.clone().acquire_owned().await,
                         );
                     }
-                    Request::Action(Action::Init) => {
+                    Request::Action(Action::Init(..)) => {
                         stx.send(Event::Ready).unwrap();
                     }
                     Request::Action(Action::Close) => {

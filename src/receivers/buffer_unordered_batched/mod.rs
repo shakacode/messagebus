@@ -79,7 +79,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                                 ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
                         }
                     }
-                    Request::Action(Action::Init) => {
+                    Request::Action(Action::Init(..)) => {
                         stx.send(Event::Ready).unwrap();
                     }
                     Request::Action(Action::Close) => {

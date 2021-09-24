@@ -116,7 +116,7 @@ impl TypeTagAccept for TestRelay {
 impl SendUntypedReceiver for TestRelay {
     fn send(&self, msg: Action, _bus: &Bus) -> Result<(), error::Error<Action>> {
         match msg {
-            Action::Init => {
+            Action::Init(..) => {
                 self.stx.send(Event::Ready).unwrap();
             }
             Action::Close => {

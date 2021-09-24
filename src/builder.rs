@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, pin::Pin};
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 
 use futures::{Future, FutureExt};
 use smallvec::SmallVec;
@@ -16,6 +16,8 @@ type MessageDeserializerCallback = Box<
         + Send
         + Sync,
 >;
+
+static RECEVIER_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub trait ReceiverSubscriberBuilder<T, M, R, E>:
     SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E>
@@ -75,7 +77,7 @@ impl<T, F, P, B> RegisterEntry<UnsyncEntry, T, F, P, B> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new::<M, R, E, S>(queue, inner);
+        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, inner);
         let poller2 = receiver.start_polling();
         self.receivers.insert(M::type_tag_(), receiver);
         self.pollers.push(poller(self.item.clone()));
@@ -144,7 +146,7 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new::<M, R, E, S>(queue, inner);
+        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, inner);
         let poller2 = receiver.start_polling();
         self.receivers.insert(M::type_tag_(), receiver);
         self.pollers.push(poller(self.item.clone()));
@@ -250,7 +252,7 @@ impl Module {
     }
 
     pub fn register_relay<S: Relay + Send + Sync + 'static>(mut self, inner: S) -> Self {
-        let receiver = Receiver::new_relay::<S>(inner);
+        let receiver = Receiver::new_relay::<S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), inner);
         self.pollings.push(receiver.start_polling());
 
         let mut receiver_added = false;

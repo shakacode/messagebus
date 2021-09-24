@@ -60,13 +60,15 @@ pub(crate) struct RelayWrapper<S>
 where
     S: 'static,
 {
+    id: u64,
     inner: S,
     context: Arc<RelayContext>,
     waiters: Slab<oneshot::Sender<Result<Box<dyn Message>, Error>>>,
 }
 impl<S> RelayWrapper<S> {
-    pub fn new(inner: S) -> Self {
+    pub fn new(id: u64, inner: S) -> Self {
         Self {
+            id,
             inner,
             context: Arc::new(RelayContext {
                 receivers: DashMap::new(),
@@ -100,6 +102,10 @@ impl<S> ReceiverTrait for RelayWrapper<S>
 where
     S: Relay + Send + Sync + 'static,
 {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }

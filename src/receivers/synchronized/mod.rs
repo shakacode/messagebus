@@ -49,7 +49,7 @@ macro_rules! synchronized_poller_macro {
                             .await
                             .unwrap()
                     }
-                    Request::Action(Action::Init) => {
+                    Request::Action(Action::Init(..)) => {
                         stx.send(Event::Ready).unwrap();
                     }
                     Request::Action(Action::Close) => {

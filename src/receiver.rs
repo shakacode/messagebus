@@ -96,6 +96,8 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn typed(&self) -> Option<AnyReceiver<'_>>;
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>>;
 
+    fn id(&self) -> u64;
+
     fn send_boxed(
         &self,
         mid: u64,
@@ -139,7 +141,7 @@ pub trait PermitDrop {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum Action {
-    Init,
+    Init(u64),
     Flush,
     Sync,
     Close,
@@ -186,6 +188,7 @@ where
     S: ReciveTypedReceiver<R, E> + 'static,
 {
     inner: S,
+    id: u64,
     waiters: Slab<Waiter<R, E>>,
     context: Arc<ReceiverContext>,
     _m: PhantomData<(M, R, E)>,
@@ -363,6 +366,10 @@ where
     E: StdSyncSendError,
     S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
 {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
     fn name(&self) -> &str {
         std::any::type_name::<S>()
     }
@@ -708,7 +715,7 @@ impl core::cmp::Eq for Receiver {}
 
 impl Receiver {
     #[inline]
-    pub(crate) fn new<M, R, E, S>(limit: u64, inner: S) -> Self
+    pub(crate) fn new<M, R, E, S>(id: u64, limit: u64, inner: S) -> Self
     where
         M: Message,
         R: Message,
@@ -717,6 +724,7 @@ impl Receiver {
     {
         Self {
             inner: Arc::new(ReceiverWrapper {
+                id,
                 inner,
                 waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
                 context: Arc::new(ReceiverContext {
@@ -737,13 +745,18 @@ impl Receiver {
     }
 
     #[inline]
-    pub(crate) fn new_relay<S>(inner: S) -> Self
+    pub(crate) fn new_relay<S>(id: u64, inner: S) -> Self
     where
         S: Relay + Send + Sync + 'static,
     {
         Self {
-            inner: Arc::new(RelayWrapper::new(inner)),
+            inner: Arc::new(RelayWrapper::new(id, inner)),
         }
+    }
+
+    #[inline]
+    pub fn id(&self) -> u64 {
+        self.inner.id()
     }
 
     #[inline]
@@ -964,7 +977,7 @@ impl Receiver {
     #[inline]
     pub fn init(&self, bus: &Bus) -> Result<(), Error<Action>> {
         if !self.inner.is_init_sent() {
-            self.inner.send_action(bus, Action::Init)
+            self.inner.send_action(bus, Action::Init(self.inner.id()))
         } else {
             Ok(())
         }

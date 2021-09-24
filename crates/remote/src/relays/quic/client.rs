@@ -1,9 +1,10 @@
 use crate::{error::Error, proto::{BodyType, ProtocolItem, ProtocolPacket}, relays::{GenericEventStream, MessageTable}};
-use futures::{Future, FutureExt};
-use messagebus::{Action, Bus, Event, Message, ReciveUntypedReceiver, SendUntypedReceiver, TypeTag, TypeTagAccept};
+use futures::StreamExt;
+use messagebus::{Action, Bus, Event, Message, ReciveUntypedReceiver, SendOptions, SendUntypedReceiver, TypeTag, TypeTagAccept};
 use parking_lot::Mutex;
-use std::{net::SocketAddr, sync::atomic::AtomicBool};
-use tokio::{sync::{mpsc::{self, UnboundedSender, UnboundedReceiver}, oneshot}};
+use quinn::IncomingBiStreams;
+use std::{net::SocketAddr, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use tokio::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
 use bytes::{Buf, BufMut};
 
 pub const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
@@ -30,64 +31,36 @@ impl QuicClientRelayEndpoint {
 
         Ok(Self { endpoint })
     }
-
-    pub fn connect(
-        &self,
-        addr: &SocketAddr,
-        host: &str,
-    ) -> impl Future<Output = Result<QuicClientConnection, Error>> {
-        let conn = self.endpoint.connect(addr, host);
-        
-        async move {
-            let quinn::NewConnection { connection, .. } = conn?.await?;
-            let (send, recv) = connection.open_bi().await?;
-
-            Ok(QuicClientConnection {
-                connection,
-                send,
-                recv,
-            })
-        }
-    }
-
-    #[inline]
-    pub async fn wait_idle(&self) {
-        self.endpoint.wait_idle().await;
-    }
-}
-
-pub struct QuicClientConnection {
-    connection: quinn::Connection,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
 }
 
 pub struct QuicClientRelay {
-    ready_flag: AtomicBool,
+    // ready_flag: AtomicBool,
+    self_id: Arc<AtomicU64>,
     addr: SocketAddr,
     host: String,
     endpoint: QuicClientRelayEndpoint,
     outgoing_table: MessageTable,
     sender: UnboundedSender<ProtocolItem>,
-    receiver_send: Mutex<Option<(oneshot::Sender<(quinn::RecvStream, quinn::Connection)>, UnboundedReceiver<ProtocolItem>)>>,
-    receiver_recv: Mutex<Option<oneshot::Receiver<(quinn::RecvStream, quinn::Connection)>>>,
+    receiver: Mutex<Option<(UnboundedReceiver<ProtocolItem>, UnboundedSender<IncomingBiStreams>)>>,
+    st_receiver: Mutex<Option<UnboundedReceiver<IncomingBiStreams>>>,
 }
 
 impl QuicClientRelay {
     pub fn new(cert: &str, addr: SocketAddr, host: String, table: Vec<(TypeTag, TypeTag, TypeTag)>) -> Result<Self, Error> {
         let endpoint = QuicClientRelayEndpoint::new(cert)?;
         let (sender, receiver) = mpsc::unbounded_channel();
-        let (recv_send, recv_recv) = oneshot::channel();
+        let (st_sender, st_receiver) = mpsc::unbounded_channel();
 
         Ok(Self {
-            ready_flag: AtomicBool::new(false),
+            // ready_flag: AtomicBool::new(false),
+            self_id: Arc::new(AtomicU64::new(0)),
             addr,
             host,
             endpoint,
             outgoing_table: MessageTable::from(table),
             sender,
-            receiver_send: Mutex::new(Some((recv_send, receiver))),
-            receiver_recv: Mutex::new(Some(recv_recv)),
+            receiver: Mutex::new(Some((receiver, st_sender))),
+            st_receiver: Mutex::new(Some(st_receiver)),
         })
     }
 }
@@ -111,38 +84,35 @@ impl TypeTagAccept for QuicClientRelay {
 impl SendUntypedReceiver for QuicClientRelay {
     fn send(&self, msg: Action, _bus: &Bus) -> Result<(), messagebus::error::Error<Action>> {
         match msg {
-            Action::Init => {
-                let (sender, mut rx) = self.receiver_send.lock().take().unwrap();
-                let conn = self.endpoint.connect(&self.addr, &self.host);
-
+            Action::Init(self_id) => {
+                let (mut rx, recv_stream) = self.receiver.lock().take().unwrap();
+                let conn = self.endpoint.endpoint.connect(&self.addr, &self.host).unwrap();
+                self.self_id.store(self_id, Ordering::SeqCst);
+                
                 tokio::spawn(async move {
-                    println!("spawn");
-                    let mut conn = conn.await.unwrap();
-                    sender.send((conn.recv, conn.connection)).unwrap();
                     let mut body_buff = Vec::new();
                     let mut header_buff = Vec::new();
+                    let conn = conn.await.unwrap();
 
+                    recv_stream.send(conn.bi_streams).unwrap();
+                    
                     while let Some(r) = rx.recv().await {
-                        body_buff.clear();
                         header_buff.clear();
-                        
+                        body_buff.clear();
+
+                        let (mut send, _) = conn.connection.open_bi().await.unwrap();
                         let pkt = r.serialize(BodyType::Cbor, &mut body_buff).unwrap();
+
+                        header_buff.put(&b"MBUS"[..]);
+                        header_buff.put_u16(1);
+                        header_buff.put_u16(0);
+                        header_buff.put_u64(header_buff.len() as _);
                         serde_cbor::to_writer(&mut header_buff, &pkt).unwrap();
 
-                        println!("msg {:?}", pkt);
+                        send.write_all(&header_buff).await.unwrap();
+                        send.finish().await.unwrap();
 
-                        let mut buf = [0u8; 16];
-                        let mut writer = &mut buf[..];
-
-                        writer.put(&b"MBUS"[..]);
-                        writer.put_u16(1);
-                        writer.put_u16(0);
-                        writer.put_u64(header_buff.len() as _);
-
-                        conn.send.write_all(&buf).await.unwrap();
-                        println!("header sent");
-                        conn.send.write_all(&header_buff).await.unwrap();
-                        println!("body sent");
+                        println!("sent");
                     }
                 });
             }
@@ -178,54 +148,102 @@ impl ReciveUntypedReceiver for QuicClientRelay {
     type Stream = GenericEventStream;
 
     fn event_stream(&self, bus: Bus) -> Self::Stream {
-        let recv = self.receiver_recv.lock().take().unwrap();
+        let self_id = self.self_id.clone();
+        let sender = self.sender.clone();
+        let mut recv = self.st_receiver.lock().take().unwrap();
 
-        Box::pin(async move {
-            let buff = Vec::with_capacity(1024);
-            let (recv, conn) = recv.await.unwrap();
-            futures::stream::unfold(
-                (true, recv, conn, bus, buff),
-                |(first, mut recv, conn, bus, mut buff)| async move {
-                    if first {
-                        return Some((Event::Ready, (false, recv, conn, bus, buff)));
-                    }
-                    
-                    unsafe { buff.set_len(16) };
-                    recv.read_exact(&mut buff).await.unwrap();
+        Box::pin(
+            futures::stream::poll_fn(move |cx|recv.poll_recv(cx))
+                .map(move |uni_streams| {
+                    let self_id = self_id.clone();
+                    let bus = bus.clone();
+                    let sender = sender.clone();
+                    // let buff = Bytes::new();
 
-                    let mut reader = &buff[..];
-                    let mut sign = [0u8; 4];
-                    reader.copy_to_slice(&mut sign);
-                    assert!(&sign != b"MBUS");
-
-                    let version = reader.get_u16();
-                    assert!(version == 1);
-
-                    let content_type = reader.get_u16();
-
-                    let body_size = reader.get_u64();
-                    let diff = buff.capacity() as i64 - body_size as i64;
-                    if diff < 0 {
-                        buff.reserve(-diff as usize);
-                    }
-
-                    unsafe { buff.set_len(body_size as usize); }
-                    recv.read_exact(&mut buff).await.unwrap();
-
-                    let event = match content_type {
-                        0 => { // CBOR
-                            let proto: ProtocolPacket = serde_cbor::from_slice(&buff).unwrap();
-                            match proto.deserialize(&bus).unwrap() {
-                                ProtocolItem::Event(ev) => ev.map_msg(|msg|msg.upcast_box()),
-                                _ => unimplemented!()
+                    futures::stream::unfold((true, uni_streams, bus, sender, self_id), |(first, mut uni_streams, bus, sender, self_id)| async move {
+                        loop {
+                            if first {
+                                return Some((Event::Ready, (false, uni_streams, bus, sender, self_id)));
                             }
-                        },
-                        _ => unimplemented!()
-                    };
-    
-                    Some((event, (false, recv, conn, bus, buff)))
-                },
-            )
-        }.flatten_stream())
+
+                            let (_, recv) = match uni_streams.next().await? {
+                                Ok(recv) => recv,
+                                Err(err) => {
+                                    println!("error: {}", err);
+                                    return None;
+                                }
+                            };
+
+                            let buff = recv
+                                .read_to_end(usize::max_value())
+                                .await
+                                .unwrap();
+
+                            // assert_eq!(&buff[0..4], b"MBUS");
+
+                            let mut reader = &buff[4..];
+
+                            let version = reader.get_u16();
+                            let content_type = reader.get_u16();
+                            let body_size = reader.get_u64();
+
+                            println!("inbound packet {}: v: {}; ct: {}; bs: {}", String::from_utf8_lossy(&buff[0..4]), version, content_type, body_size);
+
+                            let event = match content_type {
+                                0 => { // CBOR
+                                    let proto: ProtocolPacket = serde_cbor::from_slice(&buff[16..]).unwrap();
+                                    
+                                    match proto.deserialize(&bus).unwrap() {
+                                        ProtocolItem::Event(ev) => ev.map_msg(|msg|msg.upcast_box()),
+                                        ProtocolItem::Action(action) => {
+                                            match action {
+                                                Action::Close => {
+                                                    println!("warning: Close recevied - ignoring!");
+                                                    sender.send(ProtocolItem::Event(Event::Exited)).unwrap();
+                                                },
+                                                Action::Flush => {
+                                                    bus.flush().await;
+                                                    sender.send(ProtocolItem::Event(Event::Flushed)).unwrap();
+                                                },
+                                                Action::Sync => {
+                                                    bus.sync().await;
+                                                    sender.send(ProtocolItem::Event(Event::Synchronized(Ok(())))).unwrap();
+                                                },
+                                                Action::Init(..) => (),
+                                                Action::Stats => (),        
+                                                _ => (),                                        
+                                            }
+                                            continue;
+                                        }
+                                        ProtocolItem::Send(mid, msg, req) => {
+                                            if req {
+                                                let res = bus.request_boxed(
+                                                    msg.upcast_box(), 
+                                                SendOptions::Except(self_id.load(Ordering::SeqCst))
+                                                )
+                                                    .await
+                                                    .map(|x|x.as_shared_boxed().unwrap())
+                                                    .map_err(|x|x.map_msg(|_|()));
+                                                
+                                                sender.send(ProtocolItem::Event(Event::Response(mid, res))).unwrap();
+                                            } else {
+                                                let _ = bus.send_boxed(msg.upcast_box(), Default::default())
+                                                    .await;
+                                            }
+
+                                            continue;
+                                        }
+                                        _ => unimplemented!()
+                                    }
+                                },
+                                _ => unimplemented!()
+                            };
+                            
+                            return Some((event, (false, uni_streams, bus, sender, self_id)));
+                        }
+                    })
+                })
+                .flatten()
+        )
     }
 }

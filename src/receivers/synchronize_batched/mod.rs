@@ -71,7 +71,7 @@ macro_rules! batch_synchronized_poller_macro {
                             let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                         }
                     }
-                    Request::Action(Action::Init) => {
+                    Request::Action(Action::Init(..)) => {
                         stx.send(Event::Ready).unwrap();
                     }
                     Request::Action(Action::Close) => {

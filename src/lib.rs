@@ -47,6 +47,7 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SendOptions {
     Broadcast,
+    Except(u64),
     Direct(u64),
     Random,
     Balanced,
@@ -159,8 +160,7 @@ impl Bus {
         }
     }
 
-    pub async fn flush_and_sync(&self) {
-        self.flush().await;
+    pub async fn sync(&self) {
         let _handle = self.inner.maintain.lock().await;
 
         for rs in self.inner.receivers.values() {
@@ -168,6 +168,12 @@ impl Bus {
                 r.sync(self).await;
             }
         }
+    }
+
+    #[inline]
+    pub async fn flush_and_sync(&self) {
+        self.flush().await;
+        self.sync().await;
     }
 
     fn try_reserve(&self, tt: &TypeTag, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
@@ -421,7 +427,7 @@ impl Bus {
     pub async fn send_boxed(
         &self,
         msg: Box<dyn Message>,
-        _options: SendOptions,
+        options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
@@ -430,25 +436,30 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt) {
-            if let Some((last, head)) = rs.split_last() {
-                for r in head {
-                    let _ = r.send_boxed(
-                        self,
-                        mid,
-                        msg.try_clone_boxed().unwrap(),
-                        false,
-                        r.reserve(&tt).await,
-                    );
-                }
+        let mut iter = self.select_receivers(&tt, options, None, None);
+        let first = iter.next();
 
-                let _ = last.send_boxed(self, mid, msg, false, last.reserve(&tt).await);
-
-                return Ok(());
-            }
+        for r in iter {
+            let _ = r.send_boxed(
+                self,
+                mid,
+                msg.try_clone_boxed().unwrap(),
+                false,
+                r.reserve(&tt).await,
+            );
         }
 
-        warn!("Unhandled message: no receivers");
+        if let Some(r) = first {
+            let _ = r.send_boxed(
+                self,
+                mid,
+                msg.try_clone_boxed().unwrap(),
+                false,
+                r.reserve(&tt).await,
+            );
+        } else {
+            warn!("Unhandled message: no receivers");
+        }
 
         Ok(())
     }
@@ -456,7 +467,7 @@ impl Bus {
     pub async fn send_boxed_one(
         &self,
         msg: Box<dyn Message>,
-        _options: SendOptions,
+        options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed(msg).into());
@@ -465,7 +476,8 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
+        let mut iter = self.select_receivers(&tt, options, None, None);
+        if let Some(rs) = iter.next() {
             Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
@@ -616,7 +628,7 @@ impl Bus {
     fn select_receivers<'a, 'b: 'a, 'c: 'a, 'd: 'a>(
         &'a self,
         tid: &'b TypeTag,
-        _options: SendOptions,
+        options: SendOptions,
         rid: Option<&'c TypeTag>,
         eid: Option<&'d TypeTag>,
     ) -> impl Iterator<Item = &Receiver> + 'a {
@@ -626,6 +638,11 @@ impl Bus {
             .into_iter()
             .map(|item| item.iter())
             .flatten()
-            .filter(move |x| x.accept(tid, rid, eid))
+            .filter(move |r| r.accept(tid, rid, eid))
+            .filter(move |r| match options {
+                SendOptions::Except(id) => id != r.id(),
+                SendOptions::Direct(id) => id == r.id(),
+                _ => true
+            })
     }
 }

@@ -169,7 +169,7 @@ impl ProtocolItem {
             ProtocolItem::Action(action) => match action {
                 Action::Close => ProtocolHeaderActionKind::Close,
                 Action::Flush => ProtocolHeaderActionKind::Flush,
-                Action::Init => ProtocolHeaderActionKind::Initialize,
+                Action::Init(..) => ProtocolHeaderActionKind::Initialize,
                 Action::Sync => ProtocolHeaderActionKind::Synchronize,
                 _ => unimplemented!(),
             }
@@ -347,7 +347,7 @@ impl<'a> ProtocolPacket<'a> {
             ProtocolHeaderActionKind::Pause => Event::Pause,
 
             other => return Ok(ProtocolItem::Action(match other {
-                ProtocolHeaderActionKind::Initialize => Action::Init,
+                ProtocolHeaderActionKind::Initialize => Action::Init(self.header.argument),
                 ProtocolHeaderActionKind::Close => Action::Close,
                 ProtocolHeaderActionKind::Flush => Action::Flush,
                 ProtocolHeaderActionKind::Synchronize => Action::Sync,

@@ -41,8 +41,8 @@ enum RecvDo {
 pub struct QuicRelay<B> {
     base: Mutex<Option<B>>,
     self_id: Arc<AtomicU64>,
-    outgoing_table: MessageTable,
-
+    in_table: MessageTable,
+    out_table: MessageTable,
     item_sender: UnboundedSender<Option<ProtocolItem>>,
     item_receiver: Mutex<Option<UnboundedReceiver<Option<ProtocolItem>>>>,
     event_sender: UnboundedSender<RecvDo>,
@@ -50,14 +50,15 @@ pub struct QuicRelay<B> {
 }
 
 impl QuicRelay<QuicClientEndpoint> {
-    pub fn new(cert: &str, addr: SocketAddr, host: String, table: Vec<(TypeTag, TypeTag, TypeTag)>) -> Result<Self, crate::error::Error> {
+    pub fn new(cert: &str, addr: SocketAddr, host: String, table: (Vec<(TypeTag, TypeTag, TypeTag)>, Vec<(TypeTag, TypeTag, TypeTag)>)) -> Result<Self, crate::error::Error> {
         let (item_sender, item_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
         Ok(QuicRelay {
             base: Mutex::new(Some(QuicClientEndpoint::new(cert, addr, host)?)),
             self_id: Arc::new(AtomicU64::new(0)),
-            outgoing_table: MessageTable::from(table),
+            in_table: MessageTable::from(table.0),
+            out_table: MessageTable::from(table.1),
             item_sender,
             item_receiver: Mutex::new(Some(item_receiver)),
             event_sender,
@@ -67,14 +68,15 @@ impl QuicRelay<QuicClientEndpoint> {
 }
 
 impl QuicRelay<QuicServerEndpoint> {
-    pub fn new(key_path: &str, cert_path: &str, addr: SocketAddr, table: Vec<(TypeTag, TypeTag, TypeTag)>) -> Result<Self, crate::error::Error> {
+    pub fn new(key_path: &str, cert_path: &str, addr: SocketAddr, table: (Vec<(TypeTag, TypeTag, TypeTag)>, Vec<(TypeTag, TypeTag, TypeTag)>)) -> Result<Self, crate::error::Error> {
         let (item_sender, item_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
         Ok(QuicRelay {
             base: Mutex::new(Some(QuicServerEndpoint::new(key_path, cert_path, &addr )?)),
             self_id: Arc::new(AtomicU64::new(0)),
-            outgoing_table: MessageTable::from(table),
+            in_table: MessageTable::from(table.0),
+            out_table: MessageTable::from(table.1),
             item_sender,
             item_receiver: Mutex::new(Some(item_receiver)),
             event_sender,
@@ -87,11 +89,11 @@ impl<B> TypeTagAccept for QuicRelay<B>
 where B: Stream<Item = Connecting> + Send + 'static
 {
     fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
-        self.outgoing_table.accept(msg, resp, err)
+        self.in_table.accept(msg, resp, err)
     }
 
     fn iter_types(&self, cb: &mut dyn FnMut(&TypeTag, &TypeTag, &TypeTag) -> bool) {
-        let iter = self.outgoing_table.iter_types();
+        let iter = self.in_table.iter_types();
 
         for (m, r, e) in iter {
             if cb(m, r, e) {

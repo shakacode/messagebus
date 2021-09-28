@@ -417,7 +417,7 @@ mod tests {
         BodyType, ProtocolHeader, ProtocolHeaderActionKind, ProtocolHeaderFlags, ProtocolPacket,
     };
     use messagebus::Event;
-    use messagebus::{derive::Message, Bus, Message, TypeTagged};
+    use messagebus::{derive::Message, Bus, TypeTagged};
     use serde_derive::{Deserialize, Serialize};
     use std::borrow::Cow;
 

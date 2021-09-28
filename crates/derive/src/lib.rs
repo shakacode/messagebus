@@ -46,11 +46,15 @@ fn clone_part(ast: &syn::DeriveInput, has_clone: bool) -> proc_macro2::TokenStre
             fn try_clone_boxed(&self) -> std::option::Option<std::boxed::Box<dyn messagebus::Message>>{
                 Some(Box::new(core::clone::Clone::clone(self)))
             }
+            fn try_clone(&self) -> Option<Self> {
+                Some(core::clone::Clone::clone(self))
+            }
         }
     } else {
         quote! {
             fn try_clone_into(&self, into: &mut dyn core::any::Any) -> bool {false}
             fn try_clone_boxed(&self) -> std::option::Option<std::boxed::Box<dyn messagebus::Message>>{ None }
+            fn try_clone(&self) -> Option<Self> { None }
         }
     }
 }

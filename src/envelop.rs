@@ -32,6 +32,8 @@ pub trait Message: MessageBounds {
 
     fn try_clone_into(&self, into: &mut dyn Any) -> bool;
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>>;
+
+    fn try_clone(&self) -> Option<Self> where Self: Sized;
 }
 
 macro_rules! gen_impls {
@@ -141,6 +143,10 @@ impl Message for () {
     }
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
         Some(Box::new(()))
+    }
+
+    fn try_clone(&self) -> Option<Self> {
+        Some(())
     }
 }
 
@@ -254,6 +260,10 @@ mod tests {
         fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
             None
         }
+
+        fn try_clone(&self) -> Option<Self> {
+            None
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -309,6 +319,10 @@ mod tests {
         }
         fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
             Some(Box::new(self.clone()))
+        }
+
+        fn try_clone(&self) -> Option<Self> {
+            Some(self.clone())
         }
     }
 
@@ -367,6 +381,10 @@ mod tests {
         }
         fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
             Some(Box::new(self.clone()))
+        }
+
+        fn try_clone(&self) -> Option<Self> {
+            Some(self.clone())
         }
     }
 

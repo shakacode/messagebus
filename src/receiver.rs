@@ -83,7 +83,7 @@ pub trait WrapperReturnTypeAndError<R: Message, E: StdSyncSendError>: Send + Syn
         &self,
         listener: oneshot::Sender<Result<R, Error<(), E>>>,
     ) -> Result<u64, Error>;
-    fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<(), Error>;
+    fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<Option<R>, Error>;
 }
 
 pub trait TypeTagAccept {
@@ -147,6 +147,8 @@ pub enum Action {
     Close,
     Stats,
 }
+
+pub type EventBoxed<E> = Event<Box<dyn Message>, E>;
 
 #[non_exhaustive]
 #[derive(Debug)]
@@ -242,8 +244,15 @@ where
                             self.context.processing.fetch_sub(1, Ordering::SeqCst);
                             self.context.response.notify_one();
 
-                            if let Err(err) = self.response(mid, resp) {
-                                error!("Response Error: {}", err);
+                            match self.response(mid, resp) {
+                                Ok(Some(_resp)) => {
+                                    if self.context.resend_unused_resp {
+                                        // TODO
+                                    }
+                                },
+
+                                Ok(None) => (),
+                                Err(err) => error!("Response Error: {}", err),
                             }
                         }
 
@@ -274,8 +283,8 @@ where
             .ok_or(Error::AddListenerError)? as _)
     }
 
-    fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<(), Error> {
-        if let Some(waiter) = self.waiters.take(mid as _) {
+    fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<Option<R>, Error> {
+        Ok(if let Some(waiter) = self.waiters.take(mid as _) {
             match waiter {
                 Waiter::WithErrorType(sender) => sender.send(resp).unwrap(),
                 Waiter::WithoutErrorType(sender) => {
@@ -289,9 +298,10 @@ where
                     sender.send(resp.map(|x| x.into_boxed())).unwrap()
                 }
             }
-        }
-
-        Ok(())
+            None
+        } else {
+            resp.ok()
+        })
     }
 }
 
@@ -678,6 +688,7 @@ struct ReceiverContext {
     ready: Notify,
     response: Arc<Notify>,
     init_sent: AtomicBool,
+    resend_unused_resp: bool,
 }
 
 impl PermitDrop for ReceiverContext {
@@ -715,7 +726,7 @@ impl core::cmp::Eq for Receiver {}
 
 impl Receiver {
     #[inline]
-    pub(crate) fn new<M, R, E, S>(id: u64, limit: u64, inner: S) -> Self
+    pub(crate) fn new<M, R, E, S>(id: u64, limit: u64, resend: bool, inner: S) -> Self
     where
         M: Message,
         R: Message,
@@ -738,6 +749,7 @@ impl Receiver {
                     closed: Notify::new(),
                     ready: Notify::new(),
                     response: Arc::new(Notify::new()),
+                    resend_unused_resp: resend,
                 }),
                 _m: Default::default(),
             }),

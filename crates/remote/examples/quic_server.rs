@@ -63,9 +63,10 @@ async fn main() {
         "./examples/cert.key",
         "./examples/cert.der", 
         "0.0.0.0:8083".parse().unwrap(), 
+        (vec![],
         vec![
             ("example::Req".into(), "example::Resp".into(), "GenericError".into())
-        ]
+        ])
     ).unwrap();
 
     let (b, poller) = Bus::build()

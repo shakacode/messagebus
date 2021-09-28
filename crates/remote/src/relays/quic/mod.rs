@@ -23,7 +23,7 @@ pub type QuicClientRelay = QuicRelay<QuicClientEndpoint>;
 pub type QuicServerRelay = QuicRelay<QuicServerEndpoint>;
 
 use super::{GenericEventStream, MessageTable};
-
+pub type MessageList = Vec<(TypeTag, TypeTag, TypeTag)>;
 
 pub trait WaitIdle<'a>: Sync {
     type Fut: Future + Send + 'a;
@@ -42,7 +42,7 @@ pub struct QuicRelay<B> {
     base: Mutex<Option<B>>,
     self_id: Arc<AtomicU64>,
     in_table: MessageTable,
-    out_table: MessageTable,
+    _out_table: MessageTable,
     item_sender: UnboundedSender<Option<ProtocolItem>>,
     item_receiver: Mutex<Option<UnboundedReceiver<Option<ProtocolItem>>>>,
     event_sender: UnboundedSender<RecvDo>,
@@ -50,7 +50,7 @@ pub struct QuicRelay<B> {
 }
 
 impl QuicRelay<QuicClientEndpoint> {
-    pub fn new(cert: &str, addr: SocketAddr, host: String, table: (Vec<(TypeTag, TypeTag, TypeTag)>, Vec<(TypeTag, TypeTag, TypeTag)>)) -> Result<Self, crate::error::Error> {
+    pub fn new(cert: &str, addr: SocketAddr, host: String, table: (MessageList, MessageList)) -> Result<Self, crate::error::Error> {
         let (item_sender, item_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
@@ -58,7 +58,7 @@ impl QuicRelay<QuicClientEndpoint> {
             base: Mutex::new(Some(QuicClientEndpoint::new(cert, addr, host)?)),
             self_id: Arc::new(AtomicU64::new(0)),
             in_table: MessageTable::from(table.0),
-            out_table: MessageTable::from(table.1),
+            _out_table: MessageTable::from(table.1),
             item_sender,
             item_receiver: Mutex::new(Some(item_receiver)),
             event_sender,
@@ -68,7 +68,7 @@ impl QuicRelay<QuicClientEndpoint> {
 }
 
 impl QuicRelay<QuicServerEndpoint> {
-    pub fn new(key_path: &str, cert_path: &str, addr: SocketAddr, table: (Vec<(TypeTag, TypeTag, TypeTag)>, Vec<(TypeTag, TypeTag, TypeTag)>)) -> Result<Self, crate::error::Error> {
+    pub fn new(key_path: &str, cert_path: &str, addr: SocketAddr, table: (MessageList, MessageList)) -> Result<Self, crate::error::Error> {
         let (item_sender, item_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
@@ -76,7 +76,7 @@ impl QuicRelay<QuicServerEndpoint> {
             base: Mutex::new(Some(QuicServerEndpoint::new(key_path, cert_path, &addr )?)),
             self_id: Arc::new(AtomicU64::new(0)),
             in_table: MessageTable::from(table.0),
-            out_table: MessageTable::from(table.1),
+            _out_table: MessageTable::from(table.1),
             item_sender,
             item_receiver: Mutex::new(Some(item_receiver)),
             event_sender,

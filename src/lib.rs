@@ -35,7 +35,7 @@ pub use builder::Module;
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 pub use handler::*;
 pub use receiver::{
-    Action, Event, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
+    Action, Event, EventBoxed, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
     SendUntypedReceiver, TypeTagAccept,
 };
 pub use relay::Relay;

@@ -1,8 +1,7 @@
 use messagebus::Bus;
 use messagebus_remote::relays::QuicClientRelay;
 use serde_derive::{Serialize, Deserialize};
-use messagebus::{Message, derive::Message};
-
+use messagebus::derive::Message;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Message)]
 #[namespace("example")]
@@ -20,17 +19,16 @@ pub struct Resp {
     text: String
 }
 
-
-
 #[tokio::main]
 async fn main() {
     let relay = QuicClientRelay::new(
         "./examples/cert.der", 
         "127.0.0.1:8083".parse().unwrap(), 
         "localhost".into(),
-        vec![
-            ("example::Req".into(), "example::Resp".into(), "GenericError".into())
-        ]
+        (vec![
+                    ("example::Req".into(), "example::Resp".into(), "GenericError".into())
+                ],
+            vec![])
     ).unwrap();
 
     let (b, poller) = Bus::build()

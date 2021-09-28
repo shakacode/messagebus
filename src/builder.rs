@@ -77,7 +77,7 @@ impl<T, F, P, B> RegisterEntry<UnsyncEntry, T, F, P, B> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, inner);
+        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, true, inner);
         let poller2 = receiver.start_polling();
         self.receivers.insert(M::type_tag_(), receiver);
         self.pollers.push(poller(self.item.clone()));
@@ -146,7 +146,7 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, inner);
+        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, true, inner);
         let poller2 = receiver.start_polling();
         self.receivers.insert(M::type_tag_(), receiver);
         self.pollers.push(poller(self.item.clone()));

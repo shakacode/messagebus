@@ -158,7 +158,7 @@ impl ProtocolItem {
         }
     }
 
-    pub fn serialize(self, mut body_type: BodyType, body_buff: &mut Vec<u8>) -> Result<ProtocolPacket<'_>, crate::error::Error> {
+    pub fn serialize<'a>(&self, mut body_type: BodyType, body_buff: &'a mut Vec<u8>) -> Result<ProtocolPacket<'a>, crate::error::Error> {
         let mut argument = 0;
         let mut type_tag = None;
         let mut body = None;
@@ -174,11 +174,11 @@ impl ProtocolItem {
                 _ => unimplemented!(),
             }
             ProtocolItem::Send(mid, msg, req) => {
-                let msg = msg.as_shared_boxed()
-                    .map_err(|_| crate::error::Error::UnknownCodec)?;
+                let msg = msg.as_shared_ref()
+                    .ok_or(crate::error::Error::UnknownCodec)?;
 
-                argument = mid;
-                flags.set(ProtocolHeaderFlags::ARGUMENT, req);
+                argument = *mid;
+                flags.set(ProtocolHeaderFlags::ARGUMENT, *req);
                 flags.set(ProtocolHeaderFlags::BODY, true);
                 flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
                 type_tag = Some(msg.type_tag());
@@ -188,15 +188,15 @@ impl ProtocolItem {
             },
             ProtocolItem::Event(ev) => match ev {
                 Event::Response(mid, res) => {
-                    argument = mid;
+                    argument = *mid;
                     flags.set(ProtocolHeaderFlags::ARGUMENT, true);
                     flags.set(ProtocolHeaderFlags::BODY, true);
                     flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
 
                     match res {
                         Ok(msg) => {
-                            let msg = msg.as_shared_boxed()
-                                .map_err(|_| crate::error::Error::UnknownCodec)?;
+                            let msg = msg.as_shared_ref()
+                                .ok_or(crate::error::Error::UnknownCodec)?;
     
                             type_tag = Some(msg.type_tag());
                             body = Some(generic_serialize(body_type, &*msg, body_buff)?);
@@ -225,7 +225,7 @@ impl ProtocolItem {
                     ProtocolHeaderActionKind::Error
                 }
                 Event::Finished(n) => {
-                    argument = n;
+                    argument = *n;
                     flags.set(ProtocolHeaderFlags::ARGUMENT, true);
                     ProtocolHeaderActionKind::BatchComplete
                 },

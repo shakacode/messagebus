@@ -1,7 +1,6 @@
 // #[cfg(feature = "quic")]
 mod quic;
-
-// mod redis;
+mod redis;
 
 use futures::Stream;
 use messagebus::{error::GenericError, Event, Message, TypeTag};
@@ -24,6 +23,11 @@ impl MessageTable {
             .entry(req)
             .or_insert_with(Vec::new)
             .push((resp, err));
+    }
+
+    pub fn iter_keys(&self) -> impl Iterator<Item = &str> + '_ {
+        self.table.keys()
+            .map(|k|k.as_ref())
     }
 
     pub fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {

@@ -1,6 +1,6 @@
 use messagebus::error::GenericError;
 use messagebus::{Bus, TypeTagged};
-use messagebus_remote::relays::QuicClientRelay;
+use messagebus_remote::relays::TcpRelay;
 use serde_derive::{Serialize, Deserialize};
 use messagebus::derive::Message;
 
@@ -22,15 +22,12 @@ pub struct Resp {
 
 #[tokio::main]
 async fn main() {
-    let relay = QuicClientRelay::new(
-        "./examples/cert.der", 
-        "127.0.0.1:8083".parse().unwrap(), 
-        "localhost".into(),
-        (vec![
-                    (Req::type_tag_(), Some((Resp::type_tag_(), GenericError::type_tag_())))
-                ],
-            vec![])
-    ).unwrap();
+    let relay = TcpRelay::new(false, "0.0.0.0:8083".parse().unwrap(), 
+    (vec![
+                (Req::type_tag_(), Some((Resp::type_tag_(), GenericError::type_tag_())))
+        ],
+        vec![])
+    );
 
     let (b, poller) = Bus::build()
         .register_shared_message::<Req>()

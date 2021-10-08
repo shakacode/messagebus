@@ -1,12 +1,11 @@
 use core::{marker::PhantomData, pin::Pin};
 
-use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 
 use futures::{Future, FutureExt};
-use smallvec::SmallVec;
 use tokio::sync::Mutex;
 
-use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, Message, Relay, SharedMessage, SynchronizedHandler, Untyped, envelop::{IntoSharedMessage, TypeTag}, error::{Error, StdSyncSendError}, receiver::{
+use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, Message, Relay, SharedMessage, SynchronizedHandler, TypeTag, Untyped, envelop::IntoSharedMessage, error::{Error, StdSyncSendError}, receiver::{
         BusPollerCallback, Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
     }, receivers};
@@ -43,19 +42,19 @@ pub struct RegisterEntry<K, T, F, P, B> {
     payload: B,
     builder: F,
     poller: P,
-    receivers: HashMap<TypeTag, Receiver>,
+    receivers: HashSet<Receiver>,
     pollers: Vec<BusPollerCallback>,
     _m: PhantomData<(K, T)>,
 }
 
 impl<K, T: 'static, F, P, B> RegisterEntry<K, T, F, P, B>
 where
-    F: FnMut(&mut B, TypeTag, Receiver),
+    F: FnMut(&mut B, Receiver),
     P: FnMut(&mut B, BusPollerCallback),
 {
     pub fn done(mut self) -> B {
-        for (tid, v) in self.receivers {
-            (self.builder)(&mut self.payload, tid, v);
+        for r in self.receivers {
+            (self.builder)(&mut self.payload, r);
         }
 
         for p in self.pollers {
@@ -79,7 +78,7 @@ impl<T, F, P, B> RegisterEntry<UnsyncEntry, T, F, P, B> {
 
         let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, true, inner);
         let poller2 = receiver.start_polling();
-        self.receivers.insert(M::type_tag_(), receiver);
+        self.receivers.insert(receiver);
         self.pollers.push(poller(self.item.clone()));
         self.pollers.push(poller2);
 
@@ -148,7 +147,7 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
 
         let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, true, inner);
         let poller2 = receiver.start_polling();
-        self.receivers.insert(M::type_tag_(), receiver);
+        self.receivers.insert(receiver);
         self.pollers.push(poller(self.item.clone()));
         self.pollers.push(poller2);
 
@@ -222,7 +221,7 @@ impl MessageTypeDescriptor {
 #[derive(Default)]
 pub struct Module {
     message_types: HashMap<TypeTag, MessageTypeDescriptor>,
-    receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
+    receivers: HashSet<Receiver>,
     pollings: Vec<BusPollerCallback>,
 }
 
@@ -230,7 +229,7 @@ impl Module {
     pub fn new() -> Self {
         Self {
             message_types: HashMap::new(),
-            receivers: HashMap::new(),
+            receivers: HashSet::new(),
             pollings: Vec::new(),
         }
     }
@@ -254,28 +253,7 @@ impl Module {
     pub fn register_relay<S: Relay + Send + Sync + 'static>(mut self, inner: S) -> Self {
         let receiver = Receiver::new_relay::<S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), inner);
         self.pollings.push(receiver.start_polling());
-
-        let mut receiver_added = false;
-        receiver.iter_types(&mut |msg, _, _| {
-            self.receivers
-                .entry(msg.clone())
-                .or_insert_with(SmallVec::new)
-                .push(receiver.clone());
-
-            if !receiver_added {
-                receiver_added = true;
-                false
-            } else {
-                true
-            }
-        });
-
-        if !receiver_added {
-            self.receivers
-                .entry("".into())
-                .or_insert_with(SmallVec::new)
-                .push(receiver);
-        }
+        self.receivers.insert(receiver);
 
         self
     }
@@ -286,18 +264,16 @@ impl Module {
     ) -> RegisterEntry<
         SyncEntry,
         T,
-        impl FnMut(&mut Self, TypeTag, Receiver),
+        impl FnMut(&mut Self, Receiver),
         impl FnMut(&mut Self, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>),
         Self,
     > {
         RegisterEntry {
             item: Arc::new(item) as Untyped,
             payload: self,
-            builder: |p: &mut Self, tt, r| {
-                p.receivers.entry(tt).or_insert_with(SmallVec::new).push(r);
-            },
+            builder: |p: &mut Self, r| { p.receivers.insert(r); },
             poller: |p: &mut Self, poller| p.pollings.push(poller),
-            receivers: HashMap::new(),
+            receivers: HashSet::new(),
             pollers: Vec::new(),
             _m: Default::default(),
         }
@@ -309,7 +285,7 @@ impl Module {
     ) -> RegisterEntry<
         UnsyncEntry,
         T,
-        impl FnMut(&mut Self, TypeTag, Receiver),
+        impl FnMut(&mut Self, Receiver),
         impl FnMut(&mut Self, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>),
         Self,
     > {
@@ -318,11 +294,9 @@ impl Module {
         RegisterEntry {
             item,
             payload: self,
-            builder: |p: &mut Self, tt, r| {
-                p.receivers.entry(tt).or_insert_with(SmallVec::new).push(r);
-            },
+            builder: |p: &mut Self, r| { p.receivers.insert(r); },
             poller: |p: &mut Self, poller| p.pollings.push(poller),
-            receivers: HashMap::new(),
+            receivers: HashSet::new(),
             pollers: Vec::new(),
             _m: Default::default(),
         }
@@ -331,13 +305,7 @@ impl Module {
     pub fn add_module(mut self, module: Module) -> Self {
         self.message_types.extend(module.message_types);
         self.pollings.extend(module.pollings);
-
-        for (k, v) in module.receivers {
-            self.receivers
-                .entry(k)
-                .or_insert_with(Default::default)
-                .extend(v);
-        }
+        self.receivers.extend(module.receivers);
 
         self
     }
@@ -376,22 +344,16 @@ impl BusBuilder {
     ) -> RegisterEntry<
         SyncEntry,
         T,
-        impl FnMut(&mut Self, TypeTag, Receiver),
+        impl FnMut(&mut Self, Receiver),
         impl FnMut(&mut Self, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>),
         Self,
     > {
         RegisterEntry {
             item: Arc::new(item) as Untyped,
             payload: self,
-            builder: |p: &mut Self, tt, r| {
-                p.inner
-                    .receivers
-                    .entry(tt)
-                    .or_insert_with(SmallVec::new)
-                    .push(r);
-            },
+            builder: |p: &mut Self, r| {  p.inner.receivers.insert(r); },
             poller: |p: &mut Self, poller| p.inner.pollings.push(poller),
-            receivers: HashMap::new(),
+            receivers: HashSet::new(),
             pollers: Vec::new(),
             _m: Default::default(),
         }
@@ -403,22 +365,16 @@ impl BusBuilder {
     ) -> RegisterEntry<
         UnsyncEntry,
         T,
-        impl FnMut(&mut Self, TypeTag, Receiver),
+        impl FnMut(&mut Self, Receiver),
         impl FnMut(&mut Self, Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>),
         Self,
     > {
         RegisterEntry {
             item: Arc::new(Mutex::new(item)) as Untyped,
             payload: self,
-            builder: |p: &mut Self, tt, r| {
-                p.inner
-                    .receivers
-                    .entry(tt)
-                    .or_insert_with(SmallVec::new)
-                    .push(r);
-            },
+            builder: |p: &mut Self, r| { p.inner.receivers.insert(r); },
             poller: |p: &mut Self, poller| p.inner.pollings.push(poller),
-            receivers: HashMap::new(),
+            receivers: HashSet::new(),
             pollers: Vec::new(),
             _m: Default::default(),
         }
@@ -431,19 +387,8 @@ impl BusBuilder {
     }
 
     pub fn build(self) -> (Bus, impl Future<Output = ()>) {
-        let mut receivers = HashMap::new();
-
-        for (key, values) in self.inner.receivers {
-            for v in values {
-                receivers
-                    .entry(key.clone())
-                    .or_insert_with(SmallVec::new)
-                    .push(v);
-            }
-        }
-
         let bus = Bus {
-            inner: Arc::new(BusInner::new(receivers, self.inner.message_types)),
+            inner: Arc::new(BusInner::new(self.inner.receivers, self.inner.message_types)),
         };
 
         let mut futs = Vec::with_capacity(self.inner.pollings.len() * 2);

@@ -1,5 +1,5 @@
 use messagebus::{AsyncHandler, Bus, Message, TypeTagged, derive::{Message, Error as MbError}, error::{self, GenericError}};
-use messagebus_remote::relays::{QuicServerRelay};
+use messagebus_remote::relays::TcpRelay;
 use serde_derive::{Serialize, Deserialize};
 use async_trait::async_trait;
 use thiserror::Error;
@@ -59,15 +59,12 @@ impl AsyncHandler<Req> for TmpReceiver {
 
 #[tokio::main]
 async fn main() {
-    let relay = QuicServerRelay::new(
-        "./examples/cert.key",
-        "./examples/cert.der", 
-        "0.0.0.0:8083".parse().unwrap(), 
+    let relay = TcpRelay::new(true, "0.0.0.0:8083".parse().unwrap(), 
         (vec![],
         vec![
             (Req::type_tag_(), Some((Resp::type_tag_(), GenericError::type_tag_())))
         ])
-    ).unwrap();
+    );
 
     let (b, poller) = Bus::build()
         .register_shared_message::<Req>()

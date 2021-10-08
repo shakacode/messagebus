@@ -89,12 +89,16 @@ impl<S> TypeTagAccept for RelayWrapper<S>
 where
     S: Relay + Send + Sync + 'static,
 {
-    fn iter_types(&self, cb: &mut dyn FnMut(&TypeTag, &TypeTag, &TypeTag) -> bool) {
-        self.inner.iter_types(cb)
+    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+        self.inner.iter_types()
     }
 
-    fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
-        self.inner.accept(msg, resp, err)
+    fn accept_msg(&self, msg: &TypeTag) -> bool {
+        self.inner.accept_msg(msg)
+    }
+
+    fn accept_req(&self, req: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+        self.inner.accept_req(req, resp, err)
     }
 }
 
@@ -281,6 +285,16 @@ where
                             if let Some(tt) = tt {
                                 if let Some(ctx) = self.context.receivers.get(&tt) {
                                     ctx.processing.fetch_sub(1, Ordering::SeqCst);
+                                    ctx.response.notify_one();
+                                }
+                            }
+                        }
+
+                        Event::BatchComplete(tt, n) => {
+                            if let Some(ctx) = self.context.receivers.get(&tt) {
+                                ctx.processing.fetch_sub(n, Ordering::SeqCst);
+                                
+                                for _ in 0..n {
                                     ctx.response.notify_one();
                                 }
                             }

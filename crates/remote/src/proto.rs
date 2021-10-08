@@ -224,8 +224,10 @@ impl ProtocolItem {
 
                     ProtocolHeaderActionKind::Error
                 }
-                Event::Finished(n) => {
+                Event::BatchComplete(tt, n) => {
                     argument = *n;
+                    type_tag = Some(tt.clone());
+                    flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
                     flags.set(ProtocolHeaderFlags::ARGUMENT, true);
                     ProtocolHeaderActionKind::BatchComplete
                 },
@@ -299,15 +301,15 @@ impl<'a> ProtocolPacket<'a> {
 
         let (body, error) = if self.header.flags.contains(ProtocolHeaderFlags::ERROR) {
             let error = messagebus::error::GenericError {
-                type_tag: type_tag.unwrap(),
+                type_tag: type_tag.clone().unwrap(),
                 description: self.body.map(|x|String::from_utf8_lossy(x.as_ref()).to_string()).unwrap_or_default(),
             };
 
             (None, Some(messagebus::error::Error::Other(error)))
         } else if self.header.flags.contains(ProtocolHeaderFlags::TT_AND_BODY) {
-            let body = self.body.ok_or(crate::error::Error::ProtocolParseError)?;
+            let body = self.body.ok_or_else(|| crate::error::Error::ProtocolParseError("No body".to_string()))?;
             let res = generic_deserialize(self.header.body_type, body.as_ref(), |de| {
-                bus.deserialize_message(type_tag.unwrap(), de)
+                bus.deserialize_message(type_tag.clone().unwrap(), de)
                     .map_err(|x| x.map_msg(|_| ()))
             })?;
 
@@ -328,19 +330,19 @@ impl<'a> ProtocolPacket<'a> {
         Ok(ProtocolItem::Event(match self.header.kind {
             ProtocolHeaderActionKind::Response => Event::Response(
                 argument
-                    .ok_or(crate::error::Error::ProtocolParseError)?,
+                    .ok_or_else(|| crate::error::Error::ProtocolParseError("Event::Response expected argument".into()))?,
                 error
                     .map(Err)
                     .or_else(|| body.map(Ok))
-                    .ok_or(crate::error::Error::ProtocolParseError)?,
+                    .ok_or_else(|| crate::error::Error::ProtocolParseError("Event::Response expected body".into()))?,
             ),
             ProtocolHeaderActionKind::Synchronized => {
                 Event::Synchronized(error.map(Err).unwrap_or(Ok(())))
             }
             ProtocolHeaderActionKind::Error => {
-                Event::Error(error.ok_or(crate::error::Error::ProtocolParseError)?)
+                Event::Error(error.ok_or_else(|| crate::error::Error::ProtocolParseError("Event::Error expected body".into()))?)
             }
-            ProtocolHeaderActionKind::BatchComplete => Event::Finished(self.header.argument),
+            ProtocolHeaderActionKind::BatchComplete => Event::BatchComplete(type_tag.unwrap(), self.header.argument),
             ProtocolHeaderActionKind::Flushed => Event::Flushed,
             ProtocolHeaderActionKind::Exited => Event::Exited,
             ProtocolHeaderActionKind::Ready => Event::Ready,
@@ -354,7 +356,9 @@ impl<'a> ProtocolPacket<'a> {
                 ProtocolHeaderActionKind::Send => {
                     let req = argument.is_some();
                     let mid = self.header.argument;
-                    let body = body.ok_or(crate::error::Error::ProtocolParseError)?;
+                    let body = body.ok_or_else(|| crate::error::Error::ProtocolParseError(
+                        format!("Action::Send[{:?}] expected body", type_tag)
+                    ))?;
 
                     return Ok(ProtocolItem::Send(mid, body, req));
                 },

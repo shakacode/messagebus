@@ -15,6 +15,7 @@ use core::{
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicI64, Ordering},
 };
+use std::hash::{Hash, Hasher};
 use futures::{pin_mut, Stream};
 use futures::{Future, FutureExt, StreamExt};
 use std::{borrow::Cow, sync::Arc};
@@ -87,8 +88,9 @@ pub trait WrapperReturnTypeAndError<R: Message, E: StdSyncSendError>: Send + Syn
 }
 
 pub trait TypeTagAccept {
-    fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool;
-    fn iter_types(&self, cb: &mut dyn FnMut(&TypeTag, &TypeTag, &TypeTag) -> bool);
+    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_>;
+    fn accept_msg(&self, msg: &TypeTag) -> bool;
+    fn accept_req(&self, req: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool;
 }
 
 pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
@@ -155,7 +157,7 @@ pub type EventBoxed<E> = Event<Box<dyn Message>, E>;
 pub enum Event<M, E: StdSyncSendError> {
     Response(u64, Result<M, Error<(), E>>),
     Synchronized(Result<(), Error<(), E>>),
-    Finished(u64),
+    BatchComplete(TypeTag, u64),
     Error(Error<(), E>),
     InitFailed(Error<(), E>),
     Stats(Stats),
@@ -170,7 +172,7 @@ impl<M, E: StdSyncSendError> Event<M, E> {
         match self {
             Event::Response(mid, res) => Event::Response(mid, res.map(f)),
             Event::Synchronized(res) => Event::Synchronized(res),
-            Event::Finished(cnt) => Event::Finished(cnt),
+            Event::BatchComplete(tt, cnt) => Event::BatchComplete(tt, cnt),
             Event::Error(err) => Event::Error(err),
             Event::InitFailed(err) => Event::InitFailed(err),
             Event::Stats(st) => Event::Stats(st),
@@ -256,7 +258,7 @@ where
                             }
                         }
 
-                        Event::Finished(n) => {
+                        Event::BatchComplete(_, n) => {
                             self.context.processing.fetch_sub(n as _, Ordering::SeqCst);
 
                             if n > 1 {
@@ -348,11 +350,11 @@ where
     E: StdSyncSendError,
     S: ReciveTypedReceiver<R, E> + Send + Sync + 'static,
 {
-    fn iter_types(&self, cb: &mut dyn FnMut(&TypeTag, &TypeTag, &TypeTag) -> bool) {
-        let _ = cb(&M::type_tag_(), &R::type_tag_(), &E::type_tag_());
+    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> { 
+        Box::new(std::iter::once((M::type_tag_(), Some((R::type_tag_(), E::type_tag_())))))
     }
 
-    fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+    fn accept_req(&self, req: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
         if let Some(resp) = resp {
             if resp.as_ref() != R::type_tag_().as_ref() {
                 return false;
@@ -365,6 +367,10 @@ where
             }
         }
 
+        req.as_ref() == M::type_tag_().as_ref()
+    }
+
+    fn accept_msg(&self, msg: &TypeTag) -> bool {
         msg.as_ref() == M::type_tag_().as_ref()
     }
 }
@@ -709,6 +715,12 @@ pub struct Receiver {
     inner: Arc<dyn ReceiverTrait>,
 }
 
+impl Hash for Receiver {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.id().hash(state);
+    }
+}
+
 impl fmt::Debug for Receiver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Receiver({:?})", self.inner.type_id())?;
@@ -718,7 +730,7 @@ impl fmt::Debug for Receiver {
 
 impl core::cmp::PartialEq for Receiver {
     fn eq(&self, other: &Receiver) -> bool {
-        self.inner.type_id() == other.inner.type_id()
+        self.inner.id() == other.inner.id()
     }
 }
 
@@ -782,8 +794,12 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
-        self.inner.accept(msg, resp, err)
+    pub fn accept(&self, is_req: bool, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+        if is_req {
+            self.inner.accept_req(msg, resp, err)
+        } else {
+            self.inner.accept_msg(msg)
+        }
     }
 
     #[inline]
@@ -1037,7 +1053,7 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn iter_types(&self, cb: &mut dyn FnMut(&TypeTag, &TypeTag, &TypeTag) -> bool) {
-        self.inner.iter_types(cb)
+    pub fn iter_types(&self) -> impl Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_ {
+        self.inner.iter_types()
     }
 }

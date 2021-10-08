@@ -31,7 +31,7 @@ pub struct RedisRelay {
 }
 
 impl RedisRelay {
-    pub fn new(path: &str, table: Vec<(TypeTag, TypeTag, TypeTag)>) -> Result<Self, crate::error::Error> {
+    pub fn new(path: &str, table: Vec<(TypeTag, Option<(TypeTag, TypeTag)>)>) -> Result<Self, crate::error::Error> {
         let client = redis::Client::open(path)?;
 
         let (item_sender, item_receiver) = mpsc::unbounded_channel();
@@ -50,18 +50,17 @@ impl RedisRelay {
 }
 
 impl TypeTagAccept for RedisRelay {
-    fn accept(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
-        self.table.accept(msg, resp, err)
+    fn accept_msg(&self, msg: &TypeTag) -> bool {
+        self.table.accept_message(msg)
     }
 
-    fn iter_types(&self, cb: &mut dyn FnMut(&TypeTag, &TypeTag, &TypeTag) -> bool) {
-        let iter = self.table.iter_types();
+    fn accept_req(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+        self.table.accept_request(msg, resp, err)
+    }
 
-        for (m, r, e) in iter {
-            if cb(m, r, e) {
-                return;
-            }
-        }
+    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+        let iter = self.table.iter_types();
+        Box::new(iter.map(|(x, y)| (x.clone(), y.cloned())))
     }
 }
 

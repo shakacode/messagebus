@@ -34,8 +34,8 @@ pub enum Error {
     #[error("Redis: {0}")]
     Redis(#[from] redis::RedisError),
 
-    #[error("ProtocolParseError")]
-    ProtocolParseError,
+    #[error("ProtocolParseError {0}")]
+    ProtocolParseError(String),
     
     #[error("UnknownCodec")]
     UnknownCodec,

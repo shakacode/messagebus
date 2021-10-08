@@ -1,40 +1,30 @@
-mod client;
-mod server;
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub use client::QuicClientEndpoint;
-use messagebus::error::GenericError;
-use messagebus::{Action, Bus, Event, EventBoxed, Message, ReciveUntypedReceiver, SendOptions, SendUntypedReceiver, TypeTag, TypeTagAccept};
-use parking_lot::Mutex;
-use quinn::{Connecting, IncomingBiStreams};
-pub use server::QuicServerEndpoint;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::{Future, Stream, StreamExt, pin_mut};
 use bytes::{Buf, BufMut};
-
-pub const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
+use futures::{Stream, StreamExt, pin_mut};
+use futures::stream::unfold;
+use messagebus::{Action, Bus, Event, EventBoxed, Message, ReciveUntypedReceiver, SendOptions, SendUntypedReceiver, TypeTag, TypeTagAccept};
+use messagebus::error::GenericError;
+use parking_lot::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::proto::{BodyType, ProtocolItem, ProtocolPacket};
 
-pub type QuicClientRelay = QuicRelay<QuicClientEndpoint>;
-pub type QuicServerRelay = QuicRelay<QuicServerEndpoint>;
+use super::{GenericEventStream, MessageList, MessageTable};
 
-use super::{GenericEventStream, MessageTable};
-pub type MessageList = Vec<(TypeTag, Option<(TypeTag, TypeTag)>)>;
 
-pub trait WaitIdle<'a>: Sync {
-    type Fut: Future + Send + 'a;
-    fn wait_idle(&'a self) -> Self::Fut;
-}
-
-pub struct QuicRelay<B> {
-    base: Mutex<Option<B>>,
+pub struct TcpRelay {
+    server_mode: bool,
+    addr: SocketAddr,
+    
     self_id: Arc<AtomicU64>,
     in_table: MessageTable,
-    _out_table: MessageTable,
+    // _out_table: MessageTable,
 
     item_sender: UnboundedSender<Option<ProtocolItem>>,
     item_receiver: Mutex<Option<UnboundedReceiver<Option<ProtocolItem>>>>,
@@ -42,56 +32,93 @@ pub struct QuicRelay<B> {
     event_sender: UnboundedSender<EventBoxed<GenericError>>,
     event_receiver: Mutex<Option<UnboundedReceiver<EventBoxed<GenericError>>>>,
 
-    stream_sender: UnboundedSender<IncomingBiStreams>,
-    stream_receiver: Mutex<Option<UnboundedReceiver<IncomingBiStreams>>>,
+    stream_sender: UnboundedSender<OwnedReadHalf>,
+    stream_receiver: Mutex<Option<UnboundedReceiver<OwnedReadHalf>>>,
 }
 
-impl QuicRelay<QuicClientEndpoint> {
-    pub fn new(cert: &str, addr: SocketAddr, host: String, table: (MessageList, MessageList)) -> Result<Self, crate::error::Error> {
+impl TcpRelay {
+    pub fn new(server_mode: bool, addr: SocketAddr, table: (MessageList, MessageList)) -> Self {
         let (item_sender, item_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
-
-        Ok(QuicRelay {
-            base: Mutex::new(Some(QuicClientEndpoint::new(cert, addr, host)?)),
+        
+        Self {
             self_id: Arc::new(AtomicU64::new(0)),
-            in_table: MessageTable::from(table.0),
-            _out_table: MessageTable::from(table.1),
+            server_mode,
+            addr,
             item_sender,
+            in_table: MessageTable::from(table.0),
             item_receiver: Mutex::new(Some(item_receiver)),
             event_sender,
             event_receiver: Mutex::new(Some(event_receiver)),
             stream_sender,
             stream_receiver: Mutex::new(Some(stream_receiver)),
+        }
+    }
+
+    fn connections(&self) -> impl Stream<Item = TcpRelayConnection> {       
+        unfold((self.server_mode, self.addr), move |(sm, addr)| async move {
+            let stream = if sm {
+                let bind_res = TcpListener::bind(addr).await;
+                let listener = match bind_res {
+                    Err(err) => {
+                        println!("bind error: {}", err);
+                        return None;
+                    }
+    
+                    Ok(listener) => listener,
+                };
+
+                unfold((listener, ), move |(listener, )| async move {
+                    let (stream, _addr) = match listener.accept().await {
+                        Err(err) => {
+                            println!("accept error: {}", err);
+                            return None;
+                        }
+        
+                        Ok(listener) => listener,
+                    };
+
+                    Some((TcpRelayConnection::from(stream), (listener, )))
+                }).left_stream()
+            } else {
+                unfold((addr, ), move |(addr, )| async move {
+                    let stream = match TcpStream::connect(addr).await {
+                        Err(err) => {
+                            println!("connect error: {}", err);
+                            return None;
+                        }
+        
+                        Ok(listener) => listener,
+                    };
+
+                    Some((TcpRelayConnection::from(stream), (addr, )))
+                }).right_stream()
+            };
+
+            Some((stream, (sm, addr)))
         })
+        .flatten()
     }
 }
 
-impl QuicRelay<QuicServerEndpoint> {
-    pub fn new(key_path: &str, cert_path: &str, addr: SocketAddr, table: (MessageList, MessageList)) -> Result<Self, crate::error::Error> {
-        let (item_sender, item_receiver) = mpsc::unbounded_channel();
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
 
-        Ok(QuicRelay {
-            base: Mutex::new(Some(QuicServerEndpoint::new(key_path, cert_path, &addr )?)),
-            self_id: Arc::new(AtomicU64::new(0)),
-            in_table: MessageTable::from(table.0),
-            _out_table: MessageTable::from(table.1),
-            item_sender,
-            item_receiver: Mutex::new(Some(item_receiver)),
-            event_sender,
-            event_receiver: Mutex::new(Some(event_receiver)),
-            stream_sender,
-            stream_receiver: Mutex::new(Some(stream_receiver)),
-        })
+struct TcpRelayConnection {
+    recv: OwnedReadHalf, 
+    send: OwnedWriteHalf,
+}
+
+impl From<TcpStream> for TcpRelayConnection {
+    fn from(stream: TcpStream) -> Self {
+        let (recv, send) = stream.into_split();
+        TcpRelayConnection {
+            recv, 
+            send
+        }
     }
 }
 
-impl<B> TypeTagAccept for QuicRelay<B> 
-where B: Stream<Item = Connecting> + Send + 'static
-{
-
+impl TypeTagAccept for TcpRelay {
     fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
         let iter = self.in_table.iter_types();
         Box::new(iter.map(|(x, y)| (x.clone(), y.cloned())))
@@ -106,9 +133,7 @@ where B: Stream<Item = Connecting> + Send + 'static
     }
 }
 
-impl<B> SendUntypedReceiver for QuicRelay<B> 
-    where B: for<'a> WaitIdle<'a> + Stream<Item = Connecting> + Send + 'static
-{
+impl SendUntypedReceiver for TcpRelay {
     fn send(&self, msg: Action, _bus: &Bus) -> Result<(), messagebus::error::Error<Action>> {
         match msg {
             Action::Init(self_id) => {
@@ -120,7 +145,7 @@ impl<B> SendUntypedReceiver for QuicRelay<B>
                 let stream_sender = self.stream_sender.clone();
                 let event_sender = self.event_sender.clone();
 
-                let incoming = self.base.lock().take().unwrap();
+                let incoming = self.connections();
                 self.self_id.store(self_id, Ordering::SeqCst);
 
                 tokio::spawn(async move {
@@ -133,7 +158,7 @@ impl<B> SendUntypedReceiver for QuicRelay<B>
                     loop {
                         println!("begin");
 
-                        let conn = match incoming.next().await {
+                        let mut conn = match incoming.next().await {
                             Some(x) => x,
                             None => {
                                 println!("No more connections. Message {:?} has been lost!", item);
@@ -141,15 +166,7 @@ impl<B> SendUntypedReceiver for QuicRelay<B>
                             }
                         };
 
-                        let conn = match conn.await {
-                            Ok(conn) => conn,
-                            Err(err) => {
-                                println!("connection dropped with err {}. waiting next connection", err);
-                                continue;
-                            }
-                        };
-
-                        stream_sender.send(conn.bi_streams).unwrap();
+                        stream_sender.send(conn.recv).unwrap();
                         event_sender.send(Event::Ready).unwrap();
 
                         loop {
@@ -160,41 +177,9 @@ impl<B> SendUntypedReceiver for QuicRelay<B>
                                     Some(Some(r)) => r,
                                     None | Some(None) => {
                                         println!("closing");
-                                        conn.connection.close(0u32.into(), b"done");
-                                        incoming.wait_idle().await;
+                                        drop(conn.send);
                                         break;
                                     },
-                                }
-
-                                // match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-                                //     Ok(Some(Some(r))) => r,
-                                //     Ok(None) | Ok(Some(None)) => {
-                                //         conn.connection.close(0u32.into(), b"done");
-                                //         incoming.wait_idle().await;
-                                //         break;
-                                //     },
-                                //     Err(_) => {
-                                //         // println!("{:?}", err);
-                                //         // let (mut send, _) = match conn.connection.open_bi().await {
-                                //         //     Ok(x) => x,
-                                //         //     Err(err) => {
-                                //         //         println!("err {}", err);
-                                //         //         break;
-                                //         //     }
-                                //         // };
-                                //         // println!("<< PING");
-                                //         // let _ = send.write_all(b"PING").await.unwrap();
-                                //         // let _ = send.finish().await;
-                                //         continue;
-                                //     }
-                                // }
-                            };
-    
-                            let (mut send, _) = match conn.connection.open_bi().await {
-                                Ok(x) => x,
-                                Err(err) => {
-                                    println!("err {}", err);
-                                    break;
                                 }
                             };
 
@@ -212,15 +197,9 @@ impl<B> SendUntypedReceiver for QuicRelay<B>
                             head.put_u16(0);
                             head.put_u64(body_size as _);
 
-                            if let Err(err) = send.write_all(&header_buff).await {
+                            if let Err(err) = conn.send.write_all(&header_buff).await {
                                 item = Some(r);
                                 println!("write broken connection err {}. try with next connection", err);
-                                break;
-                            }
-
-                            if let Err(err) = send.finish().await {
-                                item = Some(r);
-                                println!("finish broken connection err {}. try with next connection", err);
                                 break;
                             }
                         }
@@ -264,9 +243,7 @@ impl<B> SendUntypedReceiver for QuicRelay<B>
     }
 }
 
-impl<B> ReciveUntypedReceiver for QuicRelay<B> 
-    where B: Send
-{
+impl ReciveUntypedReceiver for TcpRelay {
     type Stream = GenericEventStream;
 
     fn event_stream(&self, bus: Bus) -> Self::Stream {
@@ -283,36 +260,20 @@ impl<B> ReciveUntypedReceiver for QuicRelay<B>
                 let self_id = self_id.clone();
                 let sender = sender.clone();
 
-                futures::stream::unfold((incoming, bus, sender, self_id, buff), |(mut incoming, bus, sender, self_id, mut buff)| async move {
+                futures::stream::unfold((incoming, bus, sender, self_id, buff), |(mut recv, bus, sender, self_id, mut buff)| async move {
                     loop {
-                        let (_, mut recv) = match incoming.next().await? {
-                            Ok(recv) => recv,
-                            Err(err) => {
-                                println!("error: {}", err);
-                                return None;
-                            }
-                        };
-
                         buff.resize(4, 0);
                         if let Err(err) = recv.read_exact(&mut buff[..]).await {
                             println!("recv err: {}", err);
-                            continue;
+                            break None;
                         }
-                        
-                        let verb = match std::str::from_utf8(&buff[0..4]) {
-                            Ok(m) => m,
-                            Err(err) => {
-                                println!("recv err parse: {}", err);
-                                continue;
-                            }
-                        };
 
-                        if verb == "PING" {
+                        if &buff == b"PING" {
                             println!(">> PING");
                             continue;
                         }
 
-                        if verb != "MBUS" {
+                        if &buff != b"MBUS" {
                             println!("Not MBUS packet!");
                             continue;
                         }
@@ -333,8 +294,6 @@ impl<B> ReciveUntypedReceiver for QuicRelay<B>
                             println!("recv err: {}", err);
                             continue;
                         }
-
-                        drop(recv);
 
                         // println!("inbound packet MBUS v: {}; ct: {}; bs: {}", 
                         //     version, content_type, body_size);
@@ -371,7 +330,7 @@ impl<B> ReciveUntypedReceiver for QuicRelay<B>
                                                 sender.send(Some(ProtocolItem::Event(Event::Flushed))).unwrap();
                                             },
                                             Action::Sync => {
-                                                println!("flush");
+                                                println!("sync");
                                                 bus.sync().await;
                                                 sender.send(Some(ProtocolItem::Event(Event::Synchronized(Ok(()))))).unwrap();
                                             },
@@ -414,7 +373,7 @@ impl<B> ReciveUntypedReceiver for QuicRelay<B>
                             _ => unimplemented!()
                         };
 
-                        return Some((event, (incoming, bus, sender, self_id, buff)));
+                        return Some((event, (recv, bus, sender, self_id, buff)));
                     }
                 })
             })

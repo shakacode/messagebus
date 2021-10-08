@@ -22,7 +22,7 @@ use core::{
     time::Duration,
 };
 use smallvec::SmallVec;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 use tokio::sync::Mutex;
 
 use builder::{BusBuilder, MessageTypeDescriptor};
@@ -41,6 +41,7 @@ pub use receiver::{
 pub use relay::Relay;
 
 pub type Untyped = Arc<dyn Any + Send + Sync>;
+type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -60,20 +61,46 @@ impl Default for SendOptions {
 }
 
 pub struct BusInner {
+    receivers: HashSet<Receiver>,
     message_types: HashMap<TypeTag, MessageTypeDescriptor>,
-    receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
+    lookup: HashMap<LookupQuery, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
     maintain: Mutex<()>,
 }
 
 impl BusInner {
     pub(crate) fn new(
-        receivers: HashMap<TypeTag, SmallVec<[Receiver; 4]>>,
+        receivers: HashSet<Receiver>,
         message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     ) -> Self {
+        let mut lookup = HashMap::new();
+        for recv in receivers.iter() {
+            for (msg, resp) in recv.iter_types() {
+                lookup.entry((msg.clone(), None, None))
+                    .or_insert_with(HashSet::new)
+                    .insert(recv.clone());
+
+                if let Some((resp, err)) = resp {
+                    lookup.entry((msg.clone(), Some(resp.clone()), None))
+                        .or_insert_with(HashSet::new)
+                        .insert(recv.clone());
+
+                    lookup.entry((msg, Some(resp), Some(err)))
+                        .or_insert_with(HashSet::new)
+                        .insert(recv.clone());
+                }
+            }
+        }
+
+        let lookup = lookup
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
         Self {
             message_types,
             receivers,
+            lookup,
             closed: AtomicBool::new(false),
             maintain: Mutex::new(()),
         }
@@ -96,18 +123,14 @@ impl Bus {
     }
 
     pub(crate) fn init(&self) {
-        for rs in self.inner.receivers.values() {
-            for r in rs {
-                r.init(self).unwrap();
-            }
+        for r in self.inner.receivers.iter() {
+            r.init(self).unwrap();
         }
     }
 
     pub async fn ready(&self) {
-        for rs in self.inner.receivers.values() {
-            for r in rs {
-                r.ready().await;
-            }
+        for r in self.inner.receivers.iter() {
+            r.ready().await;
         }
     }
 
@@ -115,13 +138,11 @@ impl Bus {
         let _handle = self.inner.maintain.lock().await;
         self.inner.closed.store(true, Ordering::SeqCst);
 
-        for rs in self.inner.receivers.values() {
-            for r in rs {
-                let err = tokio::time::timeout(Duration::from_secs(20), r.close(self)).await;
+        for r in self.inner.receivers.iter() {
+            let err = tokio::time::timeout(Duration::from_secs(20), r.close(self)).await;
 
-                if let Err(err) = err {
-                    error!("Close timeout on {}: {}", r.name(), err);
-                }
+            if let Err(err) = err {
+                error!("Close timeout on {}: {}", r.name(), err);
             }
         }
     }
@@ -134,13 +155,11 @@ impl Bus {
         for _ in 0..fuse_count {
             iters += 1;
             let mut flushed = false;
-            for rs in self.inner.receivers.values() {
-                for r in rs {
-                    if r.need_flush() {
-                        flushed = true;
+            for r in self.inner.receivers.iter() {
+                if r.need_flush() {
+                    flushed = true;
 
-                        r.flush(self).await;
-                    }
+                    r.flush(self).await;
                 }
             }
 
@@ -163,10 +182,8 @@ impl Bus {
     pub async fn sync(&self) {
         let _handle = self.inner.maintain.lock().await;
 
-        for rs in self.inner.receivers.values() {
-            for r in rs {
-                r.sync(self).await;
-            }
+        for r in self.inner.receivers.iter() {
+            r.sync(self).await;
         }
     }
 
@@ -207,7 +224,7 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt) {
+        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             let permits = if let Some(x) = self.try_reserve(&tt, rs) {
                 x
             } else {
@@ -270,7 +287,7 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt) {
+        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
                     let _ = r.send(self, mid, msg.clone(), false, r.reserve(&tt).await);
@@ -304,10 +321,9 @@ impl Bus {
             return Err(SendError::Closed(msg).into());
         }
 
-        let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt) {
+        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             if let Some((last, head)) = rs.split_last() {
                 for r in head {
                     let _ = r.force_send(self, mid, msg.clone(), false);
@@ -336,7 +352,9 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None))
+            .and_then(|rs| rs.first()) 
+        {
             let permits = if let Some(x) = rs.try_reserve(&tt) {
                 x
             } else {
@@ -357,7 +375,9 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None))
+            .and_then(|rs| rs.first()) 
+        {
             Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
@@ -374,10 +394,10 @@ impl Bus {
         req: M,
         options: SendOptions,
     ) -> Result<R, Error<M>> {
-        let tid = req.type_tag();
+        let tid = M::type_tag_();
         let rid = R::type_tag_();
 
-        let mut iter = self.select_receivers(&tid, options, Some(&rid), None);
+        let mut iter = self.select_receivers(tid.clone(), options, Some(rid), None, true);
         if let Some(rc) = iter.next() {
             let (mid, rx) = rc
                 .add_response_waiter::<R>()
@@ -402,7 +422,7 @@ impl Bus {
         let rid = R::type_tag_();
         let eid = E::type_tag_();
 
-        let mut iter = self.select_receivers(&tid, options, Some(&rid), Some(&eid));
+        let mut iter = self.select_receivers(tid.clone(), options, Some(rid), Some(eid), true);
         if let Some(rc) = iter.next() {
             let (mid, rx) = rc.add_response_waiter_we::<R, E>().map_err(|x| {
                 x.map_err(|_| unimplemented!())
@@ -436,7 +456,7 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        let mut iter = self.select_receivers(&tt, options, None, None);
+        let mut iter = self.select_receivers(tt.clone(), options, None, None, false);
         let first = iter.next();
 
         for r in iter {
@@ -476,7 +496,7 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        let mut iter = self.select_receivers(&tt, options, None, None);
+        let mut iter = self.select_receivers(tt.clone(), options, None, None, false);
         if let Some(rs) = iter.next() {
             Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
@@ -495,7 +515,7 @@ impl Bus {
 
         let tt = req.type_tag();
 
-        let mut iter = self.select_receivers(&tt, options, None, None);
+        let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
             let (mid, rx) = rc.add_response_waiter_boxed().map_err(|x| {
                 x.map_err(|_| unimplemented!())
@@ -528,7 +548,7 @@ impl Bus {
         let tt = req.type_tag();
         let eid = E::type_tag_();
 
-        let mut iter = self.select_receivers(&tt, options, None, Some(&eid));
+        let mut iter = self.select_receivers(tt.clone(), options, None, Some(eid), true);
         if let Some(rc) = iter.next() {
             let (mid, rx) = rc.add_response_waiter_boxed_we().map_err(|x| {
                 x.map_err(|_| unimplemented!())
@@ -563,7 +583,8 @@ impl Bus {
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.receivers.get(&tt).and_then(|rs| rs.first()) {
+        if let Some(rs) = self.inner.lookup.get(&(tt.clone(), None, None))
+        .and_then(|rs| rs.first()) {
             let msg = self.deserialize_message(tt.clone(), de)?;
             Ok(rs.send_boxed(self, mid, msg.upcast_box(), false, rs.reserve(&tt).await)?)
         } else {
@@ -582,7 +603,7 @@ impl Bus {
             return Err(Error::NoResponse);
         }
 
-        let mut iter = self.select_receivers(&tt, options, None, None);
+        let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
             let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
             let msg = self.deserialize_message(tt.clone(), de)?;
@@ -620,25 +641,22 @@ impl Bus {
         self.inner
             .receivers
             .iter()
-            .map(|(_, r)| r.into_iter().map(|x| x.stats()))
-            .flatten()
+            .map(|x| x.stats())
     }
 
     #[inline]
-    fn select_receivers<'a, 'b: 'a, 'c: 'a, 'd: 'a>(
-        &'a self,
-        tid: &'b TypeTag,
+    fn select_receivers(
+        &self,
+        tid: TypeTag,
         options: SendOptions,
-        rid: Option<&'c TypeTag>,
-        eid: Option<&'d TypeTag>,
-    ) -> impl Iterator<Item = &Receiver> + 'a {
-        self.inner
-            .receivers
-            .get(tid)
-            .into_iter()
-            .map(|item| item.iter())
-            .flatten()
-            .filter(move |r| r.accept(tid, rid, eid))
+        rid: Option<TypeTag>,
+        eid: Option<TypeTag>,
+        is_req: bool,
+    ) -> impl Iterator<Item = &Receiver> + '_ {
+        let vec = self.inner.lookup.get(&(tid.clone(), rid.clone(), eid.clone())).unwrap();
+
+        vec.iter()
+            .filter(move |r| r.accept(is_req, &tid, rid.as_ref(), eid.as_ref()))
             .filter(move |r| match options {
                 SendOptions::Except(id) => id != r.id(),
                 SendOptions::Direct(id) => id == r.id(),

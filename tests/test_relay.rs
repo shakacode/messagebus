@@ -2,12 +2,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
-use messagebus::{
-    derive::{Error as MbError, Message},
-    error::{self, GenericError},
-    receivers, Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUntypedReceiver,
-    SendUntypedReceiver, TypeTagAccept, TypeTagged,
-};
+use messagebus::{Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUntypedReceiver, SendUntypedReceiver, TypeTag, TypeTagAccept, TypeTagged, derive::{Error as MbError, Message}, error::{self, GenericError}, receivers};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -56,7 +51,7 @@ pub struct TestRelay {
 }
 
 impl TypeTagAccept for TestRelay {
-    fn accept(
+    fn accept_req(
         &self,
         msg: &messagebus::TypeTag,
         resp: Option<&messagebus::TypeTag>,
@@ -64,52 +59,44 @@ impl TypeTagAccept for TestRelay {
     ) -> bool {
         if msg.as_ref() == Msg::<i16>::type_tag_().as_ref() {
             if let Some(resp) = resp {
-                if resp.as_ref() != Msg::<u8>::type_tag_().as_ref() {
-                    return false;
+                if resp.as_ref() == Msg::<u8>::type_tag_().as_ref() {
+                    return true
                 }
-            }
+            } else {
+                return true
+            }            
         }
 
         if msg.as_ref() == Msg::<i32>::type_tag_().as_ref() {
             if let Some(resp) = resp {
-                if resp.as_ref() != Msg::<i64>::type_tag_().as_ref()
-                    && resp.as_ref() != Msg::<()>::type_tag_().as_ref()
-                {
-                    return false;
+                if resp.as_ref() == Msg::<u64>::type_tag_().as_ref() {
+                    return true
                 }
-            }
+            } else {
+                return true
+            }            
         }
 
-        true
+        false
     }
 
-    fn iter_types(
+    fn accept_msg(
         &self,
-        cb: &mut dyn FnMut(
-            &messagebus::TypeTag,
-            &messagebus::TypeTag,
-            &messagebus::TypeTag,
-        ) -> bool,
-    ) {
-        if !cb(
-            &Msg::<i16>::type_tag_(),
-            &Msg::<u8>::type_tag_(),
-            &Error::type_tag_(),
-        ) {
-            return;
+        msg: &messagebus::TypeTag,
+    ) -> bool {
+        if msg.as_ref() == Msg::<i32>::type_tag_().as_ref() {
+            return true
         }
-        if !cb(
-            &Msg::<i32>::type_tag_(),
-            &Msg::<()>::type_tag_(),
-            &Error::type_tag_(),
-        ) {
-            return;
-        }
-        if !cb(
-            &Msg::<i32>::type_tag_(),
-            &Msg::<i64>::type_tag_(),
-            &Error::type_tag_(),
-        ) {}
+
+        false
+    }
+
+    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)>> {
+        Box::new(
+            std::iter::once((Msg::<i32>::type_tag_(), None))
+                .chain(std::iter::once((Msg::<i32>::type_tag_(), Some((Msg::<u64>::type_tag_(), GenericError::type_tag_())))))
+                .chain(std::iter::once((Msg::<i16>::type_tag_(), Some((Msg::<u8>::type_tag_(), GenericError::type_tag_())))))
+        )
     }
 }
 
@@ -139,7 +126,7 @@ impl SendUntypedReceiver for TestRelay {
         &self,
         mid: u64,
         msg: Box<dyn Message>,
-        _req: bool,
+        req: bool,
         _bus: &Bus,
     ) -> Result<(), error::Error<Box<dyn Message>>> {
         println!("TestRelay::send_msg [{}] {:?}", mid, msg);
@@ -147,10 +134,18 @@ impl SendUntypedReceiver for TestRelay {
             self.stx
                 .send(Event::Response(mid, Ok(Box::new(Msg(9u8)))))
                 .unwrap();
+        } else if msg.type_tag().as_ref() == Msg::<i32>::type_tag_().as_ref() {
+            if req {
+                self.stx
+                    .send(Event::Response(mid, Ok(Box::new(Msg(22u64)))))
+                    .unwrap();
+            } else {
+                self.stx
+                    .send(Event::Response(mid, Ok(Box::new(()))))
+                    .unwrap();
+            }
         } else {
-            self.stx
-                .send(Event::Response(mid, Ok(Box::new(()))))
-                .unwrap();
+            panic!("unsupported message type {}", msg.type_tag());
         }
 
         Ok(())
@@ -189,9 +184,11 @@ async fn test_relay() {
         .build();
 
     b.send(Msg(32i32)).await.unwrap();
-    let res: Msg<u8> = b.request(Msg(12i16), Default::default()).await.unwrap();
+    let res1: Msg<u8> = b.request(Msg(12i16), Default::default()).await.unwrap();
+    let res2: Msg<u64> = b.request(Msg(12i32), Default::default()).await.unwrap();
 
-    assert_eq!(res.0, 9u8);
+    assert_eq!(res1.0, 9u8);
+    assert_eq!(res2.0, 22u64);
 
     b.flush().await;
     b.close().await;

@@ -1,6 +1,6 @@
 [package]
 name = "messagebus_derive"
-version = "0.2.4"
+version = "0.2.5"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]

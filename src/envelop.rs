@@ -3,7 +3,7 @@ use core::{
     fmt,
 };
 
-use std::{borrow::Cow, sync::Arc};
+use std::{alloc::Layout, borrow::Cow, sync::Arc};
 
 pub trait MessageBounds: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static {}
 impl<T: TypeTagged + fmt::Debug + Unpin + Send + Sync + 'static> MessageBounds for T {}
@@ -17,6 +17,7 @@ pub trait TypeTagged {
 
     fn type_tag(&self) -> TypeTag;
     fn type_name(&self) -> Cow<str>;
+    fn type_layout(&self) -> Layout;
 }
 
 pub trait Message: MessageBounds {
@@ -48,6 +49,9 @@ macro_rules! gen_impls {
             fn type_name(&self) -> Cow<str> {
                 type_name::<$t>().into()
             }
+            fn type_layout(&self) -> Layout {
+                Layout::for_value(self)
+            }
         }
 
         gen_impls!{ $($rest)* }
@@ -63,6 +67,9 @@ macro_rules! gen_impls {
             }
             fn type_name(&self) -> Cow<str> {
                 type_name::<$t>().into()
+            }
+            fn type_layout(&self) -> Layout {
+                Layout::for_value(self)
             }
         }
     };
@@ -90,6 +97,9 @@ impl<T: TypeTagged> TypeTagged for Arc<T> {
     fn type_name(&self) -> Cow<str> {
         T::type_name(&*self)
     }
+    fn type_layout(&self) -> Layout {
+        Layout::for_value(self)
+    }
 }
 
 impl<T: TypeTagged> TypeTagged for Box<T> {
@@ -102,6 +112,9 @@ impl<T: TypeTagged> TypeTagged for Box<T> {
     }
     fn type_name(&self) -> Cow<str> {
         T::type_name(&*self)
+    }
+    fn type_layout(&self) -> Layout {
+        Layout::for_value(self)
     }
 }
 
@@ -226,6 +239,9 @@ mod tests {
         fn type_name(&self) -> Cow<str> {
             type_name::<Self>().into()
         }
+        fn type_layout(&self) -> Layout {
+            Layout::for_value(self)
+        }
     }
 
     impl Message for Msg0 {
@@ -278,6 +294,9 @@ mod tests {
         }
         fn type_name(&self) -> Cow<str> {
             type_name::<Self>().into()
+        }
+        fn type_layout(&self) -> Layout {
+            Layout::for_value(self)
         }
     }
 
@@ -340,6 +359,9 @@ mod tests {
         }
         fn type_name(&self) -> Cow<str> {
             type_name::<Self>().into()
+        }
+        fn type_layout(&self) -> Layout {
+            Layout::for_value(self)
         }
     }
 

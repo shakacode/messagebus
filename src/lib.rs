@@ -7,6 +7,13 @@ pub mod receivers;
 mod relay;
 mod stats;
 mod trait_object;
+pub mod type_tag;
+
+
+pub mod __reexport {
+    pub use serde;
+    pub use ctor;
+}
 
 #[macro_use]
 extern crate log;
@@ -25,7 +32,7 @@ use smallvec::SmallVec;
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 use tokio::sync::Mutex;
 
-use builder::{BusBuilder, MessageTypeDescriptor};
+use builder::BusBuilder;
 use error::{Error, SendError, StdSyncSendError};
 use receiver::{Permit, Receiver};
 use stats::Stats;
@@ -39,8 +46,10 @@ pub use receiver::{
     SendUntypedReceiver, TypeTagAccept,
 };
 pub use relay::Relay;
-
+pub use ctor;
+pub use type_tag::{register_shared_message, deserialize_shared_message};
 pub type Untyped = Arc<dyn Any + Send + Sync>;
+
 type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -62,7 +71,6 @@ impl Default for SendOptions {
 
 pub struct BusInner {
     receivers: HashSet<Receiver>,
-    message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     lookup: HashMap<LookupQuery, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
     maintain: Mutex<()>,
@@ -71,7 +79,6 @@ pub struct BusInner {
 impl BusInner {
     pub(crate) fn new(
         receivers: HashSet<Receiver>,
-        message_types: HashMap<TypeTag, MessageTypeDescriptor>,
     ) -> Self {
         let mut lookup = HashMap::new();
         for recv in receivers.iter() {
@@ -82,6 +89,10 @@ impl BusInner {
 
                 if let Some((resp, err)) = resp {
                     lookup.entry((msg.clone(), Some(resp.clone()), None))
+                        .or_insert_with(HashSet::new)
+                        .insert(recv.clone());
+
+                    lookup.entry((msg.clone(), None, Some(err.clone())))
                         .or_insert_with(HashSet::new)
                         .insert(recv.clone());
 
@@ -98,7 +109,6 @@ impl BusInner {
             .collect();
 
         Self {
-            message_types,
             receivers,
             lookup,
             closed: AtomicBool::new(false),
@@ -585,7 +595,9 @@ impl Bus {
 
         if let Some(rs) = self.inner.lookup.get(&(tt.clone(), None, None))
         .and_then(|rs| rs.first()) {
-            let msg = self.deserialize_message(tt.clone(), de)?;
+            
+            let msg = deserialize_shared_message(tt.clone(), de)?;
+            
             Ok(rs.send_boxed(self, mid, msg.upcast_box(), false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
@@ -606,7 +618,7 @@ impl Bus {
         let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
             let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
-            let msg = self.deserialize_message(tt.clone(), de)?;
+            let msg = deserialize_shared_message(tt.clone(), de)?;
 
             rc.send_boxed(
                 self,
@@ -620,21 +632,6 @@ impl Bus {
         } else {
             Err(Error::NoReceivers)
         }
-    }
-
-    pub fn deserialize_message(
-        &self,
-        tt: TypeTag,
-        de: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
-        let md = self
-            .inner
-            .message_types
-            .get(&tt)
-            .ok_or(Error::TypeTagNotRegistered(tt))?;
-
-        md.deserialize_boxed(de)
-            .map_err(|err| err.specify::<Box<dyn Message>>())
     }
 
     pub fn stats(&self) -> impl Iterator<Item = Stats> + '_ {
@@ -653,9 +650,9 @@ impl Bus {
         eid: Option<TypeTag>,
         is_req: bool,
     ) -> impl Iterator<Item = &Receiver> + '_ {
-        let vec = self.inner.lookup.get(&(tid.clone(), rid.clone(), eid.clone())).unwrap();
-
-        vec.iter()
+       self.inner.lookup.get(&(tid.clone(), rid.clone(), eid.clone()))
+            .into_iter()
+            .flatten()
             .filter(move |r| r.accept(is_req, &tid, rid.as_ref(), eid.as_ref()))
             .filter(move |r| match options {
                 SendOptions::Except(id) => id != r.id(),

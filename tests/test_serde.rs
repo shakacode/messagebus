@@ -52,7 +52,6 @@ impl AsyncHandler<Msg> for TmpReceiver {
 #[tokio::test]
 async fn test() {
     let (b, poller) = Bus::build()
-        .register_shared_message::<Msg>()
         .register(TmpReceiver)
         .subscribe_async::<Msg>(8, Default::default())
         .done()

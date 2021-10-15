@@ -67,8 +67,6 @@ async fn main() {
     );
 
     let (b, poller) = Bus::build()
-        .register_shared_message::<Req>()
-        .register_shared_message::<Resp>()
         .register_relay(relay)
         .register(TmpReceiver)
             .subscribe_async::<Req>(8, Default::default())

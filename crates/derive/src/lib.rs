@@ -2,9 +2,12 @@
 
 extern crate proc_macro;
 
-use proc_macro::TokenStream;
-use quote::quote;
+// use proc_macro::{TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{ToTokens, quote};
+use std::collections::hash_map;
 use std::fmt::Write;
+use std::hash::Hasher;
 use syn::parse::{Parse, ParseStream};
 use syn::{parenthesized, Result};
 use syn::{punctuated::Punctuated, token::Comma, DeriveInput};
@@ -126,6 +129,7 @@ fn type_tag_part(
                 fn type_tag_() -> messagebus::TypeTag { format!(#type_name, #type_values).into() }
                 fn type_tag(&self) -> messagebus::TypeTag {  Self::type_tag_() }
                 fn type_name(&self) -> std::borrow::Cow<str> {  Self::type_tag_() }
+                fn type_layout(&self) -> std::alloc::Layout { std::alloc::Layout::for_value(self) }
             }
         }
     } else {
@@ -134,6 +138,7 @@ fn type_tag_part(
                 fn type_tag_() -> messagebus::TypeTag { #type_name.into() }
                 fn type_tag(&self) -> messagebus::TypeTag {  Self::type_tag_() }
                 fn type_name(&self) -> std::borrow::Cow<str> {  Self::type_tag_() }
+                fn type_layout(&self) -> std::alloc::Layout { std::alloc::Layout::for_value(self) }
             }
         }
     }
@@ -196,7 +201,7 @@ impl Parse for Tags {
 }
 
 #[proc_macro_derive(Message, attributes(type_tag, message, namespace))]
-pub fn derive_message(input: TokenStream) -> TokenStream {
+pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut tags = Tags::default();
     let mut type_tag = None;
     let mut namespace = None;
@@ -231,18 +236,55 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
     for mut param in impl_generics.params.pairs_mut() {
         match &mut param.value_mut() {
             syn::GenericParam::Lifetime(_) => {}
-            syn::GenericParam::Type(param) => {
+            syn::GenericParam::Type(params) => {
                 let bound: syn::TypeParamBound =
                     syn::parse_str("messagebus::MessageBounds").unwrap();
-                param.bounds.push(bound);
+
+                params.bounds.push(bound);
+
+                if tags.has_shared {
+                    let bound: syn::TypeParamBound =
+                    syn::parse_str("messagebus::__reexport::serde::Serialize").unwrap();
+
+                    params.bounds.push(bound);
+
+                    let bound: syn::TypeParamBound =
+                    syn::parse_str("messagebus::__reexport::serde::Deserialize<'de>").unwrap();
+
+                    params.bounds.push(bound);
+                }
+
+                if tags.has_clone {
+                    let bound: syn::TypeParamBound =
+                    syn::parse_str("core::clone::Clone").unwrap();
+
+                    params.bounds.push(bound);
+                }
             }
-            syn::GenericParam::Const(_param) => {}
+            syn::GenericParam::Const(_) => {}
         }
     }
 
     let type_tag_part = type_tag_part(&ast, type_tag, namespace);
     let shared_part = shared_part(&ast, tags.has_shared);
     let clone_part = clone_part(&ast, tags.has_clone);
+
+    let init = Ident::new(&format!("__init_{}", hash(ast.clone().into_token_stream())), Span::call_site());
+    let init_impl = if tags.has_shared && impl_generics.params.is_empty() {
+        quote! {
+            #[allow(non_upper_case_globals)]
+            #[messagebus::ctor::ctor]
+            fn #init() {
+                messagebus::register_shared_message::<#name>();
+            }
+        }
+    } else {
+        quote!{}
+    };
+
+    if !impl_generics.params.is_empty() && tags.has_shared {
+        impl_generics.params.push(syn::GenericParam::Lifetime(syn::LifetimeDef::new(syn::Lifetime::new("'de", Span::call_site()))))
+    }
 
     let tokens = quote! {
         #type_tag_part
@@ -256,13 +298,15 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
             #shared_part
             #clone_part
         }
+
+        #init_impl
     };
 
     tokens.into()
 }
 
 #[proc_macro_derive(Error, attributes(type_tag, namespace))]
-pub fn derive_error(input: TokenStream) -> TokenStream {
+pub fn derive_error(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut type_tag = None;
     let mut namespace = None;
 
@@ -291,4 +335,10 @@ pub fn derive_error(input: TokenStream) -> TokenStream {
     };
 
     tokens.into()
+}
+
+fn hash(input: TokenStream) -> u64 {
+    let mut hasher = hash_map::DefaultHasher::new();
+    hasher.write(input.to_string().as_bytes());
+    hasher.finish()
 }

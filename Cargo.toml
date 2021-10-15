@@ -1,6 +1,6 @@
 [package]
 name = "messagebus"
-version = "0.9.9"
+version = "0.9.10"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
@@ -17,7 +17,8 @@ members = [
 ]
 
 [dependencies]
-messagebus_derive = "0.2.4"
+messagebus_derive = "0.2.5"
+
 tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
 parking_lot = "0.11"
 async-trait = "0.1"
@@ -30,6 +31,7 @@ erased-serde = "0.3"
 serde = "1"
 serde_derive = "1"
 dashmap = "4.0"
+ctor = "0.1.21"
 
 [dev-dependencies]
 anyhow = "1.0"

@@ -1,7 +1,20 @@
 use core::iter::FromIterator;
+use std::ops::ControlFlow;
 
 use crate::{error::StdSyncSendError, Bus, Message};
 use async_trait::async_trait;
+
+#[async_trait]
+pub trait AsyncProducer<'a, M: Message>: Send {
+    type Error: StdSyncSendError;
+    type Context: Send + 'a;
+    type Response: Message;
+
+    async fn start(&'a self, msg: M, bus: &Bus) -> Result<Self::Context, Self::Error>;
+    async fn next(&'a self, ctx: &mut Self::Context, bus: &Bus) -> Result<ControlFlow<Self::Response>, Self::Error>;
+    async fn finish(&'a self, _ctx: Self::Context, _bus: &Bus) -> Result<(), Self::Error>;
+}
+
 
 pub trait Handler<M: Message>: Send + Sync {
     type Error: StdSyncSendError;

@@ -288,7 +288,7 @@ pub struct ProtocolPacket<'a> {
 impl<'a> ProtocolPacket<'a> {
     pub fn deserialize(
         self,
-        bus: &Bus,
+        _bus: &Bus,
     ) -> Result<ProtocolItem, crate::error::Error>
     {
         let type_tag: Option<TypeTag> = if self.header.flags.contains(ProtocolHeaderFlags::TYPE_TAG) {
@@ -309,7 +309,7 @@ impl<'a> ProtocolPacket<'a> {
         } else if self.header.flags.contains(ProtocolHeaderFlags::TT_AND_BODY) {
             let body = self.body.ok_or_else(|| crate::error::Error::ProtocolParseError("No body".to_string()))?;
             let res = generic_deserialize(self.header.body_type, body.as_ref(), |de| {
-                bus.deserialize_message(type_tag.clone().unwrap(), de)
+                messagebus::deserialize_shared_message(type_tag.clone().unwrap(), de)
                     .map_err(|x| x.map_msg(|_| ()))
             })?;
 
@@ -436,7 +436,6 @@ mod tests {
     #[test]
     fn test_proto_pack_event() {
         let (bus, _) = Bus::build()
-            .register_shared_message::<TestSharedMessage>()
             .build();
 
         let pkt = ProtocolPacket {
@@ -476,7 +475,6 @@ mod tests {
     #[test]
     fn test_proto_pack_event_error() {
         let (bus, _) = Bus::build()
-            .register_shared_message::<TestSharedMessage>()
             .build();
 
         let pkt = ProtocolPacket {

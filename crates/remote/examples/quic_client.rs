@@ -33,8 +33,6 @@ async fn main() {
     ).unwrap();
 
     let (b, poller) = Bus::build()
-        .register_shared_message::<Req>()
-        .register_shared_message::<Resp>()
         .register_relay(relay)
         .build();
 

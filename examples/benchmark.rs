@@ -117,7 +117,7 @@ async fn iter(bus: &Bus) {
         bus.send(MsgF32(0.)).await.unwrap();
     }
 
-    bus.flush().await;
+    bus.flush_all().await;
 }
 
 #[tokio::main]
@@ -156,7 +156,7 @@ async fn main() {
     println!("Avg time: {:.4}", time_sum as f64 / (count as f64 * 1000.0));
 
     println!("flush");
-    b.flush().await;
+    b.flush_all().await;
 
     println!("close");
     b.close().await;

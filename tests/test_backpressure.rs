@@ -52,7 +52,7 @@ async fn test_backpressure() {
 
     assert!(b.try_send(MsgF32(32f32)).is_err());
 
-    b.flush().await;
+    b.flush_all().await;
     b.close().await;
     poller.await;
 }

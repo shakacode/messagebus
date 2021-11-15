@@ -9,10 +9,9 @@ mod stats;
 mod trait_object;
 pub mod type_tag;
 
-
 pub mod __reexport {
-    pub use serde;
     pub use ctor;
+    pub use serde;
 }
 
 #[macro_use]
@@ -29,7 +28,10 @@ use core::{
     time::Duration,
 };
 use smallvec::SmallVec;
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 
 use builder::BusBuilder;
@@ -39,6 +41,7 @@ use stats::Stats;
 
 // public
 pub use builder::Module;
+pub use ctor;
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 pub use handler::*;
 pub use receiver::{
@@ -46,8 +49,7 @@ pub use receiver::{
     SendUntypedReceiver, TypeTagAccept,
 };
 pub use relay::Relay;
-pub use ctor;
-pub use type_tag::{register_shared_message, deserialize_shared_message};
+pub use type_tag::{deserialize_shared_message, register_shared_message};
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
 type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
@@ -77,26 +79,28 @@ pub struct BusInner {
 }
 
 impl BusInner {
-    pub(crate) fn new(
-        receivers: HashSet<Receiver>,
-    ) -> Self {
+    pub(crate) fn new(receivers: HashSet<Receiver>) -> Self {
         let mut lookup = HashMap::new();
         for recv in receivers.iter() {
             for (msg, resp) in recv.iter_types() {
-                lookup.entry((msg.clone(), None, None))
+                lookup
+                    .entry((msg.clone(), None, None))
                     .or_insert_with(HashSet::new)
                     .insert(recv.clone());
 
                 if let Some((resp, err)) = resp {
-                    lookup.entry((msg.clone(), Some(resp.clone()), None))
+                    lookup
+                        .entry((msg.clone(), Some(resp.clone()), None))
                         .or_insert_with(HashSet::new)
                         .insert(recv.clone());
 
-                    lookup.entry((msg.clone(), None, Some(err.clone())))
+                    lookup
+                        .entry((msg.clone(), None, Some(err.clone())))
                         .or_insert_with(HashSet::new)
                         .insert(recv.clone());
 
-                    lookup.entry((msg, Some(resp), Some(err)))
+                    lookup
+                        .entry((msg, Some(resp), Some(err)))
                         .or_insert_with(HashSet::new)
                         .insert(recv.clone());
                 }
@@ -157,7 +161,7 @@ impl Bus {
         }
     }
 
-    pub async fn flush(&self) {
+    pub async fn flush_all(&self) {
         let _handle = self.inner.maintain.lock().await;
         let fuse_count = 32i32;
         let mut breaked = false;
@@ -189,7 +193,80 @@ impl Bus {
         }
     }
 
-    pub async fn sync(&self) {
+    pub async fn flush<M: Message>(&self) {
+        let _handle = self.inner.maintain.lock().await;
+        let fuse_count = 32i32;
+        let mut breaked = false;
+        let mut iters = 0usize;
+
+        for _ in 0..fuse_count {
+            let receivers =
+                self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
+            iters += 1;
+            let mut flushed = false;
+            for r in receivers {
+                if r.need_flush() {
+                    flushed = true;
+
+                    r.flush(self).await;
+                }
+            }
+
+            if !flushed {
+                breaked = true;
+                break;
+            }
+        }
+
+        if !breaked {
+            warn!(
+                "!!! WARNING: unable to reach equilibrium in {} iterations !!!",
+                fuse_count
+            );
+        } else {
+            info!("flushed in {} iterations !!!", iters);
+        }
+    }
+
+    pub async fn flush2<M1: Message, M2: Message>(&self) {
+        let _handle = self.inner.maintain.lock().await;
+        let fuse_count = 32i32;
+        let mut breaked = false;
+        let mut iters = 0usize;
+        for _ in 0..fuse_count {
+            let receivers1 =
+                self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
+
+            let receivers2 =
+                self.select_receivers(M2::type_tag_(), Default::default(), None, None, false);
+
+            iters += 1;
+            let mut flushed = false;
+            for r in receivers1.chain(receivers2) {
+                if r.need_flush() {
+                    flushed = true;
+
+                    r.flush(self).await;
+                }
+            }
+
+            if !flushed {
+                breaked = true;
+                break;
+            }
+        }
+
+        if !breaked {
+            warn!(
+                "!!! WARNING: unable to reach equilibrium in {} iterations !!!",
+                fuse_count
+            );
+        } else {
+            info!("flushed in {} iterations !!!", iters);
+        }
+    }
+
+    pub async fn sync_all(&self) {
         let _handle = self.inner.maintain.lock().await;
 
         for r in self.inner.receivers.iter() {
@@ -197,12 +274,45 @@ impl Bus {
         }
     }
 
-    #[inline]
-    pub async fn flush_and_sync(&self) {
-        self.flush().await;
-        self.sync().await;
+    pub async fn sync<M: Message>(&self) {
+        let _handle = self.inner.maintain.lock().await;
+        let receivers =
+            self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
+
+        for r in receivers {
+            r.sync(self).await;
+        }
     }
 
+    pub async fn sync2<M1: Message, M2: Message>(&self) {
+        let _handle = self.inner.maintain.lock().await;
+
+        let receivers1 =
+            self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
+
+        let receivers2 =
+            self.select_receivers(M2::type_tag_(), Default::default(), None, None, false);
+
+        for r in receivers1.chain(receivers2) {
+            r.sync(self).await;
+        }
+    }
+
+    #[inline]
+    pub async fn flush_and_sync_all(&self) {
+        self.flush_all().await;
+        self.sync_all().await;
+    }
+    #[inline]
+    pub async fn flush_and_sync<M: Message>(&self) {
+        self.flush::<M>().await;
+        self.sync::<M>().await;
+    }
+    #[inline]
+    pub async fn flush_and_sync2<M1: Message, M2: Message>(&self) {
+        self.flush2::<M1, M2>().await;
+        self.sync2::<M1, M2>().await;
+    }
     fn try_reserve(&self, tt: &TypeTag, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
 
@@ -362,8 +472,11 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None))
-            .and_then(|rs| rs.first()) 
+        if let Some(rs) = self
+            .inner
+            .lookup
+            .get(&(msg.type_tag(), None, None))
+            .and_then(|rs| rs.first())
         {
             let permits = if let Some(x) = rs.try_reserve(&tt) {
                 x
@@ -385,8 +498,11 @@ impl Bus {
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None))
-            .and_then(|rs| rs.first()) 
+        if let Some(rs) = self
+            .inner
+            .lookup
+            .get(&(msg.type_tag(), None, None))
+            .and_then(|rs| rs.first())
         {
             Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await)?)
         } else {
@@ -593,11 +709,14 @@ impl Bus {
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(rs) = self.inner.lookup.get(&(tt.clone(), None, None))
-        .and_then(|rs| rs.first()) {
-            
+        if let Some(rs) = self
+            .inner
+            .lookup
+            .get(&(tt.clone(), None, None))
+            .and_then(|rs| rs.first())
+        {
             let msg = deserialize_shared_message(tt.clone(), de)?;
-            
+
             Ok(rs.send_boxed(self, mid, msg.upcast_box(), false, rs.reserve(&tt).await)?)
         } else {
             Err(Error::NoReceivers)
@@ -635,10 +754,7 @@ impl Bus {
     }
 
     pub fn stats(&self) -> impl Iterator<Item = Stats> + '_ {
-        self.inner
-            .receivers
-            .iter()
-            .map(|x| x.stats())
+        self.inner.receivers.iter().map(|x| x.stats())
     }
 
     #[inline]
@@ -650,14 +766,16 @@ impl Bus {
         eid: Option<TypeTag>,
         is_req: bool,
     ) -> impl Iterator<Item = &Receiver> + '_ {
-       self.inner.lookup.get(&(tid.clone(), rid.clone(), eid.clone()))
+        self.inner
+            .lookup
+            .get(&(tid.clone(), rid.clone(), eid.clone()))
             .into_iter()
             .flatten()
             .filter(move |r| r.accept(is_req, &tid, rid.as_ref(), eid.as_ref()))
             .filter(move |r| match options {
                 SendOptions::Except(id) => id != r.id(),
                 SendOptions::Direct(id) => id == r.id(),
-                _ => true
+                _ => true,
             })
     }
 }

@@ -113,7 +113,7 @@ async fn test_sync() {
 
     println!("sent");
 
-    b.flush().await;
+    b.flush_all().await;
 
     println!("flushed");
 

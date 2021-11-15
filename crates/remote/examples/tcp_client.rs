@@ -46,7 +46,7 @@ async fn main() {
 
     println!("resp {:?}", resp);
 
-    b.flush().await;
+    b.flush_all().await;
     b.close().await;
     poller.await;
 }

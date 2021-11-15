@@ -190,7 +190,7 @@ async fn main() {
     b.send(MsgF32(0f32)).await.unwrap();
     println!("flush");
 
-    b.flush().await;
+    b.flush_all().await;
 
     println!("sending boxed variant");
 
@@ -199,7 +199,7 @@ async fn main() {
         .unwrap();
 
     println!("flush");
-    b.flush().await;
+    b.flush_all().await;
 
     println!("close");
     b.close().await;

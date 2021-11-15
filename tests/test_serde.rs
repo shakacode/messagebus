@@ -79,7 +79,7 @@ async fn test() {
     assert_eq!(val.type_tag(), TypeTag::from("MsgResponse"));
     assert_eq!(buff.as_slice(), br#"{"test1":24,"test2":"Hello, World!"}"#);
 
-    b.flush().await;
+    b.flush_all().await;
     b.close().await;
     poller.await;
 }

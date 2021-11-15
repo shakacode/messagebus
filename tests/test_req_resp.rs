@@ -240,7 +240,7 @@ async fn test() {
 
     assert!((val - 1633.0f64).abs() < f64::EPSILON);
 
-    b.flush().await;
+    b.flush_all().await;
     b.close().await;
     poller.await;
 }

@@ -2,7 +2,12 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
-use messagebus::{Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUntypedReceiver, SendUntypedReceiver, TypeTag, TypeTagAccept, TypeTagged, derive::{Error as MbError, Message}, error::{self, GenericError}, receivers};
+use messagebus::{
+    derive::{Error as MbError, Message},
+    error::{self, GenericError},
+    receivers, Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUntypedReceiver,
+    SendUntypedReceiver, TypeTag, TypeTagAccept, TypeTagged,
+};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -60,32 +65,29 @@ impl TypeTagAccept for TestRelay {
         if msg.as_ref() == Msg::<i16>::type_tag_().as_ref() {
             if let Some(resp) = resp {
                 if resp.as_ref() == Msg::<u8>::type_tag_().as_ref() {
-                    return true
+                    return true;
                 }
             } else {
-                return true
-            }            
+                return true;
+            }
         }
 
         if msg.as_ref() == Msg::<i32>::type_tag_().as_ref() {
             if let Some(resp) = resp {
                 if resp.as_ref() == Msg::<u64>::type_tag_().as_ref() {
-                    return true
+                    return true;
                 }
             } else {
-                return true
-            }            
+                return true;
+            }
         }
 
         false
     }
 
-    fn accept_msg(
-        &self,
-        msg: &messagebus::TypeTag,
-    ) -> bool {
+    fn accept_msg(&self, msg: &messagebus::TypeTag) -> bool {
         if msg.as_ref() == Msg::<i32>::type_tag_().as_ref() {
-            return true
+            return true;
         }
 
         false
@@ -94,8 +96,14 @@ impl TypeTagAccept for TestRelay {
     fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)>> {
         Box::new(
             std::iter::once((Msg::<i32>::type_tag_(), None))
-                .chain(std::iter::once((Msg::<i32>::type_tag_(), Some((Msg::<u64>::type_tag_(), GenericError::type_tag_())))))
-                .chain(std::iter::once((Msg::<i16>::type_tag_(), Some((Msg::<u8>::type_tag_(), GenericError::type_tag_())))))
+                .chain(std::iter::once((
+                    Msg::<i32>::type_tag_(),
+                    Some((Msg::<u64>::type_tag_(), GenericError::type_tag_())),
+                )))
+                .chain(std::iter::once((
+                    Msg::<i16>::type_tag_(),
+                    Some((Msg::<u8>::type_tag_(), GenericError::type_tag_())),
+                ))),
         )
     }
 }
@@ -190,7 +198,7 @@ async fn test_relay() {
     assert_eq!(res1.0, 9u8);
     assert_eq!(res2.0, 22u64);
 
-    b.flush().await;
+    b.flush_all().await;
     b.close().await;
     poller.await;
 }

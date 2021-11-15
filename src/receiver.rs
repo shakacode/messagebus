@@ -15,9 +15,9 @@ use core::{
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicI64, Ordering},
 };
-use std::hash::{Hash, Hasher};
 use futures::{pin_mut, Stream};
 use futures::{Future, FutureExt, StreamExt};
+use std::hash::{Hash, Hasher};
 use std::{borrow::Cow, sync::Arc};
 use tokio::sync::{oneshot, Notify};
 
@@ -251,7 +251,7 @@ where
                                     if self.context.resend_unused_resp {
                                         // TODO
                                     }
-                                },
+                                }
 
                                 Ok(None) => (),
                                 Err(err) => error!("Response Error: {}", err),
@@ -350,8 +350,11 @@ where
     E: StdSyncSendError,
     S: ReciveTypedReceiver<R, E> + Send + Sync + 'static,
 {
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> { 
-        Box::new(std::iter::once((M::type_tag_(), Some((R::type_tag_(), E::type_tag_())))))
+    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+        Box::new(std::iter::once((
+            M::type_tag_(),
+            Some((R::type_tag_(), E::type_tag_())),
+        )))
     }
 
     fn accept_req(&self, req: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
@@ -411,7 +414,7 @@ where
             .map_err(|_| Error::MessageCastError)?;
 
         SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
-            .map_err(|err| err.map_msg(|m|m.into_boxed()))
+            .map_err(|err| err.map_msg(|m| m.into_boxed()))
     }
 
     fn stats(&self) -> Stats {
@@ -794,7 +797,13 @@ impl Receiver {
     }
 
     #[inline]
-    pub fn accept(&self, is_req: bool, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+    pub fn accept(
+        &self,
+        is_req: bool,
+        msg: &TypeTag,
+        resp: Option<&TypeTag>,
+        err: Option<&TypeTag>,
+    ) -> bool {
         if is_req {
             self.inner.accept_req(msg, resp, err)
         } else {

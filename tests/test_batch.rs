@@ -98,7 +98,7 @@ async fn test_batch() {
     }
 
     println!("flush");
-    b.flush().await;
+    b.flush_all().await;
 
     let mut lock = batches.lock();
     lock.sort_by(|a, b| a[0].cmp(&b[0]));

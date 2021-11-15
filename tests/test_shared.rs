@@ -82,7 +82,7 @@ async fn test_shared() {
     b.send_one(Msg).await.unwrap();
     b.send_one(SharedMsg(0.0f32)).await.unwrap();
 
-    b.flush().await;
+    b.flush_all().await;
     b.close().await;
     poller.await;
 

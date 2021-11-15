@@ -45,7 +45,7 @@ async fn main() {
     // b.
 
     println!("flush");
-    b.flush().await;
+    b.flush_all().await;
 
     println!("close");
     b.close().await;

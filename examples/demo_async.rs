@@ -187,7 +187,7 @@ async fn main() {
     b.send(MsgF32(0.)).await.unwrap();
 
     println!("flush");
-    b.flush().await;
+    b.flush_all().await;
 
     println!("close");
     b.close().await;

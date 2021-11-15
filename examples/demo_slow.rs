@@ -80,7 +80,7 @@ async fn main() {
     b.send(MsgU32(32u32)).await.unwrap();
 
     println!("flush");
-    b.flush().await;
+    b.flush_all().await;
 
     println!("close");
     b.close().await;

@@ -1,6 +1,6 @@
 [package]
 name = "messagebus"
-version = "0.9.10"
+version = "0.9.11"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
@@ -11,10 +11,7 @@ exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2018"
 
 [workspace]
-members = [
-    "crates/remote",
-    "crates/derive",
-]
+members = ["crates/remote", "crates/derive"]
 
 [dependencies]
 messagebus_derive = "0.2.5"
@@ -37,4 +34,10 @@ ctor = "0.1.21"
 anyhow = "1.0"
 env_logger = "0.9"
 serde_json = "1.0"
-tokio = { version = "1", features = ["macros", "parking_lot", "rt-multi-thread", "io-util", "sync"] }
+tokio = { version = "1", features = [
+  "macros",
+  "parking_lot",
+  "rt-multi-thread",
+  "io-util",
+  "sync",
+] }

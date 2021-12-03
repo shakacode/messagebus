@@ -1,14 +1,26 @@
 use core::{marker::PhantomData, pin::Pin};
 
-use std::{collections::HashSet, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use futures::{Future, FutureExt};
 use tokio::sync::Mutex;
 
-use crate::{AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler, AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler, Message, Relay, SynchronizedHandler, Untyped, error::StdSyncSendError, receiver::{
+use crate::{
+    error::StdSyncSendError,
+    receiver::{
         BusPollerCallback, Receiver, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
-    }, receivers};
+    },
+    receivers, AsyncBatchHandler, AsyncBatchSynchronizedHandler, AsyncHandler,
+    AsyncSynchronizedHandler, BatchHandler, BatchSynchronizedHandler, Bus, BusInner, Handler,
+    Message, Relay, SynchronizedHandler, Untyped,
+};
 
 static RECEVIER_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -70,7 +82,12 @@ impl<T, F, P, B> RegisterEntry<UnsyncEntry, T, F, P, B> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, true, inner);
+        let receiver = Receiver::new::<M, R, E, S>(
+            RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed),
+            queue,
+            true,
+            inner,
+        );
         let poller2 = receiver.start_polling();
         self.receivers.insert(receiver);
         self.pollers.push(poller(self.item.clone()));
@@ -139,7 +156,12 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
     {
         let (inner, poller) = S::build(cfg);
 
-        let receiver = Receiver::new::<M, R, E, S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), queue, true, inner);
+        let receiver = Receiver::new::<M, R, E, S>(
+            RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed),
+            queue,
+            true,
+            inner,
+        );
         let poller2 = receiver.start_polling();
         self.receivers.insert(receiver);
         self.pollers.push(poller(self.item.clone()));
@@ -213,7 +235,8 @@ impl Module {
     }
 
     pub fn register_relay<S: Relay + Send + Sync + 'static>(mut self, inner: S) -> Self {
-        let receiver = Receiver::new_relay::<S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), inner);
+        let receiver =
+            Receiver::new_relay::<S>(RECEVIER_ID_SEQ.fetch_add(1, Ordering::Relaxed), inner);
         self.pollings.push(receiver.start_polling());
         self.receivers.insert(receiver);
 
@@ -233,7 +256,9 @@ impl Module {
         RegisterEntry {
             item: Arc::new(item) as Untyped,
             payload: self,
-            builder: |p: &mut Self, r| { p.receivers.insert(r); },
+            builder: |p: &mut Self, r| {
+                p.receivers.insert(r);
+            },
             poller: |p: &mut Self, poller| p.pollings.push(poller),
             receivers: HashSet::new(),
             pollers: Vec::new(),
@@ -256,7 +281,9 @@ impl Module {
         RegisterEntry {
             item,
             payload: self,
-            builder: |p: &mut Self, r| { p.receivers.insert(r); },
+            builder: |p: &mut Self, r| {
+                p.receivers.insert(r);
+            },
             poller: |p: &mut Self, poller| p.pollings.push(poller),
             receivers: HashSet::new(),
             pollers: Vec::new(),
@@ -302,7 +329,9 @@ impl BusBuilder {
         RegisterEntry {
             item: Arc::new(item) as Untyped,
             payload: self,
-            builder: |p: &mut Self, r| {  p.inner.receivers.insert(r); },
+            builder: |p: &mut Self, r| {
+                p.inner.receivers.insert(r);
+            },
             poller: |p: &mut Self, poller| p.inner.pollings.push(poller),
             receivers: HashSet::new(),
             pollers: Vec::new(),
@@ -323,7 +352,9 @@ impl BusBuilder {
         RegisterEntry {
             item: Arc::new(Mutex::new(item)) as Untyped,
             payload: self,
-            builder: |p: &mut Self, r| { p.inner.receivers.insert(r); },
+            builder: |p: &mut Self, r| {
+                p.inner.receivers.insert(r);
+            },
             poller: |p: &mut Self, poller| p.inner.pollings.push(poller),
             receivers: HashSet::new(),
             pollers: Vec::new(),

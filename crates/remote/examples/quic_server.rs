@@ -1,9 +1,12 @@
-use messagebus::{AsyncHandler, Bus, Message, TypeTagged, derive::{Message, Error as MbError}, error::{self, GenericError}};
-use messagebus_remote::relays::{QuicServerRelay};
-use serde_derive::{Serialize, Deserialize};
 use async_trait::async_trait;
+use messagebus::{
+    derive::{Error as MbError, Message},
+    error::{self, GenericError},
+    AsyncHandler, Bus, Message, TypeTagged,
+};
+use messagebus_remote::relays::QuicServerRelay;
+use serde_derive::{Deserialize, Serialize};
 use thiserror::Error;
-
 
 #[derive(Debug, Error, MbError)]
 enum Error {
@@ -17,13 +20,12 @@ impl<M: Message> From<error::Error<M>> for Error {
     }
 }
 
-
 #[derive(Serialize, Deserialize, Debug, Clone, Message)]
 #[namespace("example")]
 #[message(shared, clone)]
 pub struct Req {
     data: i32,
-    text: String
+    text: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Message)]
@@ -31,9 +33,8 @@ pub struct Req {
 #[message(shared, clone)]
 pub struct Resp {
     data: i32,
-    text: String
+    text: String,
 }
-
 
 struct TmpReceiver;
 
@@ -56,26 +57,29 @@ impl AsyncHandler<Req> for TmpReceiver {
     }
 }
 
-
 #[tokio::main]
 async fn main() {
     let relay = QuicServerRelay::new(
         "./examples/cert.key",
-        "./examples/cert.der", 
-        "0.0.0.0:8083".parse().unwrap(), 
-        (vec![],
-        vec![
-            (Req::type_tag_(), Some((Resp::type_tag_(), GenericError::type_tag_())))
-        ])
-    ).unwrap();
+        "./examples/cert.der",
+        "0.0.0.0:8083".parse().unwrap(),
+        (
+            vec![],
+            vec![(
+                Req::type_tag_(),
+                Some((Resp::type_tag_(), GenericError::type_tag_())),
+            )],
+        ),
+    )
+    .unwrap();
 
     let (b, poller) = Bus::build()
         .register_relay(relay)
         .register(TmpReceiver)
-            .subscribe_async::<Req>(8, Default::default())
+        .subscribe_async::<Req>(8, Default::default())
         .done()
         .build();
-    
+
     b.ready().await;
 
     println!("ready");

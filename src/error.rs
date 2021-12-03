@@ -58,8 +58,8 @@ impl TypeTagged for GenericError {
     fn type_name(&self) -> TypeTag {
         type_name::<GenericError>().into()
     }
-    fn type_layout(&self) -> std::alloc::Layout { 
-        std::alloc::Layout::for_value(self) 
+    fn type_layout(&self) -> std::alloc::Layout {
+        std::alloc::Layout::for_value(self)
     }
 }
 

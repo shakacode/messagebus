@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 use crate::envelop::IntoSharedMessage;
 use crate::error::Error;
@@ -35,18 +35,16 @@ pub struct TypeRegistry {
 impl TypeRegistry {
     pub const fn new() -> Self {
         Self {
-            message_types: parking_lot::const_rwlock(None)
+            message_types: parking_lot::const_rwlock(None),
         }
-    } 
+    }
 
     pub fn deserialize(
         &self,
         tt: TypeTag,
         de: &mut dyn erased_serde::Deserializer<'_>,
     ) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
-        let guard = self
-            .message_types
-            .read();
+        let guard = self.message_types.read();
         let md = guard
             .as_ref()
             .ok_or_else(|| Error::TypeTagNotRegistered(tt.clone()))?
@@ -59,8 +57,9 @@ impl TypeRegistry {
 
     pub fn register<M: Message + serde::Serialize + serde::de::DeserializeOwned>(&self) {
         println!("insert {}", M::type_tag_());
-        
-        self.message_types.write()
+
+        self.message_types
+            .write()
             .get_or_insert_with(HashMap::new)
             .insert(
                 M::type_tag_(),
@@ -72,7 +71,10 @@ impl TypeRegistry {
 }
 
 #[inline]
-pub fn deserialize_shared_message(tt: TypeTag, de: &mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
+pub fn deserialize_shared_message(
+    tt: TypeTag,
+    de: &mut dyn erased_serde::Deserializer<'_>,
+) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
     TYPE_REGISTRY.deserialize(tt, de)
 }
 

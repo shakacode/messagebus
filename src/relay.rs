@@ -5,7 +5,7 @@ use crate::{
         SendUntypedReceiver, TypeTagAccept,
     },
     stats::Stats,
-    Bus, Event, Message, Permit, ReciveUntypedReceiver, TypeTag,
+    Bus, Event, Message, Permit, ReciveUntypedReceiver, TypeTag, TypeTagAcceptItem,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use dashmap::DashMap;
@@ -27,11 +27,13 @@ pub(crate) struct RelayContext {
     receivers: DashMap<TypeTag, Arc<RelayReceiverContext>>,
     need_flush: AtomicBool,
     ready_flag: AtomicBool,
+    idling_flag: AtomicBool,
     init_sent: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
     ready: Notify,
+    idle: Notify,
 }
 
 pub struct RelayReceiverContext {
@@ -74,11 +76,13 @@ impl<S> RelayWrapper<S> {
                 receivers: DashMap::new(),
                 need_flush: AtomicBool::new(false),
                 ready_flag: AtomicBool::new(false),
+                idling_flag: AtomicBool::new(true),
                 init_sent: AtomicBool::new(false),
                 flushed: Notify::new(),
                 synchronized: Notify::new(),
                 closed: Notify::new(),
                 ready: Notify::new(),
+                idle: Notify::new(),
             }),
             waiters: sharded_slab::Slab::new_with_config::<SlabCfg>(),
         }
@@ -89,7 +93,7 @@ impl<S> TypeTagAccept for RelayWrapper<S>
 where
     S: Relay + Send + Sync + 'static,
 {
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+    fn iter_types(&self) -> Box<dyn Iterator<Item = TypeTagAcceptItem> + '_> {
         self.inner.iter_types()
     }
 
@@ -106,10 +110,6 @@ impl<S> ReceiverTrait for RelayWrapper<S>
 where
     S: Relay + Send + Sync + 'static,
 {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
@@ -117,8 +117,12 @@ where
     fn typed(&self) -> Option<AnyReceiver<'_>> {
         None
     }
+
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>> {
         None
+    }
+    fn id(&self) -> u64 {
+        self.id
     }
 
     fn send_boxed(
@@ -131,12 +135,14 @@ where
         self.inner.send_msg(mid, boxed_msg, req, bus)
     }
 
-    fn need_flush(&self) -> bool {
-        self.context.need_flush.load(Ordering::SeqCst)
-    }
-
-    fn set_need_flush(&self) {
-        self.context.need_flush.store(true, Ordering::SeqCst);
+    fn add_response_listener(
+        &self,
+        listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .waiters
+            .insert(listener)
+            .ok_or(Error::AddListenerError)? as _)
     }
 
     fn stats(&self) -> Stats {
@@ -159,14 +165,32 @@ where
         &self.context.flushed
     }
 
-    fn add_response_listener(
-        &self,
-        listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
-    ) -> Result<u64, Error> {
-        Ok(self
-            .waiters
-            .insert(listener)
-            .ok_or(Error::AddListenerError)? as _)
+    fn ready_notify(&self) -> &Notify {
+        &self.context.ready
+    }
+
+    fn idle_notify(&self) -> &Notify {
+        &self.context.idle
+    }
+
+    fn is_init_sent(&self) -> bool {
+        self.context.init_sent.load(Ordering::SeqCst)
+    }
+
+    fn is_ready(&self) -> bool {
+        self.context.ready_flag.load(Ordering::SeqCst)
+    }
+
+    fn is_idling(&self) -> bool {
+        self.context.idling_flag.load(Ordering::SeqCst)
+    }
+
+    fn need_flush(&self) -> bool {
+        self.context.need_flush.load(Ordering::SeqCst)
+    }
+
+    fn set_need_flush(&self) {
+        self.context.need_flush.store(true, Ordering::SeqCst);
     }
 
     fn try_reserve(&self, tt: &TypeTag) -> Option<Permit> {
@@ -211,18 +235,6 @@ where
         self.context.receivers.get(tt).unwrap().response.clone()
     }
 
-    fn ready_notify(&self) -> &Notify {
-        &self.context.ready
-    }
-
-    fn is_ready(&self) -> bool {
-        self.context.ready_flag.load(Ordering::SeqCst)
-    }
-
-    fn is_init_sent(&self) -> bool {
-        self.context.init_sent.load(Ordering::SeqCst)
-    }
-
     fn increment_processing(&self, tt: &TypeTag) {
         self.context
             .receivers
@@ -264,7 +276,7 @@ where
                         }
                         Event::Flushed => {
                             self.context.need_flush.store(false, Ordering::SeqCst);
-                            self.context.flushed.notify_waiters()
+                            self.context.flushed.notify_one()
                         }
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {
@@ -293,13 +305,21 @@ where
                         Event::BatchComplete(tt, n) => {
                             if let Some(ctx) = self.context.receivers.get(&tt) {
                                 ctx.processing.fetch_sub(n, Ordering::SeqCst);
-                                
+
                                 for _ in 0..n {
                                     ctx.response.notify_one();
                                 }
                             }
                         }
 
+                        Event::IdleBegin => {
+                            self.context.idling_flag.store(true, Ordering::SeqCst);
+                            self.context.idle.notify_waiters();
+                        }
+
+                        Event::IdleEnd => {
+                            self.context.idling_flag.store(false, Ordering::SeqCst);
+                        }
                         _ => unimplemented!(),
                     }
                 }

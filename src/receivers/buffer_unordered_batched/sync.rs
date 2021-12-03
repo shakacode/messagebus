@@ -130,7 +130,9 @@ where
 
                 Ok(())
             }
-            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(Error::send_closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => {
+                Err(Error::send_closed(msg))
+            }
             _ => unimplemented!(),
         }
     }

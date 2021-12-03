@@ -4,7 +4,7 @@ extern crate proc_macro;
 
 // use proc_macro::{TokenStream};
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{ToTokens, quote};
+use quote::{quote, ToTokens};
 use std::collections::hash_map;
 use std::fmt::Write;
 use std::hash::Hasher;
@@ -244,19 +244,18 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
 
                 if tags.has_shared {
                     let bound: syn::TypeParamBound =
-                    syn::parse_str("messagebus::__reexport::serde::Serialize").unwrap();
+                        syn::parse_str("messagebus::__reexport::serde::Serialize").unwrap();
 
                     params.bounds.push(bound);
 
                     let bound: syn::TypeParamBound =
-                    syn::parse_str("messagebus::__reexport::serde::Deserialize<'de>").unwrap();
+                        syn::parse_str("messagebus::__reexport::serde::Deserialize<'de>").unwrap();
 
                     params.bounds.push(bound);
                 }
 
                 if tags.has_clone {
-                    let bound: syn::TypeParamBound =
-                    syn::parse_str("core::clone::Clone").unwrap();
+                    let bound: syn::TypeParamBound = syn::parse_str("core::clone::Clone").unwrap();
 
                     params.bounds.push(bound);
                 }
@@ -269,7 +268,10 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     let shared_part = shared_part(&ast, tags.has_shared);
     let clone_part = clone_part(&ast, tags.has_clone);
 
-    let init = Ident::new(&format!("__init_{}", hash(ast.clone().into_token_stream())), Span::call_site());
+    let init = Ident::new(
+        &format!("__init_{}", hash(ast.clone().into_token_stream())),
+        Span::call_site(),
+    );
     let init_impl = if tags.has_shared && impl_generics.params.is_empty() {
         quote! {
             #[allow(non_upper_case_globals)]
@@ -279,11 +281,15 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
             }
         }
     } else {
-        quote!{}
+        quote! {}
     };
 
     if !impl_generics.params.is_empty() && tags.has_shared {
-        impl_generics.params.push(syn::GenericParam::Lifetime(syn::LifetimeDef::new(syn::Lifetime::new("'de", Span::call_site()))))
+        impl_generics
+            .params
+            .push(syn::GenericParam::Lifetime(syn::LifetimeDef::new(
+                syn::Lifetime::new("'de", Span::call_site()),
+            )))
     }
 
     let tokens = quote! {

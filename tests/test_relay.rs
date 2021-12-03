@@ -6,7 +6,7 @@ use messagebus::{
     derive::{Error as MbError, Message},
     error::{self, GenericError},
     receivers, Action, AsyncHandler, Bus, Event, Message, MessageBounds, ReciveUntypedReceiver,
-    SendUntypedReceiver, TypeTag, TypeTagAccept, TypeTagged,
+    SendUntypedReceiver, TypeTagAccept, TypeTagAcceptItem, TypeTagged,
 };
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -93,7 +93,7 @@ impl TypeTagAccept for TestRelay {
         false
     }
 
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)>> {
+    fn iter_types(&self) -> Box<dyn Iterator<Item = TypeTagAcceptItem>> {
         Box::new(
             std::iter::once((Msg::<i32>::type_tag_(), None))
                 .chain(std::iter::once((

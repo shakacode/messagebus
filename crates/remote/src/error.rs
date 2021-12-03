@@ -36,7 +36,7 @@ pub enum Error {
 
     #[error("ProtocolParseError {0}")]
     ProtocolParseError(String),
-    
+
     #[error("UnknownCodec")]
     UnknownCodec,
 

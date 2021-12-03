@@ -129,7 +129,7 @@ pub enum ProtocolItem {
     Nop,
     Event(Event<Box<dyn SharedMessage>, messagebus::error::GenericError>),
     Action(Action),
-    Send(u64, Box<dyn SharedMessage>, bool)
+    Send(u64, Box<dyn SharedMessage>, bool),
 }
 
 impl From<Action> for ProtocolItem {
@@ -154,16 +154,20 @@ impl ProtocolItem {
     pub fn unwrap_send(self) -> Result<(u64, Box<dyn SharedMessage>, bool), ProtocolItem> {
         match self {
             ProtocolItem::Send(a, b, c) => Ok((a, b, c)),
-            other => Err(other)
+            other => Err(other),
         }
     }
 
-    pub fn serialize<'a>(&self, mut body_type: BodyType, body_buff: &'a mut Vec<u8>) -> Result<ProtocolPacket<'a>, crate::error::Error> {
+    pub fn serialize<'a>(
+        &self,
+        mut body_type: BodyType,
+        body_buff: &'a mut Vec<u8>,
+    ) -> Result<ProtocolPacket<'a>, crate::error::Error> {
         let mut argument = 0;
         let mut type_tag = None;
         let mut body = None;
         let mut flags = ProtocolHeaderFlags::empty();
-        
+
         let kind = match self {
             ProtocolItem::Nop => ProtocolHeaderActionKind::Nop,
             ProtocolItem::Action(action) => match action {
@@ -172,9 +176,10 @@ impl ProtocolItem {
                 Action::Init(..) => ProtocolHeaderActionKind::Initialize,
                 Action::Sync => ProtocolHeaderActionKind::Synchronize,
                 _ => unimplemented!(),
-            }
+            },
             ProtocolItem::Send(mid, msg, req) => {
-                let msg = msg.as_shared_ref()
+                let msg = msg
+                    .as_shared_ref()
                     .ok_or(crate::error::Error::UnknownCodec)?;
 
                 argument = *mid;
@@ -185,7 +190,7 @@ impl ProtocolItem {
                 body = Some(generic_serialize(body_type, &*msg, body_buff)?);
 
                 ProtocolHeaderActionKind::Send
-            },
+            }
             ProtocolItem::Event(ev) => match ev {
                 Event::Response(mid, res) => {
                     argument = *mid;
@@ -195,16 +200,17 @@ impl ProtocolItem {
 
                     match res {
                         Ok(msg) => {
-                            let msg = msg.as_shared_ref()
+                            let msg = msg
+                                .as_shared_ref()
                                 .ok_or(crate::error::Error::UnknownCodec)?;
-    
+
                             type_tag = Some(msg.type_tag());
                             body = Some(generic_serialize(body_type, &*msg, body_buff)?);
                         }
 
                         Err(err) => {
                             flags.set(ProtocolHeaderFlags::ERROR, true);
-                            
+
                             type_tag = Some("GenericError".into());
                             body_type = BodyType::Utf8;
                             body = Some(format!("{}", err).into_bytes().into());
@@ -212,7 +218,7 @@ impl ProtocolItem {
                     }
 
                     ProtocolHeaderActionKind::Response
-                },
+                }
                 Event::Error(err) => {
                     flags.set(ProtocolHeaderFlags::ERROR, true);
                     flags.set(ProtocolHeaderFlags::BODY, true);
@@ -230,7 +236,7 @@ impl ProtocolItem {
                     flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
                     flags.set(ProtocolHeaderFlags::ARGUMENT, true);
                     ProtocolHeaderActionKind::BatchComplete
-                },
+                }
                 Event::Synchronized(res) => {
                     match res {
                         Ok(_) => {}
@@ -238,31 +244,31 @@ impl ProtocolItem {
                             flags.set(ProtocolHeaderFlags::BODY, true);
                             flags.set(ProtocolHeaderFlags::ERROR, true);
                             flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
-                            
+
                             type_tag = Some("GenericError".into());
                             body_type = BodyType::Utf8;
                             body = Some(format!("{}", err).into_bytes().into());
                         }
                     }
-                    ProtocolHeaderActionKind::Synchronized 
+                    ProtocolHeaderActionKind::Synchronized
                 }
                 Event::InitFailed(err) => {
                     flags.set(ProtocolHeaderFlags::BODY, true);
                     flags.set(ProtocolHeaderFlags::ERROR, true);
                     flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
-                    
+
                     type_tag = Some("GenericError".into());
                     body_type = BodyType::Utf8;
                     body = Some(format!("{}", err).into_bytes().into());
 
                     ProtocolHeaderActionKind::Ready
-                },
+                }
                 Event::Ready => ProtocolHeaderActionKind::Ready,
                 Event::Pause => ProtocolHeaderActionKind::Pause,
                 Event::Exited => ProtocolHeaderActionKind::Exited,
                 Event::Flushed => ProtocolHeaderActionKind::Flushed,
-                _ => unimplemented!()
-            }
+                _ => unimplemented!(),
+            },
         };
 
         Ok(ProtocolPacket {
@@ -273,11 +279,10 @@ impl ProtocolItem {
                 body_type,
                 argument,
             },
-            body
+            body,
         })
     }
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProtocolPacket<'a> {
@@ -286,12 +291,9 @@ pub struct ProtocolPacket<'a> {
 }
 
 impl<'a> ProtocolPacket<'a> {
-    pub fn deserialize(
-        self,
-        _bus: &Bus,
-    ) -> Result<ProtocolItem, crate::error::Error>
-    {
-        let type_tag: Option<TypeTag> = if self.header.flags.contains(ProtocolHeaderFlags::TYPE_TAG) {
+    pub fn deserialize(self, _bus: &Bus) -> Result<ProtocolItem, crate::error::Error> {
+        let type_tag: Option<TypeTag> = if self.header.flags.contains(ProtocolHeaderFlags::TYPE_TAG)
+        {
             self.header
                 .type_tag
                 .map(|x| String::from_utf8_lossy(x.as_ref()).to_string().into())
@@ -302,12 +304,17 @@ impl<'a> ProtocolPacket<'a> {
         let (body, error) = if self.header.flags.contains(ProtocolHeaderFlags::ERROR) {
             let error = messagebus::error::GenericError {
                 type_tag: type_tag.clone().unwrap(),
-                description: self.body.map(|x|String::from_utf8_lossy(x.as_ref()).to_string()).unwrap_or_default(),
+                description: self
+                    .body
+                    .map(|x| String::from_utf8_lossy(x.as_ref()).to_string())
+                    .unwrap_or_default(),
             };
 
             (None, Some(messagebus::error::Error::Other(error)))
         } else if self.header.flags.contains(ProtocolHeaderFlags::TT_AND_BODY) {
-            let body = self.body.ok_or_else(|| crate::error::Error::ProtocolParseError("No body".to_string()))?;
+            let body = self
+                .body
+                .ok_or_else(|| crate::error::Error::ProtocolParseError("No body".to_string()))?;
             let res = generic_deserialize(self.header.body_type, body.as_ref(), |de| {
                 messagebus::deserialize_shared_message(type_tag.clone().unwrap(), de)
                     .map_err(|x| x.map_msg(|_| ()))
@@ -329,43 +336,52 @@ impl<'a> ProtocolPacket<'a> {
 
         Ok(ProtocolItem::Event(match self.header.kind {
             ProtocolHeaderActionKind::Response => Event::Response(
-                argument
-                    .ok_or_else(|| crate::error::Error::ProtocolParseError("Event::Response expected argument".into()))?,
-                error
-                    .map(Err)
-                    .or_else(|| body.map(Ok))
-                    .ok_or_else(|| crate::error::Error::ProtocolParseError("Event::Response expected body".into()))?,
+                argument.ok_or_else(|| {
+                    crate::error::Error::ProtocolParseError(
+                        "Event::Response expected argument".into(),
+                    )
+                })?,
+                error.map(Err).or_else(|| body.map(Ok)).ok_or_else(|| {
+                    crate::error::Error::ProtocolParseError("Event::Response expected body".into())
+                })?,
             ),
             ProtocolHeaderActionKind::Synchronized => {
                 Event::Synchronized(error.map(Err).unwrap_or(Ok(())))
             }
-            ProtocolHeaderActionKind::Error => {
-                Event::Error(error.ok_or_else(|| crate::error::Error::ProtocolParseError("Event::Error expected body".into()))?)
+            ProtocolHeaderActionKind::Error => Event::Error(error.ok_or_else(|| {
+                crate::error::Error::ProtocolParseError("Event::Error expected body".into())
+            })?),
+            ProtocolHeaderActionKind::BatchComplete => {
+                Event::BatchComplete(type_tag.unwrap(), self.header.argument)
             }
-            ProtocolHeaderActionKind::BatchComplete => Event::BatchComplete(type_tag.unwrap(), self.header.argument),
             ProtocolHeaderActionKind::Flushed => Event::Flushed,
             ProtocolHeaderActionKind::Exited => Event::Exited,
             ProtocolHeaderActionKind::Ready => Event::Ready,
             ProtocolHeaderActionKind::Pause => Event::Pause,
 
-            other => return Ok(ProtocolItem::Action(match other {
-                ProtocolHeaderActionKind::Initialize => Action::Init(self.header.argument),
-                ProtocolHeaderActionKind::Close => Action::Close,
-                ProtocolHeaderActionKind::Flush => Action::Flush,
-                ProtocolHeaderActionKind::Synchronize => Action::Sync,
-                ProtocolHeaderActionKind::Send => {
-                    let req = argument.is_some();
-                    let mid = self.header.argument;
-                    let body = body.ok_or_else(|| crate::error::Error::ProtocolParseError(
-                        format!("Action::Send[{:?}] expected body", type_tag)
-                    ))?;
+            other => {
+                return Ok(ProtocolItem::Action(match other {
+                    ProtocolHeaderActionKind::Initialize => Action::Init(self.header.argument),
+                    ProtocolHeaderActionKind::Close => Action::Close,
+                    ProtocolHeaderActionKind::Flush => Action::Flush,
+                    ProtocolHeaderActionKind::Synchronize => Action::Sync,
+                    ProtocolHeaderActionKind::Send => {
+                        let req = argument.is_some();
+                        let mid = self.header.argument;
+                        let body = body.ok_or_else(|| {
+                            crate::error::Error::ProtocolParseError(format!(
+                                "Action::Send[{:?}] expected body",
+                                type_tag
+                            ))
+                        })?;
 
-                    return Ok(ProtocolItem::Send(mid, body, req));
-                },
-                ProtocolHeaderActionKind::Nop => return Ok(ProtocolItem::Nop),
+                        return Ok(ProtocolItem::Send(mid, body, req));
+                    }
+                    ProtocolHeaderActionKind::Nop => return Ok(ProtocolItem::Nop),
 
-                _ => unreachable!()
-            })),
+                    _ => unreachable!(),
+                }))
+            }
         }))
     }
 }
@@ -393,7 +409,11 @@ where
     }
 }
 
-fn generic_serialize<'a>(kind: BodyType, msg: &dyn SharedMessage, buffer: &'a mut Vec<u8>) -> Result<Cow<'a, [u8]>, crate::error::Error> {
+fn generic_serialize<'a>(
+    kind: BodyType,
+    msg: &dyn SharedMessage,
+    buffer: &'a mut Vec<u8>,
+) -> Result<Cow<'a, [u8]>, crate::error::Error> {
     match kind {
         BodyType::Cbor => {
             let mut cbor_se = serde_cbor::Serializer::new(&mut *buffer);
@@ -435,8 +455,7 @@ mod tests {
 
     #[test]
     fn test_proto_pack_event() {
-        let (bus, _) = Bus::build()
-            .build();
+        let (bus, _) = Bus::build().build();
 
         let pkt = ProtocolPacket {
             header: ProtocolHeader {
@@ -451,9 +470,9 @@ mod tests {
 
         let event = match pkt.deserialize(&bus).unwrap() {
             ProtocolItem::Event(ev) => ev,
-            _ => unreachable!()
+            _ => unreachable!(),
         };
-        
+
         assert!(matches!(event, Event::Response(..)));
 
         match event {
@@ -474,8 +493,7 @@ mod tests {
 
     #[test]
     fn test_proto_pack_event_error() {
-        let (bus, _) = Bus::build()
-            .build();
+        let (bus, _) = Bus::build().build();
 
         let pkt = ProtocolPacket {
             header: ProtocolHeader {
@@ -490,9 +508,9 @@ mod tests {
 
         let event = match pkt.deserialize(&bus).unwrap() {
             ProtocolItem::Event(ev) => ev,
-            _ => unreachable!()
+            _ => unreachable!(),
         };
-        
+
         assert!(matches!(event, Event::Response(..)));
 
         #[allow(clippy::unit_cmp)]
@@ -500,7 +518,7 @@ mod tests {
             Event::Response(mid, msg) => {
                 assert_eq!(mid, 222);
                 let msg = msg.unwrap_err();
-                
+
                 assert!(matches!(msg, messagebus::error::Error::Other(val) if (
                     assert_eq!(val.type_tag, TestSharedMessage::type_tag_()) == () &&
                     assert_eq!(val.description, "error description") == ()

@@ -87,8 +87,9 @@ pub trait WrapperReturnTypeAndError<R: Message, E: StdSyncSendError>: Send + Syn
     fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<Option<R>, Error>;
 }
 
+pub type TypeTagAcceptItem = (TypeTag, Option<(TypeTag, TypeTag)>);
 pub trait TypeTagAccept {
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_>;
+    fn iter_types(&self) -> Box<dyn Iterator<Item = TypeTagAcceptItem> + '_>;
     fn accept_msg(&self, msg: &TypeTag) -> bool;
     fn accept_req(&self, req: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool;
 }
@@ -119,9 +120,11 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn sync_notify(&self) -> &Notify;
     fn flush_notify(&self) -> &Notify;
     fn ready_notify(&self) -> &Notify;
+    fn idle_notify(&self) -> &Notify;
 
     fn is_init_sent(&self) -> bool;
     fn is_ready(&self) -> bool;
+    fn is_idling(&self) -> bool;
     fn need_flush(&self) -> bool;
     fn set_need_flush(&self);
 
@@ -165,6 +168,8 @@ pub enum Event<M, E: StdSyncSendError> {
     Exited,
     Ready,
     Pause,
+    IdleBegin,
+    IdleEnd,
 }
 
 impl<M, E: StdSyncSendError> Event<M, E> {
@@ -180,6 +185,8 @@ impl<M, E: StdSyncSendError> Event<M, E> {
             Event::Exited => Event::Exited,
             Event::Ready => Event::Ready,
             Event::Pause => Event::Pause,
+            Event::IdleBegin => Event::IdleBegin,
+            Event::IdleEnd => Event::IdleEnd,
         }
     }
 }
@@ -239,7 +246,7 @@ where
                         }
                         Event::Flushed => {
                             self.context.need_flush.store(false, Ordering::SeqCst);
-                            self.context.flushed.notify_waiters();
+                            self.context.flushed.notify_one();
                         }
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {
@@ -266,6 +273,15 @@ where
                             } else {
                                 self.context.response.notify_one();
                             }
+                        }
+
+                        Event::IdleBegin => {
+                            self.context.idling_flag.store(true, Ordering::SeqCst);
+                            self.context.idle.notify_waiters();
+                        }
+
+                        Event::IdleEnd => {
+                            self.context.idling_flag.store(false, Ordering::SeqCst);
                         }
 
                         _ => unimplemented!(),
@@ -350,7 +366,7 @@ where
     E: StdSyncSendError,
     S: ReciveTypedReceiver<R, E> + Send + Sync + 'static,
 {
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+    fn iter_types(&self) -> Box<dyn Iterator<Item = TypeTagAcceptItem> + '_> {
         Box::new(std::iter::once((
             M::type_tag_(),
             Some((R::type_tag_(), E::type_tag_())),
@@ -385,10 +401,6 @@ where
     E: StdSyncSendError,
     S: SendUntypedReceiver + SendTypedReceiver<M> + ReciveTypedReceiver<R, E> + 'static,
 {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
     fn name(&self) -> &str {
         std::any::type_name::<S>()
     }
@@ -399,6 +411,10 @@ where
 
     fn wrapper(&self) -> Option<AnyWrapperRef<'_>> {
         Some(AnyWrapperRef::new(self))
+    }
+
+    fn id(&self) -> u64 {
+        self.id
     }
 
     fn send_boxed(
@@ -415,6 +431,16 @@ where
 
         SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
             .map_err(|err| err.map_msg(|m| m.into_boxed()))
+    }
+
+    fn add_response_listener(
+        &self,
+        listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .waiters
+            .insert(Waiter::Boxed(listener))
+            .ok_or(Error::AddListenerError)? as _)
     }
 
     fn stats(&self) -> Stats {
@@ -435,10 +461,6 @@ where
         SendUntypedReceiver::send(&self.inner, action, bus)
     }
 
-    fn set_need_flush(&self) {
-        self.context.need_flush.store(true, Ordering::SeqCst);
-    }
-
     fn close_notify(&self) -> &Notify {
         &self.context.closed
     }
@@ -451,30 +473,32 @@ where
         &self.context.flushed
     }
 
-    fn add_response_listener(
-        &self,
-        listener: oneshot::Sender<Result<Box<dyn Message>, Error>>,
-    ) -> Result<u64, Error> {
-        Ok(self
-            .waiters
-            .insert(Waiter::Boxed(listener))
-            .ok_or(Error::AddListenerError)? as _)
-    }
-
     fn ready_notify(&self) -> &Notify {
         &self.context.ready
     }
 
-    fn is_ready(&self) -> bool {
-        self.context.ready_flag.load(Ordering::SeqCst)
+    fn idle_notify(&self) -> &Notify {
+        &self.context.idle
     }
 
     fn is_init_sent(&self) -> bool {
         self.context.init_sent.load(Ordering::SeqCst)
     }
 
+    fn is_ready(&self) -> bool {
+        self.context.ready_flag.load(Ordering::SeqCst)
+    }
+
+    fn is_idling(&self) -> bool {
+        self.context.idling_flag.load(Ordering::SeqCst)
+    }
+
     fn need_flush(&self) -> bool {
         self.context.need_flush.load(Ordering::SeqCst)
+    }
+
+    fn set_need_flush(&self) {
+        self.context.need_flush.store(true, Ordering::SeqCst);
     }
 
     fn try_reserve(&self, _: &TypeTag) -> Option<Permit> {
@@ -506,12 +530,12 @@ where
         self.context.response.clone()
     }
 
-    fn start_polling(self: Arc<Self>) -> BusPollerCallback {
-        self.start_polling_events()
-    }
-
     fn increment_processing(&self, _tt: &TypeTag) {
         self.context.processing.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn start_polling(self: Arc<Self>) -> BusPollerCallback {
+        self.start_polling_events()
     }
 }
 
@@ -691,10 +715,12 @@ struct ReceiverContext {
     processing: AtomicI64,
     need_flush: AtomicBool,
     ready_flag: AtomicBool,
+    idling_flag: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
     ready: Notify,
+    idle: Notify,
     response: Arc<Notify>,
     init_sent: AtomicBool,
     resend_unused_resp: bool,
@@ -758,11 +784,13 @@ impl Receiver {
                     processing: AtomicI64::new(0),
                     need_flush: AtomicBool::new(false),
                     ready_flag: AtomicBool::new(false),
+                    idling_flag: AtomicBool::new(true),
                     init_sent: AtomicBool::new(false),
                     flushed: Notify::new(),
                     synchronized: Notify::new(),
                     closed: Notify::new(),
                     ready: Notify::new(),
+                    idle: Notify::new(),
                     response: Arc::new(Notify::new()),
                     resend_unused_resp: resend,
                 }),
@@ -1021,6 +1049,13 @@ impl Receiver {
     }
 
     #[inline]
+    pub async fn idle(&self) {
+        if !self.inner.is_idling() {
+            self.inner.idle_notify().notified().await;
+        }
+    }
+
+    #[inline]
     pub async fn ready(&self) {
         let notify = self.inner.ready_notify().notified();
         if !self.inner.is_ready() {
@@ -1052,6 +1087,8 @@ impl Receiver {
 
     #[inline]
     pub async fn flush(&self, bus: &Bus) {
+        self.idle().await;
+
         let notify = self.inner.flush_notify().notified();
 
         if self.inner.send_action(bus, Action::Flush).is_ok() {

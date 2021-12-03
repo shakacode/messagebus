@@ -11,7 +11,7 @@ use futures::{pin_mut, Future, Stream, StreamExt};
 use messagebus::error::GenericError;
 use messagebus::{
     Action, Bus, Event, EventBoxed, Message, ReciveUntypedReceiver, SendOptions,
-    SendUntypedReceiver, TypeTag, TypeTagAccept,
+    SendUntypedReceiver, TypeTag, TypeTagAccept, TypeTagAcceptItem,
 };
 use parking_lot::Mutex;
 use quinn::{Connecting, IncomingBiStreams};
@@ -105,7 +105,7 @@ impl<B> TypeTagAccept for QuicRelay<B>
 where
     B: Stream<Item = Connecting> + Send + 'static,
 {
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+    fn iter_types(&self) -> Box<dyn Iterator<Item = TypeTagAcceptItem> + '_> {
         let iter = self.in_table.iter_types();
         Box::new(iter.map(|(x, y)| (x.clone(), y.cloned())))
     }
@@ -352,7 +352,7 @@ where
                             }
 
                             let mut reader = &buff[..];
-                            let version = reader.get_u16();
+                            let _version = reader.get_u16();
                             let content_type = reader.get_u16();
                             let body_size = reader.get_u64();
 
@@ -487,4 +487,3 @@ where
         )
     }
 }
-

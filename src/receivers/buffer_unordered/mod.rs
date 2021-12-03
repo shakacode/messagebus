@@ -46,10 +46,45 @@ macro_rules! buffer_unordered_poller_macro {
             R: Message,
             E: StdSyncSendError,
         {
+            use futures::{future, pin_mut, select, FutureExt};
+
             let ut = ut.downcast::<$t>().unwrap();
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
-            while let Some(msg) = rx.recv().await {
+            let mut idling = true;
+
+            loop {
+                let wait_fut = async move {
+                    if idling {
+                        let () = future::pending().await;
+                    } else {
+                        let _ = tokio::time::sleep(std::time::Duration::from_millis(100))
+                            .fuse()
+                            .await;
+                    }
+                };
+
+                pin_mut!(wait_fut);
+                let msg = select! {
+                    m = rx.recv().fuse() => if let Some(msg) = m {
+                        msg
+                    } else {
+                        break;
+                    },
+
+                    _ = wait_fut.fuse() => {
+                        idling = true;
+                        stx.send(Event::IdleBegin).unwrap();
+                        continue;
+                    }
+                };
+
+                if idling {
+                    stx.send(Event::IdleEnd).unwrap();
+                }
+
+                idling = false;
+
                 match msg {
                     Request::Request(mid, msg, _req) => {
                         #[allow(clippy::redundant_closure_call)]
@@ -62,12 +97,10 @@ macro_rules! buffer_unordered_poller_macro {
                             semaphore.clone().acquire_owned().await,
                         );
                     }
-                    Request::Action(Action::Init(..)) => {
-                        stx.send(Event::Ready).unwrap();
-                    }
-                    Request::Action(Action::Close) => {
-                        rx.close();
-                    }
+
+                    Request::Action(Action::Init(..)) => stx.send(Event::Ready).unwrap(),
+                    Request::Action(Action::Close) => rx.close(),
+
                     Request::Action(Action::Flush) => {
                         let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
                         stx.send(Event::Flushed).unwrap();

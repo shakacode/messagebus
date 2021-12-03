@@ -1,5 +1,6 @@
 mod buffer_unordered;
 mod buffer_unordered_batched;
+// mod producer;
 mod synchronize_batched;
 mod synchronized;
 
@@ -12,6 +13,8 @@ pub use synchronized::{SynchronizedAsync, SynchronizedConfig, SynchronizedSync};
 pub use synchronize_batched::{
     SynchronizedBatchedAsync, SynchronizedBatchedConfig, SynchronizedBatchedSync,
 };
+
+// pub use producer::{AsyncProducer, AsyncProducerConfig};
 
 use crate::receiver::Action;
 

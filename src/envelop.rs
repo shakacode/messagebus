@@ -34,7 +34,9 @@ pub trait Message: MessageBounds {
     fn try_clone_into(&self, into: &mut dyn Any) -> bool;
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>>;
 
-    fn try_clone(&self) -> Option<Self> where Self: Sized;
+    fn try_clone(&self) -> Option<Self>
+    where
+        Self: Sized;
 }
 
 macro_rules! gen_impls {
@@ -183,7 +185,6 @@ impl<T: Message + serde::Serialize> IntoSharedMessage for T {
     }
 }
 
-
 pub trait SharedMessage: Message + erased_serde::Serialize {
     fn upcast_arc(self: Arc<Self>) -> Arc<dyn Message>;
     fn upcast_box(self: Box<Self>) -> Box<dyn Message>;
@@ -191,10 +192,18 @@ pub trait SharedMessage: Message + erased_serde::Serialize {
     fn upcast_mut(&mut self) -> &mut dyn Message;
 }
 impl<T: Message + erased_serde::Serialize> SharedMessage for T {
-    fn upcast_arc(self: Arc<Self>) -> Arc<dyn Message> { self }
-    fn upcast_box(self: Box<Self>) -> Box<dyn Message> { self }
-    fn upcast_ref(&self) -> &dyn Message { self }
-    fn upcast_mut(&mut self) -> &mut dyn Message { self }
+    fn upcast_arc(self: Arc<Self>) -> Arc<dyn Message> {
+        self
+    }
+    fn upcast_box(self: Box<Self>) -> Box<dyn Message> {
+        self
+    }
+    fn upcast_ref(&self) -> &dyn Message {
+        self
+    }
+    fn upcast_mut(&mut self) -> &mut dyn Message {
+        self
+    }
 }
 
 // pub trait IntoTakeable {

@@ -8,7 +8,7 @@ use futures::{pin_mut, Stream, StreamExt};
 use messagebus::error::GenericError;
 use messagebus::{
     Action, Bus, Event, EventBoxed, Message, ReciveUntypedReceiver, SendOptions,
-    SendUntypedReceiver, TypeTag, TypeTagAccept,
+    SendUntypedReceiver, TypeTag, TypeTagAccept, TypeTagAcceptItem,
 };
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -121,7 +121,7 @@ impl From<TcpStream> for TcpRelayConnection {
 }
 
 impl TypeTagAccept for TcpRelay {
-    fn iter_types(&self) -> Box<dyn Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_> {
+    fn iter_types(&self) -> Box<dyn Iterator<Item = TypeTagAcceptItem> + '_> {
         let iter = self.in_table.iter_types();
         Box::new(iter.map(|(x, y)| (x.clone(), y.cloned())))
     }
@@ -294,7 +294,7 @@ impl ReciveUntypedReceiver for TcpRelay {
                             }
 
                             let mut reader = &buff[..];
-                            let version = reader.get_u16();
+                            let _version = reader.get_u16();
                             let content_type = reader.get_u16();
                             let body_size = reader.get_u64();
 
@@ -427,4 +427,3 @@ impl ReciveUntypedReceiver for TcpRelay {
         )
     }
 }
-

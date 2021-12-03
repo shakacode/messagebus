@@ -46,7 +46,7 @@ pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeT
 pub use handler::*;
 pub use receiver::{
     Action, Event, EventBoxed, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
-    SendUntypedReceiver, TypeTagAccept,
+    SendUntypedReceiver, TypeTagAccept, TypeTagAcceptItem,
 };
 pub use relay::Relay;
 pub use type_tag::{deserialize_shared_message, register_shared_message};
@@ -162,7 +162,6 @@ impl Bus {
     }
 
     pub async fn flush_all(&self) {
-        let _handle = self.inner.maintain.lock().await;
         let fuse_count = 32i32;
         let mut breaked = false;
         let mut iters = 0usize;
@@ -194,7 +193,6 @@ impl Bus {
     }
 
     pub async fn flush<M: Message>(&self) {
-        let _handle = self.inner.maintain.lock().await;
         let fuse_count = 32i32;
         let mut breaked = false;
         let mut iters = 0usize;
@@ -229,7 +227,6 @@ impl Bus {
     }
 
     pub async fn flush2<M1: Message, M2: Message>(&self) {
-        let _handle = self.inner.maintain.lock().await;
         let fuse_count = 32i32;
         let mut breaked = false;
         let mut iters = 0usize;

@@ -1,7 +1,11 @@
-use crate::{error::Error};
+use crate::error::Error;
 use futures::{Future, Stream};
-use quinn::{Connecting};
-use std::{net::SocketAddr, pin::Pin, task::{Context, Poll}};
+use quinn::Connecting;
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use super::WaitIdle;
 
@@ -27,9 +31,10 @@ impl QuicClientEndpoint {
 
         let (endpoint, _) = endpoint.bind(&"0.0.0.0:0".parse().unwrap())?;
 
-        Ok(Self { 
-            addr, host,
-            endpoint 
+        Ok(Self {
+            addr,
+            host,
+            endpoint,
         })
     }
 }
@@ -40,11 +45,11 @@ impl Stream for QuicClientEndpoint {
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         Poll::Ready(this.endpoint.connect(&this.addr, &this.host).ok())
-    } 
+    }
 }
 
 impl<'a> WaitIdle<'a> for QuicClientEndpoint {
-    type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'a>> ;
+    type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     fn wait_idle(&'a self) -> Self::Fut {
         Box::pin(self.endpoint.wait_idle())
     }

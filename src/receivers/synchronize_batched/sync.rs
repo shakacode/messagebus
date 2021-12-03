@@ -101,7 +101,9 @@ where
     fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
         match self.tx.send(Request::Request(mid, m, req)) {
             Ok(_) => Ok(()),
-            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(Error::send_closed(msg)),
+            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => {
+                Err(Error::send_closed(msg))
+            }
             _ => unimplemented!(),
         }
     }

@@ -1,6 +1,6 @@
 // #[cfg(feature = "quic")]
 mod quic;
-mod redis;
+// mod redis;
 mod tcp;
 
 use futures::Stream;
@@ -10,7 +10,6 @@ use std::{collections::HashMap, pin::Pin};
 // #[cfg(feature = "quic")]
 pub use quic::*;
 pub use tcp::*;
-
 
 pub(crate) type GenericEventStream =
     Pin<Box<dyn Stream<Item = Event<Box<dyn Message>, GenericError>> + Send>>;
@@ -40,8 +39,7 @@ impl MessageTable {
     }
 
     pub fn iter_keys(&self) -> impl Iterator<Item = &str> + '_ {
-        self.table.keys()
-            .map(|k|k.as_ref())
+        self.table.keys().map(|k| k.as_ref())
     }
 
     #[inline]
@@ -53,26 +51,26 @@ impl MessageTable {
     pub fn accept_message(&self, msg: &TypeTag) -> bool {
         self.table
             .get(msg)
-            .map_or(false, |v| {
-                v
-                .iter()
-                .any(Option::is_none)
-            })
+            .map_or(false, |v| v.iter().any(Option::is_none))
     }
 
-    pub fn accept_request(&self, msg: &TypeTag, resp: Option<&TypeTag>, err: Option<&TypeTag>) -> bool {
+    pub fn accept_request(
+        &self,
+        msg: &TypeTag,
+        resp: Option<&TypeTag>,
+        err: Option<&TypeTag>,
+    ) -> bool {
         self.table.get(msg).map_or(false, |v| {
-            v
-                .iter()
-                .filter_map(Option::as_ref)
-                .any(|(r, e)| {
-                    resp.map_or(true, |resp| resp.as_ref() == r.as_ref())
-                        && err.map_or(true, |err| err.as_ref() == e.as_ref())
-                })
+            v.iter().filter_map(Option::as_ref).any(|(r, e)| {
+                resp.map_or(true, |resp| resp.as_ref() == r.as_ref())
+                    && err.map_or(true, |err| err.as_ref() == e.as_ref())
+            })
         })
     }
 
-    pub fn iter_types(&self) -> impl Iterator<Item = (&'_ TypeTag, Option<&'_ (TypeTag, TypeTag)>)> + '_ {
+    pub fn iter_types(
+        &self,
+    ) -> impl Iterator<Item = (&'_ TypeTag, Option<&'_ (TypeTag, TypeTag)>)> + '_ {
         self.table
             .iter()
             .map(|(k, v)| v.iter().map(move |resp| (k, resp.as_ref())))

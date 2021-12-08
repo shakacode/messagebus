@@ -11,7 +11,7 @@ Inspired by Actix
 ### Basics
 1. Can deliver messages between actors using receivers (usually a queue implementations)
 2. Messages distincts and delivers by TypeId
-3. Messages delivers ether in a broadcast fashion to many receivers (Cloned) or addressed by recevier id, balanced (depends on queue load) or random
+3. Messages delivers ether in a broadcast fashion to many receivers (Cloned) or addressed by receiver id, balanced (depends on queue load) or random
 4. There are different kind of receivers implemented:
   - BufferUnordered Receiver (sync and async)
   - Synchronized (sync and async)
@@ -19,7 +19,7 @@ Inspired by Actix
   - BatchedSynchronized (sync and async)
 5. Request/response api. There is an example is [demo_req_resp.rs](./examples/demo_req_resp.rs)
 
-Here are the list of implmented handler kinds:
+Here are the list of implemented handler kinds:
 ```rust
 pub trait Handler<M: Message>: Send + Sync {
     type Error: StdSyncSendError;

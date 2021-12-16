@@ -79,7 +79,7 @@ async fn test_sync() {
     b.send(MsgU16(11u16)).await.unwrap();
     b.send(MsgU32(32u32)).await.unwrap();
 
-    b.flush_and_sync_all().await;
+    b.flush_and_sync_all(false).await;
     b.close().await;
     poller.await;
 }

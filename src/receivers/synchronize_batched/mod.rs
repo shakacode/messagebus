@@ -48,46 +48,12 @@ macro_rules! batch_synchronized_poller_macro {
             M: Message,
             R: Message,
         {
-            use futures::{future, pin_mut, select, FutureExt};
-
             let ut = ut.downcast::<Mutex<T>>().unwrap();
 
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
             let mut buffer = Vec::with_capacity(cfg.batch_size);
-            let mut idling = true;
 
-            loop {
-                let wait_fut = async move {
-                    if idling {
-                        let () = future::pending().await;
-                    } else {
-                        let _ = tokio::time::sleep(std::time::Duration::from_millis(100))
-                            .fuse()
-                            .await;
-                    }
-                };
-
-                pin_mut!(wait_fut);
-                let msg = select! {
-                    m = rx.recv().fuse() => if let Some(msg) = m {
-                        msg
-                    } else {
-                        break;
-                    },
-
-                    _ = wait_fut.fuse() => {
-                        idling = true;
-                        stx.send(Event::IdleBegin).unwrap();
-                        continue;
-                    }
-                };
-
-                if idling {
-                    stx.send(Event::IdleEnd).unwrap();
-                }
-
-                idling = false;
-
+            while let Some(msg) = rx.recv().await {
                 let bus = bus.clone();
                 let ut = ut.clone();
                 let stx = stx.clone();

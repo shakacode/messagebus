@@ -311,15 +311,6 @@ where
                                 }
                             }
                         }
-
-                        Event::IdleBegin => {
-                            self.context.idling_flag.store(true, Ordering::SeqCst);
-                            self.context.idle.notify_waiters();
-                        }
-
-                        Event::IdleEnd => {
-                            self.context.idling_flag.store(false, Ordering::SeqCst);
-                        }
                         _ => unimplemented!(),
                     }
                 }

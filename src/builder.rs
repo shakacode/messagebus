@@ -88,6 +88,7 @@ impl<T, F, P, B> RegisterEntry<UnsyncEntry, T, F, P, B> {
             true,
             inner,
         );
+
         let poller2 = receiver.start_polling();
         self.receivers.insert(receiver);
         self.pollers.push(poller(self.item.clone()));

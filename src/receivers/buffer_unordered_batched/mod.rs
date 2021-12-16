@@ -51,47 +51,13 @@ macro_rules! buffer_unordered_batch_poller_macro {
             M: Message,
             R: Message,
         {
-            use futures::{future, pin_mut, select, FutureExt};
-
             let ut = ut.downcast::<$t>().unwrap();
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
             let mut buffer = Vec::with_capacity(cfg.batch_size);
-            let mut idling = true;
 
-            loop {
-                let wait_fut = async move {
-                    if idling {
-                        let () = future::pending().await;
-                    } else {
-                        let _ = tokio::time::sleep(std::time::Duration::from_millis(100))
-                            .fuse()
-                            .await;
-                    }
-                };
-
-                pin_mut!(wait_fut);
-                let msg = select! {
-                    m = rx.recv().fuse() => if let Some(msg) = m {
-                        msg
-                    } else {
-                        break;
-                    },
-
-                    _ = wait_fut.fuse() => {
-                        idling = true;
-                        stx.send(Event::IdleBegin).unwrap();
-                        continue;
-                    }
-                };
-
-                if idling {
-                    stx.send(Event::IdleEnd).unwrap();
-                }
-
-                idling = false;
-
+            while let Some(msg) = rx.recv().await {
                 let bus = bus.clone();
                 let ut = ut.clone();
                 let semaphore = semaphore.clone();
@@ -109,8 +75,14 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             let buffer_clone = buffer.drain(..).collect();
 
                             #[allow(clippy::redundant_closure_call)]
-                            let _ =
-                                ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
+                            let _ = ($st1)(
+                                buffer_mid_clone,
+                                buffer_clone,
+                                bus,
+                                ut,
+                                task_permit,
+                                stx,
+                            );
                         }
                     }
                     Request::Action(Action::Init(..)) => {
@@ -128,8 +100,14 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             let task_permit = semaphore.clone().acquire_owned().await;
 
                             #[allow(clippy::redundant_closure_call)]
-                            let _ =
-                                ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
+                            let _ = ($st1)(
+                                buffer_mid_clone,
+                                buffer_clone,
+                                bus,
+                                ut,
+                                task_permit,
+                                stx,
+                            );
                         }
 
                         let _ = semaphore.acquire_many(cfg.max_parallel as _).await;

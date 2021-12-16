@@ -165,6 +165,7 @@ impl Bus {
         let fuse_count = 32i32;
         let mut breaked = false;
         let mut iters = 0usize;
+
         for _ in 0..fuse_count {
             iters += 1;
             let mut flushed = false;
@@ -264,15 +265,12 @@ impl Bus {
     }
 
     pub async fn sync_all(&self) {
-        let _handle = self.inner.maintain.lock().await;
-
         for r in self.inner.receivers.iter() {
             r.sync(self).await;
         }
     }
 
     pub async fn sync<M: Message>(&self) {
-        let _handle = self.inner.maintain.lock().await;
         let receivers =
             self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
 
@@ -282,8 +280,6 @@ impl Bus {
     }
 
     pub async fn sync2<M1: Message, M2: Message>(&self) {
-        let _handle = self.inner.maintain.lock().await;
-
         let receivers1 =
             self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
 
@@ -295,21 +291,68 @@ impl Bus {
         }
     }
 
+    pub async fn idle_all(&self) {
+        for r in self.inner.receivers.iter() {
+            r.flush(self).await;
+            r.idle().await;
+        }
+    }
+
+    pub async fn idle<M: Message>(&self) {
+        let receivers =
+            self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
+
+        for r in receivers {
+            r.flush(self).await;
+            r.idle().await;
+        }
+    }
+
+    pub async fn idle2<M1: Message, M2: Message>(&self) {
+        let receivers1 =
+            self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
+
+        let receivers2 =
+            self.select_receivers(M2::type_tag_(), Default::default(), None, None, false);
+
+        for r in receivers1.chain(receivers2) {
+            r.flush(self).await;
+            r.idle().await;
+        }
+    }
+
     #[inline]
-    pub async fn flush_and_sync_all(&self) {
+    pub async fn flush_and_sync_all(&self, force: bool) {
+        if !force {
+            self.idle_all().await;
+        }
+
+        println!("flushing all begin");
         self.flush_all().await;
         self.sync_all().await;
     }
+
     #[inline]
-    pub async fn flush_and_sync<M: Message>(&self) {
+    pub async fn flush_and_sync<M: Message>(&self, force: bool) {
+        if !force {
+            self.idle::<M>().await;
+        }
+
+        println!("flushing 1 begin");
         self.flush::<M>().await;
         self.sync::<M>().await;
     }
+
     #[inline]
-    pub async fn flush_and_sync2<M1: Message, M2: Message>(&self) {
+    pub async fn flush_and_sync2<M1: Message, M2: Message>(&self, force: bool) {
+        if !force {
+            self.idle2::<M1, M2>().await;
+        }
+        println!("flushing 2 begin");
         self.flush2::<M1, M2>().await;
         self.sync2::<M1, M2>().await;
     }
+
     fn try_reserve(&self, tt: &TypeTag, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
 

@@ -168,8 +168,6 @@ pub enum Event<M, E: StdSyncSendError> {
     Exited,
     Ready,
     Pause,
-    IdleBegin,
-    IdleEnd,
 }
 
 impl<M, E: StdSyncSendError> Event<M, E> {
@@ -185,8 +183,6 @@ impl<M, E: StdSyncSendError> Event<M, E> {
             Event::Exited => Event::Exited,
             Event::Ready => Event::Ready,
             Event::Pause => Event::Pause,
-            Event::IdleBegin => Event::IdleBegin,
-            Event::IdleEnd => Event::IdleEnd,
         }
     }
 }
@@ -250,7 +246,11 @@ where
                         }
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {
-                            self.context.processing.fetch_sub(1, Ordering::SeqCst);
+                            let prev_value = self.context.processing.fetch_sub(1, Ordering::SeqCst);
+                            if prev_value == 1  { // last task completes
+                                self.context.idle.notify_waiters();
+                            }
+
                             self.context.response.notify_one();
 
                             match self.response(mid, resp) {
@@ -273,15 +273,6 @@ where
                             } else {
                                 self.context.response.notify_one();
                             }
-                        }
-
-                        Event::IdleBegin => {
-                            self.context.idling_flag.store(true, Ordering::SeqCst);
-                            self.context.idle.notify_waiters();
-                        }
-
-                        Event::IdleEnd => {
-                            self.context.idling_flag.store(false, Ordering::SeqCst);
                         }
 
                         _ => unimplemented!(),
@@ -490,7 +481,7 @@ where
     }
 
     fn is_idling(&self) -> bool {
-        self.context.idling_flag.load(Ordering::SeqCst)
+        self.context.processing.load(Ordering::SeqCst) == 0
     }
 
     fn need_flush(&self) -> bool {
@@ -715,7 +706,6 @@ struct ReceiverContext {
     processing: AtomicI64,
     need_flush: AtomicBool,
     ready_flag: AtomicBool,
-    idling_flag: AtomicBool,
     flushed: Notify,
     synchronized: Notify,
     closed: Notify,
@@ -784,7 +774,6 @@ impl Receiver {
                     processing: AtomicI64::new(0),
                     need_flush: AtomicBool::new(false),
                     ready_flag: AtomicBool::new(false),
-                    idling_flag: AtomicBool::new(true),
                     init_sent: AtomicBool::new(false),
                     flushed: Notify::new(),
                     synchronized: Notify::new(),
@@ -1087,8 +1076,6 @@ impl Receiver {
 
     #[inline]
     pub async fn flush(&self, bus: &Bus) {
-        self.idle().await;
-
         let notify = self.inner.flush_notify().notified();
 
         if self.inner.send_action(bus, Action::Flush).is_ok() {

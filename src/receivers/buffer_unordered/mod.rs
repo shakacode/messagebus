@@ -46,45 +46,10 @@ macro_rules! buffer_unordered_poller_macro {
             R: Message,
             E: StdSyncSendError,
         {
-            use futures::{future, pin_mut, select, FutureExt};
-
             let ut = ut.downcast::<$t>().unwrap();
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
-            let mut idling = true;
-
-            loop {
-                let wait_fut = async move {
-                    if idling {
-                        let () = future::pending().await;
-                    } else {
-                        let _ = tokio::time::sleep(std::time::Duration::from_millis(100))
-                            .fuse()
-                            .await;
-                    }
-                };
-
-                pin_mut!(wait_fut);
-                let msg = select! {
-                    m = rx.recv().fuse() => if let Some(msg) = m {
-                        msg
-                    } else {
-                        break;
-                    },
-
-                    _ = wait_fut.fuse() => {
-                        idling = true;
-                        stx.send(Event::IdleBegin).unwrap();
-                        continue;
-                    }
-                };
-
-                if idling {
-                    stx.send(Event::IdleEnd).unwrap();
-                }
-
-                idling = false;
-
+            while let Some(msg) = rx.recv().await {
                 match msg {
                     Request::Request(mid, msg, _req) => {
                         #[allow(clippy::redundant_closure_call)]

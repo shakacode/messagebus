@@ -247,7 +247,8 @@ where
                         Event::Synchronized(_res) => self.context.synchronized.notify_waiters(),
                         Event::Response(mid, resp) => {
                             let prev_value = self.context.processing.fetch_sub(1, Ordering::SeqCst);
-                            if prev_value == 1  { // last task completes
+                            if prev_value == 1 {
+                                // last task completes
                                 self.context.idle.notify_waiters();
                             }
 

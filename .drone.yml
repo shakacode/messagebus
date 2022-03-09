@@ -1,0 +1,14 @@
+kind: pipeline
+name: default
+
+steps:
+- name: build
+  image: rust
+  commands:
+    - cargo build --verbose --all
+
+- name: fmt-check
+  image: rust
+  commands:
+    - rustup component add rustfmt 
+    - cargo fmt --all -- --check

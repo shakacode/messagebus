@@ -1,0 +1,12 @@
+balancer = 'roundrobin'
+router = ['local', 'aidev', 'aws_scraper']
+
+[resizer]
+
+
+
+[local]
+"*" = "trace"
+"Log" = "logger"
+"nn::ResizeImage" = "queue(128, spawner(handler(resizer())))"
+"nn::Classifier" = "classifier"

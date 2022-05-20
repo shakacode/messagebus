@@ -1,43 +1,27 @@
 [package]
-name = "messagebus"
-version = "0.9.13"
-authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
-repository = "https://github.com/andreytkachenko/messagebus.git"
-keywords = ["futures", "async", "tokio", "message", "bus"]
-categories = ["network-programming", "asynchronous"]
-description = "MessageBus allows intercommunicate with messages between modules"
-license = "MIT OR Apache-2.0"
-exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
-edition = "2018"
+name = "messagebus_new"
+version = "0.1.0"
+edition = "2021"
 
-[workspace]
-members = ["crates/remote", "crates/derive"]
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-messagebus_derive = "0.2.5"
-
-tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
-parking_lot = "0.11"
-async-trait = "0.1"
-futures = "0.3"
-smallvec = "1.6"
-log = "0.4"
-sharded-slab = "0.1"
-thiserror = "1"
-erased-serde = "0.3"
-serde = "1"
-serde_derive = "1"
-dashmap = "4.0"
-ctor = "0.1.21"
+anyhow = "1.0.57"
+async-trait = "0.1.53"
+crossbeam = "0.8.1"
+dashmap = "5.3.3"
+erased-serde = "0.3.20"
+futures = "0.3.21"
+heapless = "0.7.10"
+lazy_static = "1.4.0"
+log = "0.4.16"
+parking_lot = "0.12.0"
+regex = "1.5.5"
+serde = "1.0.136"
+thiserror = "1.0.30"
+tokio = { version = "1.17.0", features = ["sync", "rt"] }
 
 [dev-dependencies]
-anyhow = "1.0"
-env_logger = "0.9"
-serde_json = "1.0"
-tokio = { version = "1", features = [
-  "macros",
-  "parking_lot",
-  "rt-multi-thread",
-  "io-util",
-  "sync",
-] }
+tokio = { version = "1.17.0", features = ["full"] }
+
+

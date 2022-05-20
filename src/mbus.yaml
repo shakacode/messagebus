@@ -1,0 +1,34 @@
+
+receivers:
+  resizer:
+    kind: 'Queue'
+    params:
+      size: 128
+    child:
+      kind: 'Spawner'
+      child:
+        kind: 'ImageResizer'
+  
+  classifier:
+    kind: 'Queue'
+    params:
+      size: 128
+    child:
+      kind: 'Spawner'
+      child:
+        kind: 'Batch'
+        params:
+          size: 64
+        child:
+          kind: 'ImageClassifier'
+
+  url_scraper:
+    kind: 'Queue'
+    params:
+      size: 65535
+    child:
+      kind: 'UrlScraper'
+
+  listing_url_reader:
+    kind: ListingScraper
+    

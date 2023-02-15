@@ -1,43 +1,37 @@
 [package]
 name = "messagebus"
-version = "0.9.13"
+version = "0.10.0"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
 repository = "https://github.com/andreytkachenko/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus"]
 categories = ["network-programming", "asynchronous"]
 description = "MessageBus allows intercommunicate with messages between modules"
+exclude = [".gitignore", ".cargo/config", ".github/**", ".drone.yml"]
 license = "MIT OR Apache-2.0"
-exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
-edition = "2018"
-
-[workspace]
-members = ["crates/remote", "crates/derive"]
+edition = "2021"
 
 [dependencies]
 messagebus_derive = "0.2.5"
 
-tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
-parking_lot = "0.11"
-async-trait = "0.1"
+anyhow = "1.0"
+thiserror = "1.0"
+async-channel = "1.8.0"
+crossbeam = "0.8"
+dashmap = "5.3.3"
+erased-serde = "0.3.24"
 futures = "0.3"
-smallvec = "1.6"
+lazy_static = "1.4"
 log = "0.4"
-sharded-slab = "0.1"
-thiserror = "1"
-erased-serde = "0.3"
-serde = "1"
-serde_derive = "1"
-dashmap = "4.0"
-ctor = "0.1.21"
+parking_lot = "0.12"
+regex = "1"
+segvec = "0.1.5"
+serde = "1.0"
+sharded-slab = "0.1.4"
+tokio = { version = "1.17.0", features = ["sync", "rt"] }
+smallvec = { version = "1.10.0", features = ["const_new"] }
 
 [dev-dependencies]
-anyhow = "1.0"
-env_logger = "0.9"
-serde_json = "1.0"
-tokio = { version = "1", features = [
-  "macros",
-  "parking_lot",
-  "rt-multi-thread",
-  "io-util",
-  "sync",
-] }
+tokio = { version = "1.17.0", features = ["full"] }
+waker-fn = "1.1.0"
+
+

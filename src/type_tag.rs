@@ -1,84 +1,139 @@
-use parking_lot::RwLock;
-use std::collections::HashMap;
+mod info;
+mod query;
 
-use crate::envelop::IntoSharedMessage;
-use crate::error::Error;
-use crate::{Message, SharedMessage, TypeTag};
+use core::fmt;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
-static TYPE_REGISTRY: TypeRegistry = TypeRegistry::new();
+pub use info::TypeTagInfo;
+pub use query::TypeTagQuery;
 
-type MessageDeserializerCallback = Box<
-    dyn Fn(&mut dyn erased_serde::Deserializer<'_>) -> Result<Box<dyn SharedMessage>, Error>
-        + Send
-        + Sync,
->;
-
-pub struct MessageTypeDescriptor {
-    de: MessageDeserializerCallback,
+#[derive(Debug, Clone)]
+pub struct TypeTag {
+    pub(crate) hash: u64,
+    info: Arc<TypeTagInfo<'static>>,
 }
 
-impl MessageTypeDescriptor {
-    #[inline]
-    pub fn deserialize_boxed(
-        &self,
-        de: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<Box<dyn SharedMessage>, Error> {
-        (self.de)(de)
+impl TypeTag {
+    pub fn info(&self) -> &TypeTagInfo<'static> {
+        &self.info
     }
 }
 
-#[derive(Default)]
-pub struct TypeRegistry {
-    message_types: RwLock<Option<HashMap<TypeTag, MessageTypeDescriptor>>>,
+impl<'a> AsRef<TypeTagInfo<'a>> for TypeTag {
+    #[inline]
+    fn as_ref(&self) -> &TypeTagInfo<'a> {
+        self.info.as_ref()
+    }
 }
 
-impl TypeRegistry {
-    pub const fn new() -> Self {
+impl From<TypeTagInfo<'static>> for TypeTag {
+    fn from(info: TypeTagInfo<'static>) -> Self {
+        let mut hasher = DefaultHasher::new();
+        info.hash(&mut hasher);
+
         Self {
-            message_types: parking_lot::const_rwlock(None),
+            info: Arc::new(info),
+            hash: hasher.finish(),
         }
     }
+}
 
-    pub fn deserialize(
-        &self,
-        tt: TypeTag,
-        de: &mut dyn erased_serde::Deserializer<'_>,
-    ) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
-        let guard = self.message_types.read();
-        let md = guard
-            .as_ref()
-            .ok_or_else(|| Error::TypeTagNotRegistered(tt.clone()))?
-            .get(&tt)
-            .ok_or(Error::TypeTagNotRegistered(tt))?;
-
-        md.deserialize_boxed(de)
-            .map_err(|err| err.specify::<Box<dyn Message>>())
-    }
-
-    pub fn register<M: Message + serde::Serialize + serde::de::DeserializeOwned>(&self) {
-        println!("insert {}", M::type_tag_());
-
-        self.message_types
-            .write()
-            .get_or_insert_with(HashMap::new)
-            .insert(
-                M::type_tag_(),
-                MessageTypeDescriptor {
-                    de: Box::new(move |de| Ok(M::deserialize(de)?.into_shared())),
-                },
-            );
+impl PartialEq for TypeTag {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
     }
 }
 
-#[inline]
-pub fn deserialize_shared_message(
-    tt: TypeTag,
-    de: &mut dyn erased_serde::Deserializer<'_>,
-) -> Result<Box<dyn SharedMessage>, Error<Box<dyn Message>>> {
-    TYPE_REGISTRY.deserialize(tt, de)
+impl Eq for TypeTag {}
+
+impl fmt::Display for TypeTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.info, f)
+    }
 }
 
-#[inline]
-pub fn register_shared_message<M: Message + serde::Serialize + serde::de::DeserializeOwned>() {
-    TYPE_REGISTRY.register::<M>();
+#[derive(Debug, Clone, Default)]
+pub struct TypeTagFilterMap {
+    queries: Vec<TypeTagQuery<'static>>,
+}
+
+impl TypeTagFilterMap {
+    pub fn new(queries: &[&str]) -> Self {
+        let queries = queries
+            .iter()
+            .map(|&query| TypeTagQuery::parse(query).unwrap().make_owned())
+            .collect();
+
+        Self { queries }
+    }
+
+    pub fn from_static(queries: &[&'static str]) -> Self {
+        let queries = queries
+            .iter()
+            .map(|&query| TypeTagQuery::parse(query).unwrap())
+            .collect();
+
+        Self { queries }
+    }
+
+    pub fn add_query(&mut self, query: &str) -> bool {
+        let query = if let Some(query) = TypeTagQuery::parse(query) {
+            query
+        } else {
+            return false;
+        };
+
+        self.queries.push(query.make_owned());
+        true
+    }
+
+    pub fn add_query_static(&mut self, query: &'static str) -> bool {
+        let query = if let Some(query) = TypeTagQuery::parse(query) {
+            query
+        } else {
+            return false;
+        };
+
+        self.queries.push(query);
+        true
+    }
+
+    pub fn match_any(&self, tt: &TypeTagInfo) -> bool {
+        for query in &self.queries {
+            if query.test(tt) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::type_tag::TypeTagInfo;
+
+    use super::TypeTagFilterMap;
+
+    #[test]
+    fn test_tt_filter_map() {
+        let fm = TypeTagFilterMap::from_static(&[
+            "api::Request<~>",
+            "api::Response<~>",
+            "nn::image::Resizer",
+            "nn::classifier::*",
+            "log::**",
+        ]);
+
+        assert!(fm.match_any(&TypeTagInfo::parse("api::Request<Login>").unwrap()));
+        assert!(fm
+            .match_any(&TypeTagInfo::parse("api::Response<api::data::Paginated<Users>>").unwrap()));
+        assert!(fm.match_any(&TypeTagInfo::parse("nn::classifier::ResNet").unwrap()));
+        assert!(!fm.match_any(&TypeTagInfo::parse("nn::detector::Yolo").unwrap()));
+        assert!(fm.match_any(&TypeTagInfo::parse("log::login::FailedLoginError").unwrap()));
+    }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "messagebus_new"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.57"
+async-channel = "1.8.0"
+async-trait = "0.1.53"
+crossbeam = "0.8.1"
+dashmap = "5.3.3"
+erased-serde = "0.3.24"
+futures = "0.3.21"
+heapless = "0.7.10"
+lazy_static = "1.4.0"
+log = "0.4.16"
+parking_lot = "0.12.0"
+regex = "1.5.5"
+serde = "1.0.136"
+smallvec = { version = "1.8.0", features = ["serde"] }
+thiserror = "1.0.30"
+tokio = { version = "1.17.0", features = ["sync", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.17.0", features = ["full"] }
+waker-fn = "1.1.0"
+
+

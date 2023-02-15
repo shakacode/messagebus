@@ -206,29 +206,6 @@ impl<T: Message + erased_serde::Serialize> SharedMessage for T {
     }
 }
 
-// pub trait IntoTakeable {
-//     fn into_takeable(&mut self) -> Takeable<'_>;
-// }
-
-// impl<T: 'static> IntoTakeable for Option<T> {
-//     fn into_takeable(&mut self) -> Takeable<'_> {
-//         Takeable {
-//             inner_ref: self
-//         }
-//     }
-// }
-
-// pub struct Takeable<'a> {
-//     inner_ref: &'a mut dyn Any,
-// }
-
-// impl Takeable<'_> {
-//     pub fn take<M: Message>(&mut self) -> Option<M> {
-//         let m = self.inner_ref.downcast_mut::<Option<M>>()?;
-//         m.take()
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;

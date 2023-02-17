@@ -98,13 +98,13 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerT
 }
 impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerTask<M, R, T> {
     #[inline]
-    fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
         self.send_waker.register(cx.waker());
 
         if let Some(state) = self.state.lock().as_mut() {
             let res = ready!(self
                 .inner
-                .poll_result(&state.task, state.result.as_mut(), cx));
+                .poll_result(&state.task, state.result.as_mut(), cx, bus));
 
             self.free_index_queue.push(self.index);
             Poll::Ready(res)
@@ -115,20 +115,20 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerT
 }
 
 struct SpawnerSlot<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> {
-    handler: JoinHandle<()>,
+    // handler: JoinHandle<()>,
     _m: PhantomData<(M, R, T)>,
 }
 
 impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerSlot<M, R, T> {
     fn new(slots: Arc<[SpawnerTask<M, R, T>]>, index: usize) -> Self {
         Self {
-            handler: tokio::spawn(poll_fn(move |cx| {
-                if let Err(err) = ready!(slots[index].poll(cx)) {
-                    println!("error: {}", err);
-                }
+            // handler: tokio::spawn(poll_fn(move |cx| {
+            //     if let Err(err) = ready!(slots[index].poll(cx)) {
+            //         println!("error: {}", err);
+            //     }
 
-                Poll::Pending
-            })),
+            //     Poll::Pending
+            // })),
             _m: Default::default(),
         }
     }
@@ -196,6 +196,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver
         task: &TaskHandler,
         resp: Option<&mut ResultCell<R>>,
         cx: &mut Context<'_>,
+        bus: &Bus,
     ) -> Poll<Result<(), Error>> {
         // self.results
         //     .get(task)

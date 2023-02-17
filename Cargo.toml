@@ -27,8 +27,10 @@ regex = "1"
 segvec = "0.1.5"
 serde = "1.0"
 sharded-slab = "0.1.4"
-tokio = { version = "1.17.0", features = ["sync", "rt"] }
+tokio = { version = "1.17.0", features = ["sync", "rt" ] }
 smallvec = { version = "1.10.0", features = ["const_new"] }
+tokio-util = "0.7.7"
+arc-swap = "1.6.0"
 
 [dev-dependencies]
 tokio = { version = "1.17.0", features = ["full"] }

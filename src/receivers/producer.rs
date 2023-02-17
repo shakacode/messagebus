@@ -3,7 +3,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
 use futures::{ready, task::AtomicWaker, Future};
@@ -13,39 +13,42 @@ use crate::{
     bus::{Bus, TaskHandler, TaskHandlerVTable},
     cell::{MsgCell, ResultCell},
     error::Error,
-    handler::Handler,
+    handler::MessageProducer,
     message::Message,
     receiver::Receiver,
 };
 
-pub struct HandlerWrapper<M: Message, T: Handler<M> + 'static> {
+pub struct ProducerWrapper<M: Message, T: MessageProducer<M> + 'static> {
     inner: Arc<T>,
-    current_fut: Arc<Mutex<Option<T::HandleFuture<'static>>>>,
+    start_fut: Arc<Mutex<Option<T::StartFuture<'static>>>>,
+    next_fut: Arc<Mutex<Option<T::NextFuture<'static>>>>,
     send_waker: AtomicWaker,
 }
 
-impl<M: Message, T: Handler<M>> Clone for HandlerWrapper<M, T> {
+impl<M: Message, T: MessageProducer<M>> Clone for ProducerWrapper<M, T> {
     fn clone(&self) -> Self {
-        HandlerWrapper {
+        ProducerWrapper {
             inner: self.inner.clone(),
-            current_fut: Arc::new(Mutex::new(None)),
+            start_fut: Arc::new(Mutex::new(None)),
+            next_fut: Arc::new(Mutex::new(None)),
             send_waker: AtomicWaker::new(),
         }
     }
 }
 
-impl<M: Message, T: Handler<M>> HandlerWrapper<M, T> {
+impl<M: Message, T: MessageProducer<M>> ProducerWrapper<M, T> {
     pub fn new(inner: Arc<T>) -> Self {
         Self {
             inner,
-            current_fut: Arc::new(Mutex::new(None)),
+            start_fut: Arc::new(Mutex::new(None)),
+            next_fut: Arc::new(Mutex::new(None)),
             send_waker: AtomicWaker::new(),
         }
     }
 
-    fn start_handle(
+    fn start_start(
         &self,
-        handle: &mut Option<T::HandleFuture<'_>>,
+        handle: &mut Option<T::StartFuture<'_>>,
         msg: &mut MsgCell<M>,
         bus: &Bus,
     ) {
@@ -55,89 +58,137 @@ impl<M: Message, T: Handler<M>> HandlerWrapper<M, T> {
             // the lifetime of that future start from poll_send and should end in poll_result,
             // when it will be ready. To be safe we need drop that future right after it will
             // be completed in poll_result
-            Some(unsafe { std::mem::transmute(self.inner.handle(msg, bus)) }),
+            Some(unsafe { std::mem::transmute(self.inner.start(msg, bus)) }),
+        ));
+    }
+
+    fn start_next(&self, handle: &mut Option<T::NextFuture<'_>>, bus: &Bus) {
+        drop(std::mem::replace(
+            handle,
+            // SAFETY:
+            // the lifetime of that future start from poll_send and should end in poll_result,
+            // when it will be ready. To be safe we need drop that future right after it will
+            // be completed in poll_result
+            Some(unsafe { std::mem::transmute(self.inner.next(bus)) }),
         ));
     }
 }
 
-impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWrapper<M, T> {
+impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
+    for ProducerWrapper<M, T>
+{
     fn poll_send(
         &self,
         msg: &mut MsgCell<M>,
         cx: Option<&mut Context<'_>>,
         bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
-        if let Some(mut guard) = self.current_fut.try_lock() {
-            if guard.is_none() {
-                let task = TaskHandler::new(
-                    HandlerWrapperHelper::<M, T>::VTABLE,
-                    self.current_fut.clone(),
-                    0,
-                );
+        let mut guard = self.start_fut.lock();
 
-                // SAFETY: Box contains none we've checked it!
-                self.start_handle(&mut *guard, msg, bus);
-
-                return Poll::Ready(Ok(task));
-            }
+        if guard.is_none() {
+            // SAFETY: Box contains none we've checked it!
+            self.start_start(&mut *guard, msg, bus);
         }
 
-        if let Some(cx) = cx {
-            self.send_waker.register(cx.waker());
-        }
+        let Some(fut) = &mut *guard else {
+            return Poll::Pending;
+        };
 
-        Poll::Pending
+        let pinned_fut = unsafe { Pin::new_unchecked(fut) };
+        let _ = ready!(if let Some(cx) = cx {
+            pinned_fut.poll(cx)
+        } else {
+            let mut null_cx = NullContext::new();
+            pinned_fut.poll(&mut null_cx)
+        })?;
+
+        let task = TaskHandler::new(
+            HandlerWrapperHelper::<M, T>::VTABLE,
+            self.next_fut.clone(),
+            0,
+        );
+
+        Poll::Ready(Ok(task))
     }
 
     fn poll_result(
         &self,
         task: &TaskHandler,
-        resp: Option<&mut ResultCell<T::Response>>,
+        resp: Option<&mut ResultCell<T::Message>>,
         cx: &mut Context<'_>,
-        _bus: &Bus,
+        bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::HandleFuture<'static>>>>() else {
+        println!("2222222");
+
+        let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::NextFuture<'static>>>>() else {
             println!("cannot cast type");
             return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
         };
 
-        if !std::ptr::eq(&*self.current_fut, task_handle) {
+        if !std::ptr::eq(&*self.next_fut, task_handle) {
             println!("pointers are mismatch");
             return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
         }
 
-        let mut lock = self.current_fut.lock();
-        if let Some(fut) = &mut *lock {
-            // SAFETY: in box, safly can poll it
-            let res = ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx));
+        let mut lock = self.next_fut.lock();
+        loop {
+            if let Some(fut) = &mut *lock {
+                println!("3333333");
 
-            drop(lock.take());
-            drop(lock);
+                // SAFETY: in box, safly can poll it
+                let res = ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx));
 
-            self.send_waker.wake();
+                println!("5555555");
+                drop(lock.take());
+                drop(lock);
 
-            if let Some(resp_cell) = resp {
-                resp_cell.put(res);
-            } else if TypeId::of::<T::Response>() != TypeId::of::<()>() {
-                println!(
-                    "[{}]: unhandled result message of type `{}`",
-                    std::any::type_name::<T>(),
-                    std::any::type_name::<T::Response>()
-                );
+                self.send_waker.wake();
+
+                if let Some(resp_cell) = resp {
+                    resp_cell.put(res);
+                } else if TypeId::of::<T::Message>() != TypeId::of::<()>() {
+                    println!(
+                        "[{}]: unhandled result message of type `{}`",
+                        std::any::type_name::<T>(),
+                        std::any::type_name::<T::Message>()
+                    );
+                }
+
+                return Poll::Ready(Ok(()));
+            } else {
+                println!("444444");
+                self.start_next(&mut *lock, bus);
             }
-
-            return Poll::Ready(Ok(()));
         }
-
-        Poll::Pending
     }
 }
 
-pub(crate) struct HandlerWrapperHelper<M: Message, T: Handler<M>>(PhantomData<(M, T)>);
-impl<M: Message, T: Handler<M> + 'static> HandlerWrapperHelper<M, T> {
+lazy_static::lazy_static! {
+    static ref WAKER: Waker = unsafe {
+        Waker::from_raw(RawWaker::new(std::ptr::null(), NullContext::VTABLE))
+    };
+}
+
+pub struct NullContext;
+impl NullContext {
+    const VTABLE: &RawWakerVTable =
+        &RawWakerVTable::new(Self::clone_stub, Self::stub, Self::stub, Self::stub);
+
+    pub fn clone_stub(data: *const ()) -> RawWaker {
+        RawWaker::new(data, Self::VTABLE)
+    }
+
+    pub fn stub(_: *const ()) {}
+    pub fn new() -> Context<'static> {
+        Context::from_waker(&WAKER)
+    }
+}
+
+pub(crate) struct HandlerWrapperHelper<M: Message, T: MessageProducer<M>>(PhantomData<(M, T)>);
+impl<M: Message, T: MessageProducer<M> + 'static> HandlerWrapperHelper<M, T> {
     pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
         drop: |data, _| {
-            let Ok(res) = data.downcast::<Mutex<Option<T::HandleFuture<'static>>>>() else {
+            let Ok(res) = data.downcast::<Mutex<Option<T::NextFuture<'static>>>>() else {
                 println!("wrong type");
                 return;
             };

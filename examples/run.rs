@@ -4,7 +4,7 @@ use std::{alloc::Layout, any::Any, sync::Arc};
 
 use futures::Future;
 use messagebus::{
-    bus::Bus,
+    bus::{Bus, MaskMatch},
     cell::MsgCell,
     error::Error,
     handler::Handler,
@@ -88,9 +88,9 @@ struct Test {
 impl Handler<Msg> for Test {
     type Response = Msg;
     type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
-    type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
+    type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
-    fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
+    fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
         let msg = msg.take().unwrap();
 
         async move {
@@ -100,23 +100,24 @@ impl Handler<Msg> for Test {
         }
     }
 
-    fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
-        std::future::ready(Ok(()))
+    fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+        async move { Ok(()) }
     }
 }
 
 async fn run() -> Result<(), Error> {
     let bus = Bus::new();
+
     let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
-    let receiver = wrapper.into_abstract_arc();
-    let handler = receiver.send_msg(Msg(12), bus.clone()).await?;
+    bus.register(wrapper, MaskMatch::all());
 
-    println!("sent");
-    let res: Msg = receiver.result(handler).await?;
-    println!("send result got {:?}", res);
-
-    let res: Msg = receiver.request(Msg(13), bus.clone()).await?;
+    let res: Msg = bus.request(Msg(13)).await.unwrap();
     println!("request result got {:?}", res);
+
+    bus.send(Msg(12)).await?;
+
+    bus.close().await;
+    bus.wait().await;
 
     Ok(())
 }

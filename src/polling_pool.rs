@@ -9,7 +9,10 @@ use std::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::{bus::TaskHandler, receiver::AbstractReceiver};
+use crate::{
+    bus::{Bus, TaskHandler},
+    receiver::AbstractReceiver,
+};
 
 pub static WAKER_QUEUE: SegQueue<usize> = SegQueue::new();
 pub static CURRENT_WAKER: AtomicWaker = AtomicWaker::new();
@@ -50,6 +53,7 @@ impl WakerHelper {
 struct PollEntry {
     task: TaskHandler,
     receiver: Arc<dyn AbstractReceiver>,
+    multiple: bool,
 }
 
 pub struct PollingPool {
@@ -70,9 +74,22 @@ impl PollingPool {
     }
 
     #[inline]
-    pub fn push(&self, task: TaskHandler, receiver: Arc<dyn AbstractReceiver>) {
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn push(&self, task: TaskHandler, receiver: Arc<dyn AbstractReceiver>, multiple: bool) {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
-        WAKER_QUEUE.push(self.pool.insert(PollEntry { task, receiver }).unwrap());
+        WAKER_QUEUE.push(
+            self.pool
+                .insert(PollEntry {
+                    task,
+                    receiver,
+                    multiple,
+                })
+                .unwrap(),
+        );
 
         self.initialized.store(true, Ordering::Release);
         CURRENT_WAKER.wake();
@@ -84,7 +101,7 @@ impl PollingPool {
         CURRENT_WAKER.wake();
     }
 
-    pub fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+    pub fn poll(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<()> {
         CURRENT_WAKER.register(cx.waker());
 
         if !self.initialized.load(Ordering::Acquire) {
@@ -97,10 +114,16 @@ impl PollingPool {
             let waker = WakerHelper::waker(idx);
             let mut cx = Context::from_waker(&waker);
 
-            match entry.receiver.poll_result(&entry.task, None, &mut cx) {
+            match entry.receiver.poll_result(&entry.task, None, &mut cx, bus) {
                 Poll::Ready(res) => {
-                    self.pool.remove(idx);
-                    self.in_flight.fetch_sub(1, Ordering::Release);
+                    if !entry.multiple || (entry.multiple && res.is_err()) {
+                        self.pool.remove(idx);
+                        self.in_flight.fetch_sub(1, Ordering::Release);
+                    }
+
+                    if entry.multiple && res.is_ok() {
+                        WAKER_QUEUE.push(idx);
+                    }
 
                     if let Err(err) = res {
                         println!("{}", err);

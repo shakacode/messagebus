@@ -16,12 +16,17 @@ pub trait Handler<M: Message> {
     fn flush(&mut self, bus: &Bus) -> Self::FlushFuture<'_>;
 }
 
-pub trait MessageProvider {
+pub trait MessageProducer<M: Message> {
     type Message: Message;
+
+    type StartFuture<'a>: Future<Output = Result<(), Error>> + Send + 'a
+    where
+        Self: 'a;
 
     type NextFuture<'a>: Future<Output = Result<Self::Message, Error>> + Send + 'a
     where
         Self: 'a;
 
+    fn start(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Self::StartFuture<'_>;
     fn next(&self, bus: &Bus) -> Self::NextFuture<'_>;
 }

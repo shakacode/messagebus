@@ -1,55 +1,160 @@
 use std::{
     marker::PhantomData,
-    task::{Context, Poll, Waker},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
+    task::{ready, Context, Poll, Waker},
 };
 
-use crossbeam::queue::{ArrayQueue, SegQueue};
+use arc_swap::{ArcSwapAny, ArcSwapOption};
+use crossbeam::{atomic::AtomicCell, queue::ArrayQueue};
+use futures::task::AtomicWaker;
+use parking_lot::Mutex;
+use sharded_slab::Slab;
 
 use crate::{
-    bus::TaskHandler,
+    bus::{Bus, TaskHandler},
     cell::{MsgCell, ResultCell},
     error::Error,
     message::Message,
     receiver::Receiver,
 };
 
-pub struct Queue<'a, M: Message, R: Message, T: Receiver<'a, M, R> + 'static> {
-    _inner: T,
-    _limit: usize,
-    _waker_queue: SegQueue<Waker>,
-    _queue: ArrayQueue<MsgCell<M>>,
-    _m: PhantomData<&'a R>,
+enum QueueTaskInner<M> {
+    Vacant,
+    Sending(MsgCell<M>),
+    WaitingResult,
 }
 
-impl<'a, M: Message, R: Message, T: Receiver<'a, M, R> + 'static> Queue<'a, M, R, T> {
-    pub fn new(_inner: T, _limit: usize) -> Self {
-        Self {
-            _inner,
-            _limit,
-            _queue: ArrayQueue::new(_limit),
-            _waker_queue: SegQueue::new(),
-            _m: Default::default(),
-        }
+struct QueueTask<M: Message> {
+    index: usize,
+    waker: AtomicWaker,
+    generation: AtomicU64,
+    message: Mutex<QueueTaskInner<M>>,
+}
+
+impl<M: Message> QueueTask<M> {
+    fn check_task(&self, handler: &TaskHandler) -> bool {
+        false
     }
 }
 
-impl<'a, M: Message, R: Message, T: Receiver<'a, M, R> + 'static> Receiver<'a, M, R>
-    for Queue<'a, M, R, T>
-{
+pub struct Queue<M: Message, R: Message, T: Receiver<M, R> + 'static> {
+    inner: T,
+
+    queue: ArrayQueue<usize>,
+    free: ArrayQueue<usize>,
+    enqueued: AtomicUsize,
+
+    generation_sequence: AtomicU64,
+
+    tasks: Arc<[Arc<QueueTask<M>>]>,
+    current_task: AtomicUsize,
+    _m: PhantomData<(M, R, T)>,
+}
+
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Queue<M, R, T> {
+    pub fn new(inner: T, limit: usize) -> Self {
+        let free = ArrayQueue::new(limit);
+        for i in 0..limit {
+            free.push(i);
+        }
+
+        Self {
+            inner,
+            free,
+            queue: ArrayQueue::new(limit),
+            enqueued: AtomicUsize::new(0),
+            generation_sequence: AtomicU64::new(0),
+            tasks: (0..limit)
+                .map(|index| {
+                    Arc::new(QueueTask {
+                        index,
+                        waker: AtomicWaker::new(),
+                        generation: AtomicU64::new(0),
+                        message: Mutex::new(QueueTaskInner::Vacant),
+                    })
+                })
+                .collect(),
+            current_task: AtomicUsize::new(usize::MAX),
+            _m: PhantomData::default(),
+        }
+    }
+
+    #[inline]
+    fn update_task_waker(&self, _task: &TaskHandler, _wakerr: &Waker) {
+        // TODO
+    }
+}
+
+impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Queue<M, R, T> {
     fn poll_send(
         &self,
-        _msg: &mut MsgCell<M>,
-        _cx: Option<&mut Context<'_>>,
+        msg: &mut MsgCell<M>,
+        cx: Option<&mut Context<'_>>,
+        bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
+        if let Some(index) = self.free.pop() {
+            if let Ok(_) = self.current_task.compare_exchange(
+                usize::MAX,
+                index,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                // fast track
+                self.tasks[index].start(msg);
+                let th = TaskHandler::new(vtable, self.tasks.clone(), index);
+
+                Poll::Ready(Ok(th))
+            }
+        }
+
+        if current.is_none() {
+            let Some(index) = self.free.pop() else {
+                // TODO
+                // self.send_wakelist.push();
+                return Poll::Pending;
+            };
+
+            // .start(msg);
+            drop(current);
+        }
+
         Poll::Pending
     }
 
     fn poll_result(
-        &'a self,
-        _task: &TaskHandler,
+        &self,
+        task: &TaskHandler,
         _resp: Option<&mut ResultCell<R>>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
+        bus: &Bus,
     ) -> Poll<Result<(), Error>> {
+        let current_task = self.current_task.lock();
+        let index = if let Some(hash) = *current_task {
+            if hash != task.hash() {
+                self.update_task_waker(task, cx.waker());
+                return Poll::Pending;
+            }
+
+            task.index()
+        } else {
+            if let Some(index) = self.queue.pop() {
+                index
+            } else {
+                return Poll::Ready(Err(Error::TrySendError));
+            }
+        };
+
+        let entry = self.tasks.get(index).unwrap();
+
+        // let task = self.tasks.remove(idx)
+
+        let res = ready!(self
+            .inner
+            .poll_send(&mut *entry.message.lock(), Some(cx), bus))?;
+
         Poll::Pending
     }
 }
@@ -60,11 +165,12 @@ mod tests {
     use std::{any::Any, sync::Arc};
 
     use crate::{
+        bus::Bus,
         cell::MsgCell,
         error::Error,
         handler::Handler,
         message::{Message, SharedMessage},
-        receiver::{AbstractReceiver, IntoAbstractReceiver},
+        receiver::IntoAbstractReceiver,
         receivers::{queue::Queue, wrapper::HandlerWrapper},
         type_tag::{TypeTag, TypeTagInfo},
     };
@@ -141,11 +247,14 @@ mod tests {
         inner: u32,
     }
 
-    impl<'a> Handler<'a, Msg> for Test {
+    impl Handler<Msg> for Test {
         type Response = Msg;
-        type HandleFuture = impl Future<Output = Result<Self::Response, Error>> + 'a;
+        type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
+        type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a
+        where
+            Self: 'a;
 
-        fn handle(&'a self, msg: &mut MsgCell<Msg>) -> Self::HandleFuture {
+        fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
             let msg = msg.peek().0;
 
             async move {
@@ -154,25 +263,29 @@ mod tests {
                 Ok(Msg(msg + 12))
             }
         }
+
+        fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+            async move { Ok(()) }
+        }
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_queue_exec() -> Result<(), Error> {
+        let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 1 }));
         let unordered = Queue::new(wrapper, 100);
-        let receiver: Arc<dyn for<'b> AbstractReceiver<'b>> = unordered.into_abstract_arc();
+        let receiver = unordered.into_abstract_arc();
         let mut dest = Vec::new();
 
+        let mut handlers = Vec::new();
         for i in 0..100 {
             let mut cell = MsgCell::new(Msg(i));
-            receiver.send(&mut cell).await?;
+            handlers.push(receiver.send(&mut cell, bus.clone()).await?);
         }
 
-        for i in 0..100 {
-            println!("I {}", i);
-
-            let r: Msg = receiver.result(0).await?;
+        for h in handlers {
+            let r: Msg = receiver.result(h, bus.clone()).await?;
             println!("pushing result {:?}", r);
             dest.push(r.0);
         }

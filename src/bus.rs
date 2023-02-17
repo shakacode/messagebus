@@ -24,6 +24,7 @@ pub struct TaskHandlerVTable {
 
 pub struct TaskHandler {
     data: Arc<dyn Any + Send + Sync>,
+    gen: u64,
     index: usize,
     vtable: &'static TaskHandlerVTable,
 }
@@ -56,9 +57,14 @@ impl TaskHandler {
     ) -> Self {
         Self {
             data,
+            gen: 0,
             index,
             vtable,
         }
+    }
+
+    pub(crate) fn hash(&self) -> u64 {
+        0
     }
 }
 
@@ -113,6 +119,11 @@ impl Bus {
     }
 
     #[inline]
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    #[inline]
     pub async fn send_try<M: Message>(&self, msg: M) -> Result<(), Error> {
         let mut msg = MsgCell::new(msg);
 
@@ -134,6 +145,31 @@ impl Bus {
     }
 
     #[inline]
+    pub fn register<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static>(
+        &self,
+        r: H,
+        mask: MaskMatch,
+    ) {
+        self.inner.register(r, mask)
+    }
+
+    #[inline]
+    pub async fn start_producer<M: Message>(&self, msg: M) -> Result<(), Error> {
+        let mut msg = MsgCell::new(msg);
+
+        self.inner
+            .producer_start(&mut msg, SendOptions::default(), self)
+            .await?;
+
+        Ok(())
+    }
+
+    #[inline]
+    pub async fn request<M: Message, R: Message>(&self, msg: M) -> Result<R, Error> {
+        self.inner.request(msg, self).await
+    }
+
+    #[inline]
     pub async fn send_with_mask<M: Message>(&self, mask: u64, msg: M) -> Result<(), Error> {
         let mut msg = MsgCell::new(msg);
 
@@ -143,13 +179,15 @@ impl Bus {
 
         Ok(())
     }
-}
 
-impl ops::Deref for Bus {
-    type Target = BusInner;
+    #[inline]
+    pub async fn wait(&self) {
+        self.inner.wait(self).await
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.inner
+    #[inline]
+    pub async fn close(&self) {
+        self.inner.close().await
     }
 }
 
@@ -241,14 +279,19 @@ pub struct BusInner {
 }
 
 impl BusInner {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             receivers: DashMap::new(),
             processing: Arc::new(PollingPool::new()),
         }
     }
 
-    pub fn register<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static>(
+    #[inline]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.processing.is_closed()
+    }
+
+    pub(crate) fn register<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static>(
         &self,
         r: H,
         mask: MaskMatch,
@@ -268,7 +311,7 @@ impl BusInner {
             .add(mask, receiver.clone());
     }
 
-    pub fn try_send(
+    pub(crate) fn try_send(
         &self,
         msg: &mut dyn MessageCell,
         options: SendOptions,
@@ -289,13 +332,13 @@ impl BusInner {
             let task = receiver.inner.try_send_dyn(msg, bus)?;
 
             let receiver = receiver.clone();
-            self.processing.push(task, receiver.inner);
+            self.processing.push(task, receiver.inner, false);
         }
 
         Ok(())
     }
 
-    pub async fn send(
+    pub(crate) async fn send(
         &self,
         msg: &mut dyn MessageCell,
         options: SendOptions,
@@ -316,13 +359,44 @@ impl BusInner {
             let task = receiver.inner.send_dyn(msg, bus.clone()).await?;
 
             let receiver = receiver.clone();
-            self.processing.push(task, receiver.inner);
+            self.processing.push(task, receiver.inner, false);
         }
 
         Ok(())
     }
 
-    pub async fn request<M: Message, R: Message>(&self, msg: M, bus: &Bus) -> Result<R, Error> {
+    pub(crate) async fn producer_start(
+        &self,
+        msg: &mut dyn MessageCell,
+        options: SendOptions,
+        bus: &Bus,
+    ) -> Result<(), Error> {
+        let tt = msg.type_tag();
+
+        let receivers = self
+            .receivers
+            .get(&(tt.hash, 0))
+            .ok_or_else(|| Error::NoSuchReceiver(tt, None))?;
+
+        for receiver in receivers.inner.iter() {
+            if !receiver.mask.test(options.mask) {
+                continue;
+            }
+
+            let task = receiver.inner.send_dyn(msg, bus.clone()).await?;
+
+            let receiver = receiver.clone();
+            self.processing.push(task, receiver.inner, true);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn request<M: Message, R: Message>(
+        &self,
+        msg: M,
+        bus: &Bus,
+    ) -> Result<R, Error> {
         let mtt = M::TYPE_TAG();
         let rtt = R::TYPE_TAG();
 
@@ -338,13 +412,13 @@ impl BusInner {
         }
     }
 
-    pub fn wait(&self) -> impl Future<Output = ()> {
+    pub(crate) async fn wait(&self, bus: &Bus) {
         let pool = self.processing.clone();
 
-        poll_fn(move |cx| pool.poll(cx))
+        poll_fn(move |cx| pool.poll(cx, bus)).await
     }
 
-    pub async fn close(&self) {
+    pub(crate) async fn close(&self) {
         self.processing.close();
     }
 }

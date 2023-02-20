@@ -1,5 +1,6 @@
 use crossbeam::queue::SegQueue;
 use futures::task::AtomicWaker;
+use parking_lot::Mutex;
 use sharded_slab::Slab;
 use std::{
     sync::{
@@ -51,7 +52,7 @@ impl WakerHelper {
 }
 
 struct PollEntry {
-    task: TaskHandler,
+    task: Mutex<TaskHandler>,
     receiver: Arc<dyn AbstractReceiver>,
     multiple: bool,
 }
@@ -84,7 +85,7 @@ impl PollingPool {
         WAKER_QUEUE.push(
             self.pool
                 .insert(PollEntry {
-                    task,
+                    task: Mutex::new(task),
                     receiver,
                     multiple,
                 })
@@ -113,8 +114,8 @@ impl PollingPool {
 
             let waker = WakerHelper::waker(idx);
             let mut cx = Context::from_waker(&waker);
-
-            match entry.receiver.poll_result(&entry.task, None, &mut cx, bus) {
+            let mut lock = entry.task.lock();
+            match entry.receiver.poll_result(&mut *lock, None, &mut cx, bus) {
                 Poll::Ready(res) => {
                     if !entry.multiple || (entry.multiple && res.is_err()) {
                         self.pool.remove(idx);

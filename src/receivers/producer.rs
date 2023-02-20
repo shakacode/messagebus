@@ -113,13 +113,11 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
 
     fn poll_result(
         &self,
-        task: &TaskHandler,
+        task: &mut TaskHandler,
         resp: Option<&mut ResultCell<T::Message>>,
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        println!("2222222");
-
         let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::NextFuture<'static>>>>() else {
             println!("cannot cast type");
             return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
@@ -133,30 +131,35 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
         let mut lock = self.next_fut.lock();
         loop {
             if let Some(fut) = &mut *lock {
-                println!("3333333");
-
                 // SAFETY: in box, safly can poll it
                 let res = ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx));
 
-                println!("5555555");
                 drop(lock.take());
                 drop(lock);
 
                 self.send_waker.wake();
 
-                if let Some(resp_cell) = resp {
+                let res = if let Some(resp_cell) = resp {
                     resp_cell.put(res);
+                    Ok(())
                 } else if TypeId::of::<T::Message>() != TypeId::of::<()>() {
+                    // match res {
+                    //     Ok(msg) => bus.send(msg),
+                    //     Err(err) => {
                     println!(
                         "[{}]: unhandled result message of type `{}`",
                         std::any::type_name::<T>(),
                         std::any::type_name::<T::Message>()
                     );
-                }
+                    Ok(())
+                    // }
+                    // }
+                } else {
+                    Ok(())
+                };
 
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(res);
             } else {
-                println!("444444");
                 self.start_next(&mut *lock, bus);
             }
         }

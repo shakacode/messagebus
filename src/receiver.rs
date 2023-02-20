@@ -25,7 +25,7 @@ pub trait Receiver<M: Message, R: Message> {
 
     fn poll_result(
         &self,
-        task: &TaskHandler,
+        task: &mut TaskHandler,
         res: Option<&mut ResultCell<R>>,
         cx: &mut Context<'_>,
         bus: &Bus,
@@ -70,14 +70,14 @@ impl<M: Message, R: Message, H: Receiver<M, R> + 'static> ReceiverEx<M, R> for H
         poll_fn(move |cx| self.poll_send(&mut cell, Some(cx), &bus))
     }
 
-    fn process(&self, task: TaskHandler, bus: Bus) -> Self::ProcessFut<'_> {
-        poll_fn(move |cx| self.poll_result(&task, None, cx, &bus))
+    fn process(&self, mut task: TaskHandler, bus: Bus) -> Self::ProcessFut<'_> {
+        poll_fn(move |cx| self.poll_result(&mut task, None, cx, &bus))
     }
 
-    fn result(&self, task: TaskHandler, bus: Bus) -> Self::ResultFut<'_> {
+    fn result(&self, mut task: TaskHandler, bus: Bus) -> Self::ResultFut<'_> {
         async move {
             let mut cell = ResultCell::empty();
-            poll_fn(|cx| self.poll_result(&task, Some(&mut cell), cx, &bus)).await?;
+            poll_fn(|cx| self.poll_result(&mut task, Some(&mut cell), cx, &bus)).await?;
             cell.unwrap()
         }
     }
@@ -102,7 +102,7 @@ pub trait AbstractReceiver: Send + Sync + 'static {
 
     fn poll_result(
         &self,
-        task: &TaskHandler,
+        task: &mut TaskHandler,
         res: Option<&mut dyn MessageCell>,
         cx: &mut Context<'_>,
         bus: &Bus,
@@ -155,7 +155,7 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Abstract
     #[inline]
     fn poll_result(
         &self,
-        task: &TaskHandler,
+        task: &mut TaskHandler,
         res: Option<&mut dyn MessageCell>,
         cx: &mut Context<'_>,
         bus: &Bus,
@@ -213,14 +213,14 @@ impl dyn AbstractReceiver {
     }
 
     #[inline]
-    pub async fn process(&self, task: TaskHandler, bus: Bus) -> Result<(), Error> {
-        poll_fn(|cx| self.poll_result(&task, None, cx, &bus)).await
+    pub async fn process(&self, mut task: TaskHandler, bus: Bus) -> Result<(), Error> {
+        poll_fn(|cx| self.poll_result(&mut task, None, cx, &bus)).await
     }
 
     #[inline]
-    pub async fn result<R: Message>(&self, task: TaskHandler, bus: Bus) -> Result<R, Error> {
+    pub async fn result<R: Message>(&self, mut task: TaskHandler, bus: Bus) -> Result<R, Error> {
         let mut cell = ResultCell::empty();
-        poll_fn(|cx| self.poll_result(&task, Some(&mut cell), cx, &bus)).await?;
+        poll_fn(|cx| self.poll_result(&mut task, Some(&mut cell), cx, &bus)).await?;
         cell.unwrap()
     }
 

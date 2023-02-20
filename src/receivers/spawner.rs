@@ -102,9 +102,10 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerT
         self.send_waker.register(cx.waker());
 
         if let Some(state) = self.state.lock().as_mut() {
-            let res = ready!(self
-                .inner
-                .poll_result(&state.task, state.result.as_mut(), cx, bus));
+            let res =
+                ready!(self
+                    .inner
+                    .poll_result(&mut state.task, state.result.as_mut(), cx, bus));
 
             self.free_index_queue.push(self.index);
             Poll::Ready(res)
@@ -193,7 +194,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver
     #[inline]
     fn poll_result(
         &self,
-        task: &TaskHandler,
+        task: &mut TaskHandler,
         resp: Option<&mut ResultCell<R>>,
         cx: &mut Context<'_>,
         bus: &Bus,

@@ -103,7 +103,7 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
                 Ordering::Relaxed,
             ) {
                 // fast track
-                self.tasks[index].start(msg);
+                // self.tasks[index].start(msg);
                 let th = TaskHandler::new(vtable, self.tasks.clone(), index);
 
                 Poll::Ready(Ok(th))

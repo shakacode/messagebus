@@ -91,7 +91,7 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
 
     fn poll_result(
         &self,
-        task: &TaskHandler,
+        task: &mut TaskHandler,
         resp: Option<&mut ResultCell<T::Response>>,
         cx: &mut Context<'_>,
         _bus: &Bus,

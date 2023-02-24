@@ -18,10 +18,14 @@ use crate::{
     receiver::Receiver,
 };
 
+type SendFuture<M: Message, T: MessageProducer<M> + 'static> =
+    impl Future<Output = Result<(), Error>>;
+
 pub struct ProducerWrapper<M: Message, T: MessageProducer<M> + 'static> {
     inner: Arc<T>,
     start_fut: Arc<Mutex<Option<T::StartFuture<'static>>>>,
     next_fut: Arc<Mutex<Option<T::NextFuture<'static>>>>,
+    send_fut: Mutex<Pin<Box<Option<SendFuture<M, T>>>>>,
     send_waker: AtomicWaker,
 }
 
@@ -31,6 +35,7 @@ impl<M: Message, T: MessageProducer<M>> Clone for ProducerWrapper<M, T> {
             inner: self.inner.clone(),
             start_fut: Arc::new(Mutex::new(None)),
             next_fut: Arc::new(Mutex::new(None)),
+            send_fut: Mutex::new(Box::pin(None)),
             send_waker: AtomicWaker::new(),
         }
     }
@@ -42,6 +47,7 @@ impl<M: Message, T: MessageProducer<M>> ProducerWrapper<M, T> {
             inner,
             start_fut: Arc::new(Mutex::new(None)),
             next_fut: Arc::new(Mutex::new(None)),
+            send_fut: Mutex::new(Box::pin(None)),
             send_waker: AtomicWaker::new(),
         }
     }
@@ -128,8 +134,17 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
             return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
         }
 
-        let mut lock = self.next_fut.lock();
         loop {
+            {
+                let mut lock = self.send_fut.lock();
+                let mb_fut = lock.as_mut();
+                if let Some(fut) = mb_fut.as_pin_mut() {
+                    ready!(fut.poll(cx)).unwrap();
+                }
+                drop(unsafe { lock.as_mut().get_unchecked_mut() }.take());
+            }
+
+            let mut lock = self.next_fut.lock();
             if let Some(fut) = &mut *lock {
                 // SAFETY: in box, safly can poll it
                 let res = ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx));
@@ -143,17 +158,32 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
                     resp_cell.put(res);
                     Ok(())
                 } else if TypeId::of::<T::Message>() != TypeId::of::<()>() {
-                    // match res {
-                    //     Ok(msg) => bus.send(msg),
-                    //     Err(err) => {
-                    println!(
-                        "[{}]: unhandled result message of type `{}`",
-                        std::any::type_name::<T>(),
-                        std::any::type_name::<T::Message>()
-                    );
-                    Ok(())
-                    // }
-                    // }
+                    match res {
+                        Ok(msg) => {
+                            let mut lock = self.send_fut.lock();
+                            let bus = bus.clone();
+                            drop(
+                                unsafe { (&mut *lock).as_mut().get_unchecked_mut() }
+                                    .replace(async move { bus.send(msg).await }),
+                            );
+                            Ok(())
+                        }
+                        Err(err) => {
+                            task.finish();
+                            match err {
+                                Error::ProducerFinished => Err(Error::ProducerFinished),
+                                err => {
+                                    println!(
+                                        "[{}]: unhandled error result message of type `{}`: {}",
+                                        std::any::type_name::<T>(),
+                                        std::any::type_name::<T::Message>(),
+                                        err
+                                    );
+                                    Ok(())
+                                }
+                            }
+                        }
+                    }
                 } else {
                     Ok(())
                 };

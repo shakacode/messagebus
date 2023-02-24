@@ -115,9 +115,17 @@ impl PollingPool {
             let waker = WakerHelper::waker(idx);
             let mut cx = Context::from_waker(&waker);
             let mut lock = entry.task.lock();
+            if lock.is_finished() {
+                println!("producer finished");
+                self.pool.remove(idx);
+                self.in_flight.fetch_sub(1, Ordering::Release);
+                continue;
+            }
+
             match entry.receiver.poll_result(&mut *lock, None, &mut cx, bus) {
                 Poll::Ready(res) => {
                     if !entry.multiple || (entry.multiple && res.is_err()) {
+                        println!("producer finished");
                         self.pool.remove(idx);
                         self.in_flight.fetch_sub(1, Ordering::Release);
                     }

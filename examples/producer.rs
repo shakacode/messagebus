@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use futures::Future;
@@ -14,9 +15,9 @@ use messagebus::{
     bus::{Bus, MaskMatch},
     cell::MsgCell,
     error::Error,
-    handler::MessageProducer,
+    handler::{Handler, MessageProducer},
     message::{Message, SharedMessage},
-    receivers::producer::ProducerWrapper,
+    receivers::{producer::ProducerWrapper, wrapper::HandlerWrapper},
     type_tag::{TypeTag, TypeTagInfo},
 };
 
@@ -172,24 +173,48 @@ impl MessageProducer<StartMsg> for Test {
 
     fn next(&self, _: &Bus) -> Self::NextFuture<'_> {
         async move {
-            println!("next");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            Ok(Msg(self.inner.fetch_add(1, Ordering::Relaxed)))
+            let msg = Msg(self.inner.fetch_add(1, Ordering::Relaxed));
+            println!("next #{}", msg.0);
+            if msg.0 == 25 {
+                return Err(Error::ProducerFinished);
+            }
+            Ok(msg)
         }
+    }
+}
+
+impl Handler<Msg> for Test {
+    type Response = Msg;
+    type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
+    type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    fn handle(&self, msg: &mut MsgCell<Msg>, bus: &Bus) -> Self::HandleFuture<'_> {
+        let msg = msg.take().unwrap();
+
+        async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            println!("handing #{}", msg.0);
+            Ok(Msg(0))
+        }
+    }
+
+    fn flush(&mut self, bus: &Bus) -> Self::FlushFuture<'_> {
+        async move { Ok(()) }
     }
 }
 
 async fn run() -> Result<(), Error> {
     let bus = Bus::new();
-    bus.register(
-        ProducerWrapper::new(Arc::new(Test {
-            inner: AtomicU64::new(0),
-        })),
-        MaskMatch::all(),
-    );
+    let test = Arc::new(Test {
+        inner: AtomicU64::new(0),
+    });
+    bus.register(ProducerWrapper::new(test.clone()), MaskMatch::all());
+    bus.register(HandlerWrapper::new(test), MaskMatch::all());
 
     bus.start_producer(StartMsg).await?;
-    println!("1111111");
+
+    bus.close().await;
     bus.wait().await;
 
     Ok(())

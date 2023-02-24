@@ -50,4 +50,7 @@ pub enum Error {
 
     #[error("Trying to poll wrong task ({0})")]
     ErrorPollWrongTask(String),
+
+    #[error("Marker indicats that producer finished producing.")]
+    ProducerFinished,
 }

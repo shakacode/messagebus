@@ -2,12 +2,10 @@ use core::fmt;
 use std::{
     any::Any,
     future::poll_fn,
-    ops,
     sync::{Arc, Weak},
 };
 
 use dashmap::DashMap;
-use futures::Future;
 use segvec::SegVec;
 
 use crate::{
@@ -65,6 +63,14 @@ impl TaskHandler {
 
     pub(crate) fn hash(&self) -> u64 {
         0
+    }
+
+    pub(crate) fn finish(&mut self) {
+        // TODO
+    }
+    pub(crate) fn is_finished(&self) -> bool {
+        // TODO
+        false
     }
 }
 
@@ -124,7 +130,7 @@ impl Bus {
     }
 
     #[inline]
-    pub async fn send_try<M: Message>(&self, msg: M) -> Result<(), Error> {
+    pub fn send_try<M: Message>(&self, msg: M) -> Result<(), Error> {
         let mut msg = MsgCell::new(msg);
 
         self.inner

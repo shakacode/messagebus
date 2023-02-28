@@ -2,7 +2,7 @@ use futures::Future;
 
 use crate::{bus::Bus, cell::MsgCell, error::Error, message::Message};
 
-pub trait Handler<M: Message> {
+pub trait Handler<M: Message>: Send + Sync {
     type Response: Message;
     type HandleFuture<'a>: Future<Output = Result<Self::Response, Error>> + Send + 'a
     where
@@ -16,7 +16,7 @@ pub trait Handler<M: Message> {
     fn flush(&mut self, bus: &Bus) -> Self::FlushFuture<'_>;
 }
 
-pub trait MessageProducer<M: Message> {
+pub trait MessageProducer<M: Message>: Send + Sync {
     type Message: Message;
 
     type StartFuture<'a>: Future<Output = Result<(), Error>> + Send + 'a

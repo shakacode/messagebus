@@ -9,7 +9,6 @@ use messagebus::{
     error::Error,
     handler::Handler,
     message::{Message, SharedMessage},
-    receiver::IntoAbstractReceiver,
     receivers::wrapper::HandlerWrapper,
     type_tag::{TypeTag, TypeTagInfo},
 };
@@ -79,6 +78,10 @@ impl Message for Msg {
     {
         Some(Self(self.0))
     }
+
+    fn is_cloneable(&self) -> bool {
+        false
+    }
 }
 
 struct Test {
@@ -91,7 +94,7 @@ impl Handler<Msg> for Test {
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
     fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
-        let msg = msg.take().unwrap();
+        let msg = msg.get();
 
         async move {
             println!("msg {msg:?}");

@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{alloc::Layout, any::Any, sync::Arc};
 
-use crate::type_tag::TypeTag;
+use crate::{cell::MessageCell, type_tag::TypeTag};
 
 pub trait ErrorMessage: Message {}
 
@@ -24,8 +24,9 @@ pub trait Message: fmt::Debug + Unpin + Send + Sync + 'static {
     fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>>;
     fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>>;
 
-    fn try_clone_into(&self, into: &mut dyn Message) -> bool;
+    fn try_clone_into(&self, into: &mut dyn MessageCell) -> bool;
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>>;
+    fn is_cloneable(&self) -> bool;
 
     fn try_clone(&self) -> Option<Self>
     where

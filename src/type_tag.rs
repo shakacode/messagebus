@@ -32,11 +32,17 @@ impl<'a> AsRef<TypeTagInfo<'a>> for TypeTag {
 
 impl From<TypeTagInfo<'static>> for TypeTag {
     fn from(info: TypeTagInfo<'static>) -> Self {
+        Arc::new(info).into()
+    }
+}
+
+impl From<Arc<TypeTagInfo<'static>>> for TypeTag {
+    fn from(info: Arc<TypeTagInfo<'static>>) -> Self {
         let mut hasher = DefaultHasher::new();
         info.hash(&mut hasher);
 
         Self {
-            info: Arc::new(info),
+            info,
             hash: hasher.finish(),
         }
     }

@@ -16,6 +16,8 @@ use crate::{
     receiver::{AbstractReceiver, IntoAbstractReceiver, Receiver},
 };
 
+pub use crate::handler::*;
+
 pub struct TaskHandlerVTable {
     pub drop: fn(Arc<dyn Any + Send + Sync>, usize),
 }
@@ -262,8 +264,16 @@ impl BusReceivers {
         }
     }
 
+    #[inline]
     pub fn add(&mut self, mask: MaskMatch, inner: Arc<dyn AbstractReceiver>) {
         self.inner.push(BusReceiver { inner, mask })
+    }
+
+    #[inline]
+    pub fn iter(&self, mask: u64) -> impl Iterator<Item = &Arc<dyn AbstractReceiver>> + '_ {
+        self.inner
+            .iter()
+            .filter_map(move |x| x.mask.test(mask).then(move || &x.inner))
     }
 }
 
@@ -335,10 +345,16 @@ impl BusInner {
                 continue;
             }
 
-            let task = receiver.inner.try_send_dyn(msg, bus)?;
+            match receiver.inner.try_send_dyn(msg, bus) {
+                Ok(task) => {
+                    let receiver = receiver.clone();
+                    self.processing.push(task, receiver.inner, false);
+                }
 
-            let receiver = receiver.clone();
-            self.processing.push(task, receiver.inner, false);
+                Err(err) => {
+                    println!("send failed {}", err);
+                }
+            }
         }
 
         Ok(())
@@ -362,10 +378,16 @@ impl BusInner {
                 continue;
             }
 
-            let task = receiver.inner.send_dyn(msg, bus.clone()).await?;
+            match receiver.inner.send_dyn(msg, bus.clone()).await {
+                Ok(task) => {
+                    let receiver = receiver.clone();
+                    self.processing.push(task, receiver.inner, false);
+                }
 
-            let receiver = receiver.clone();
-            self.processing.push(task, receiver.inner, false);
+                Err(err) => {
+                    println!("send failed {}", err);
+                }
+            }
         }
 
         Ok(())
@@ -389,10 +411,16 @@ impl BusInner {
                 continue;
             }
 
-            let task = receiver.inner.send_dyn(msg, bus.clone()).await?;
+            match receiver.inner.send_dyn(msg, bus.clone()).await {
+                Ok(task) => {
+                    let receiver = receiver.clone();
+                    self.processing.push(task, receiver.inner, true);
+                }
 
-            let receiver = receiver.clone();
-            self.processing.push(task, receiver.inner, true);
+                Err(err) => {
+                    println!("send failed {}", err);
+                }
+            }
         }
 
         Ok(())

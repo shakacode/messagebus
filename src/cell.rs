@@ -7,6 +7,7 @@ pub trait MessageCell: Send + 'static {
     fn type_tag(&self) -> TypeTag;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn finalize(&mut self);
     fn deserialize_from(&mut self, de: &mut dyn erased_serde::Deserializer) -> Result<(), Error>;
 }
 
@@ -49,7 +50,7 @@ impl dyn MessageCell {
 
     pub fn take_cell<T: Message>(&mut self) -> Result<MsgCell<T>, Error> {
         match self.as_any_mut().downcast_mut::<MsgCell<T>>() {
-            Some(cell) => Ok(MsgCell(cell.take().ok())),
+            Some(cell) => Ok(MsgCell(cell.0.take())),
             None => Err(Error::MessageDynamicCastFail(
                 self.type_tag(),
                 T::TYPE_TAG(),
@@ -59,7 +60,7 @@ impl dyn MessageCell {
 
     pub fn take<T: Message>(&mut self) -> Result<T, Error> {
         match self.as_any_mut().downcast_mut::<MsgCell<T>>() {
-            Some(cell) => cell.take(),
+            Some(cell) => cell.take().ok_or(Error::EmptyMessageCellError),
             None => Err(Error::MessageDynamicCastFail(
                 self.type_tag(),
                 T::TYPE_TAG(),
@@ -67,15 +68,15 @@ impl dyn MessageCell {
         }
     }
 
-    pub fn cloned<T: Message>(&self) -> Result<MsgCell<T>, Error> {
-        match self.as_any().downcast_ref::<MsgCell<T>>() {
-            Some(cell) => Ok(cell.clone()),
-            None => Err(Error::MessageDynamicCastFail(
-                self.type_tag(),
-                T::TYPE_TAG(),
-            )),
-        }
-    }
+    // pub fn cloned<T: Message>(&self) -> Result<MsgCell<T>, Error> {
+    //     match self.as_any().downcast_ref::<MsgCell<T>>() {
+    //         Some(cell) => Ok(cell.clone()),
+    //         None => Err(Error::MessageDynamicCastFail(
+    //             self.type_tag(),
+    //             T::TYPE_TAG(),
+    //         )),
+    //     }
+    // }
 }
 
 #[derive(Debug, Clone)]
@@ -133,21 +134,107 @@ impl<R: Message> MessageCell for ResultCell<R> {
         R::TYPE_TAG()
     }
 
+    fn finalize(&mut self) {}
+
     fn deserialize_from(&mut self, _de: &mut dyn erased_serde::Deserializer) -> Result<(), Error> {
         Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct MsgCell<M>(Option<M>);
+#[derive(Debug)]
+enum MsgCellInner<M> {
+    Empty,
+    Clonable(M),
+    Message(M),
+}
+
+impl<M: Message> MsgCellInner<M> {
+    pub fn as_ref(&self) -> Option<&M> {
+        match self {
+            MsgCellInner::Empty => None,
+            MsgCellInner::Clonable(x) => Some(x),
+            MsgCellInner::Message(x) => Some(x),
+        }
+    }
+
+    #[inline]
+    fn get(&mut self) -> M {
+        match std::mem::replace(self, MsgCellInner::Empty) {
+            MsgCellInner::Empty => panic!("!!!"),
+            MsgCellInner::Clonable(m) => {
+                if let Some(x) = m.try_clone() {
+                    *self = MsgCellInner::Clonable(m);
+                    x
+                } else {
+                    m
+                }
+            }
+            MsgCellInner::Message(m) => m,
+        }
+    }
+
+    #[inline]
+    fn take(&mut self) -> MsgCellInner<M> {
+        std::mem::replace(self, MsgCellInner::Empty)
+    }
+
+    #[inline]
+    fn take_option(self) -> Option<M> {
+        match self {
+            MsgCellInner::Empty => None,
+            MsgCellInner::Clonable(m) => Some(m),
+            MsgCellInner::Message(m) => Some(m),
+        }
+    }
+
+    #[inline]
+    fn finalize(&mut self) {
+        *self = match std::mem::replace(self, MsgCellInner::Empty) {
+            MsgCellInner::Empty => MsgCellInner::Empty,
+            MsgCellInner::Clonable(m) => MsgCellInner::Message(m),
+            MsgCellInner::Message(m) => MsgCellInner::Message(m),
+        }
+    }
+
+    #[inline]
+    fn put(&mut self, val: M) {
+        *self = MsgCellInner::new(val);
+    }
+
+    #[inline]
+    fn unwrap_or<T>(self, err: T) -> Result<M, T> {
+        match self {
+            MsgCellInner::Empty => Err(err),
+            MsgCellInner::Clonable(m) => Ok(m),
+            MsgCellInner::Message(m) => Ok(m),
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        matches!(self, MsgCellInner::Empty)
+    }
+
+    #[inline]
+    fn new(msg: M) -> MsgCellInner<M> {
+        if msg.is_cloneable() {
+            MsgCellInner::Clonable(msg)
+        } else {
+            MsgCellInner::Message(msg)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MsgCell<M>(MsgCellInner<M>);
 
 impl<M: Message> MsgCell<M> {
     pub fn new(msg: M) -> Self {
-        MsgCell(Some(msg))
+        MsgCell(MsgCellInner::new(msg))
     }
 
     pub fn empty() -> Self {
-        MsgCell(None)
+        MsgCell(MsgCellInner::Empty)
     }
 
     #[inline]
@@ -156,8 +243,13 @@ impl<M: Message> MsgCell<M> {
     }
 
     #[inline]
-    pub fn take(&mut self) -> Result<M, Error> {
-        self.0.take().ok_or(Error::EmptyMessageCellError)
+    pub fn get(&mut self) -> M {
+        self.0.get()
+    }
+
+    #[inline]
+    pub fn take(&mut self) -> Option<M> {
+        self.0.take().take_option()
     }
 
     #[inline]
@@ -167,7 +259,12 @@ impl<M: Message> MsgCell<M> {
 
     #[inline]
     pub fn put(&mut self, val: M) {
-        self.0.replace(val);
+        self.0.put(val);
+    }
+
+    #[inline]
+    pub fn make_value(&mut self) {
+        self.0.finalize()
     }
 
     #[inline]
@@ -175,15 +272,15 @@ impl<M: Message> MsgCell<M> {
         self
     }
 
-    #[inline]
-    pub fn clone(&self) -> MsgCell<M> {
-        MsgCell(self.0.as_ref().and_then(|x| x.try_clone()))
-    }
+    // #[inline]
+    // pub fn clone(&self) -> MsgCell<M> {
+    //     MsgCell(MsgCellInner::)
+    // }
 }
 
 impl<M: Message> MessageCell for MsgCell<M> {
     fn is_empty(&self) -> bool {
-        self.0.is_none()
+        self.0.is_empty()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -196,6 +293,10 @@ impl<M: Message> MessageCell for MsgCell<M> {
 
     fn type_tag(&self) -> TypeTag {
         M::TYPE_TAG()
+    }
+
+    fn finalize(&mut self) {
+        self.0.finalize()
     }
 
     fn deserialize_from(&mut self, _de: &mut dyn erased_serde::Deserializer) -> Result<(), Error> {

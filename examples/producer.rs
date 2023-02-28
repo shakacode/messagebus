@@ -86,6 +86,10 @@ impl Message for Msg {
     {
         Some(Self(self.0))
     }
+
+    fn is_cloneable(&self) -> bool {
+        false
+    }
 }
 #[derive(Debug, Clone)]
 struct StartMsg;
@@ -152,6 +156,10 @@ impl Message for StartMsg {
     {
         Some(Self)
     }
+
+    fn is_cloneable(&self) -> bool {
+        false
+    }
 }
 
 struct Test {
@@ -190,7 +198,7 @@ impl Handler<Msg> for Test {
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
     fn handle(&self, msg: &mut MsgCell<Msg>, bus: &Bus) -> Self::HandleFuture<'_> {
-        let msg = msg.take().unwrap();
+        let msg = msg.get();
 
         async move {
             tokio::time::sleep(Duration::from_millis(100)).await;

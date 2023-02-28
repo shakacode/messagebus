@@ -230,6 +230,10 @@ mod tests {
             None
         }
 
+        fn is_cloneable(&self) -> bool {
+            false
+        }
+
         fn try_clone(&self) -> Option<Self>
         where
             Self: Sized,

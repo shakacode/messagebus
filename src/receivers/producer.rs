@@ -19,7 +19,7 @@ use crate::{
 };
 
 type SendFuture<M: Message, T: MessageProducer<M> + 'static> =
-    impl Future<Output = Result<(), Error>>;
+    impl Future<Output = Result<(), Error>> + Send;
 
 pub struct ProducerWrapper<M: Message, T: MessageProducer<M> + 'static> {
     inner: Arc<T>,
@@ -319,6 +319,10 @@ mod tests {
             Self: Sized,
         {
             Some(Self(self.0))
+        }
+
+        fn is_cloneable(&self) -> bool {
+            false
         }
     }
 

@@ -15,7 +15,7 @@ use crate::{
     type_tag::TypeTagQuery,
 };
 
-pub trait Receiver<M: Message, R: Message> {
+pub trait Receiver<M: Message, R: Message>: Send + Sync {
     fn poll_send(
         &self,
         msg: &mut MsgCell<M>,
@@ -33,35 +33,35 @@ pub trait Receiver<M: Message, R: Message> {
 }
 
 pub trait ReceiverEx<M: Message, R: Message>: Receiver<M, R> {
-    type SendFut<'a>: Future<Output = Result<TaskHandler, Error>> + 'a
+    type SendFut<'a>: Future<Output = Result<TaskHandler, Error>> + Send + 'a
     where
         Self: 'a;
-    type RequestFut<'a>: Future<Output = Result<R, Error>> + 'a
+    type RequestFut<'a>: Future<Output = Result<R, Error>> + Send + 'a
     where
         Self: 'a;
-    type ResultFut<'a>: Future<Output = Result<R, Error>> + 'a
+    type ResultFut<'a>: Future<Output = Result<R, Error>> + Send + 'a
     where
         Self: 'a;
-    type ProcessFut<'a>: Future<Output = Result<(), Error>> + 'a
+    type ProcessFut<'a>: Future<Output = Result<(), Error>> + Send + 'a
     where
         Self: 'a;
 
-    fn try_send(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Result<(), Error>;
+    fn try_send(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Result<TaskHandler, Error>;
     fn send(&self, msg: MsgCell<M>, bus: Bus) -> Self::SendFut<'_>;
     fn request(&self, msg: MsgCell<M>, bus: Bus) -> Self::RequestFut<'_>;
     fn process(&self, task: TaskHandler, bus: Bus) -> Self::ProcessFut<'_>;
     fn result(&self, task: TaskHandler, bus: Bus) -> Self::ResultFut<'_>;
 }
 
-impl<M: Message, R: Message, H: Receiver<M, R> + 'static> ReceiverEx<M, R> for H {
-    type SendFut<'a> = impl Future<Output = Result<TaskHandler, Error>> + 'a;
-    type RequestFut<'a> = impl Future<Output = Result<R, Error>> + 'a;
-    type ResultFut<'a> = impl Future<Output = Result<R, Error>> + 'a;
-    type ProcessFut<'a> = impl Future<Output = Result<(), Error>> + 'a;
+impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> ReceiverEx<M, R> for H {
+    type SendFut<'a> = impl Future<Output = Result<TaskHandler, Error>> + Send + 'a;
+    type RequestFut<'a> = impl Future<Output = Result<R, Error>> + Send + 'a;
+    type ResultFut<'a> = impl Future<Output = Result<R, Error>> + Send + 'a;
+    type ProcessFut<'a> = impl Future<Output = Result<(), Error>> + Send + 'a;
 
-    fn try_send(&self, cell: &mut MsgCell<M>, bus: &Bus) -> Result<(), Error> {
+    fn try_send(&self, cell: &mut MsgCell<M>, bus: &Bus) -> Result<TaskHandler, Error> {
         match self.poll_send(cell, None, bus) {
-            Poll::Ready(_) => Ok(()),
+            Poll::Ready(handler) => handler,
             Poll::Pending => Err(Error::TrySendError),
         }
     }

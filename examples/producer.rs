@@ -13,7 +13,7 @@ use std::{
 use futures::Future;
 use messagebus::{
     bus::{Bus, MaskMatch},
-    cell::MsgCell,
+    cell::{MessageCell, MsgCell},
     error::Error,
     handler::{Handler, MessageProducer},
     message::{Message, SharedMessage},
@@ -72,7 +72,7 @@ impl Message for Msg {
         None
     }
 
-    fn try_clone_into(&self, _into: &mut dyn Message) -> bool {
+    fn try_clone_into(&self, _into: &mut dyn MessageCell) -> bool {
         false
     }
 
@@ -142,7 +142,7 @@ impl Message for StartMsg {
         None
     }
 
-    fn try_clone_into(&self, _into: &mut dyn Message) -> bool {
+    fn try_clone_into(&self, _into: &mut dyn MessageCell) -> bool {
         false
     }
 
@@ -170,6 +170,7 @@ impl MessageProducer<StartMsg> for Test {
     type Message = Msg;
     type NextFuture<'a> = impl Future<Output = Result<Self::Message, Error>> + 'a;
     type StartFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
     fn start(&self, _msg: &mut MsgCell<StartMsg>, _: &Bus) -> Self::StartFuture<'_> {
         async move {
@@ -190,14 +191,19 @@ impl MessageProducer<StartMsg> for Test {
             Ok(msg)
         }
     }
+
+    fn close(&mut self) -> Self::CloseFuture<'_> {
+        async move { Ok(()) }
+    }
 }
 
 impl Handler<Msg> for Test {
     type Response = Msg;
     type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
-    fn handle(&self, msg: &mut MsgCell<Msg>, bus: &Bus) -> Self::HandleFuture<'_> {
+    fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
         let msg = msg.get();
 
         async move {
@@ -207,7 +213,11 @@ impl Handler<Msg> for Test {
         }
     }
 
-    fn flush(&mut self, bus: &Bus) -> Self::FlushFuture<'_> {
+    fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    fn close(&mut self) -> Self::CloseFuture<'_> {
         async move { Ok(()) }
     }
 }

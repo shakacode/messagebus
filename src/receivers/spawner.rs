@@ -1,5 +1,4 @@
 use std::{
-    future::poll_fn,
     marker::PhantomData,
     sync::Arc,
     task::{ready, Context, Poll, Waker},
@@ -8,7 +7,7 @@ use std::{
 use crossbeam::queue::ArrayQueue;
 use futures::task::AtomicWaker;
 use parking_lot::Mutex;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 
 use crate::{
     bus::{Bus, TaskHandler},
@@ -204,6 +203,14 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver
         //     .ok_or(Error::ErrorPollWrongTask(*task))?
         //     .poll(resp, cx)
         Poll::Pending
+    }
+
+    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
     }
 }
 

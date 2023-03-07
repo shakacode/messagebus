@@ -9,7 +9,7 @@ use regex::Regex;
 
 lazy_static! {
     static ref INFO_RE: Regex = Regex::new(
-        r"^((?:\s*[a-zA-Z_][a-zA-Z0-9_]*::)*)\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:<(.*)>)?\s*(.*)"
+        r"^((?:\s*[a-zA-Z_][a-zA-Z0-9_-]*::)*)\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:<(.*)>)?\s*(.*)"
     )
     .unwrap();
 }

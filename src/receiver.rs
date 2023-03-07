@@ -30,6 +30,9 @@ pub trait Receiver<M: Message, R: Message>: Send + Sync {
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>>;
+
+    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>>;
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>>;
 }
 
 pub trait ReceiverEx<M: Message, R: Message>: Receiver<M, R> {
@@ -45,12 +48,20 @@ pub trait ReceiverEx<M: Message, R: Message>: Receiver<M, R> {
     type ProcessFut<'a>: Future<Output = Result<(), Error>> + Send + 'a
     where
         Self: 'a;
+    type FlushFut<'a>: Future<Output = Result<(), Error>> + Send + 'a
+    where
+        Self: 'a;
+    type CloseFut<'a>: Future<Output = Result<(), Error>> + Send + 'a
+    where
+        Self: 'a;
 
     fn try_send(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Result<TaskHandler, Error>;
     fn send(&self, msg: MsgCell<M>, bus: Bus) -> Self::SendFut<'_>;
     fn request(&self, msg: MsgCell<M>, bus: Bus) -> Self::RequestFut<'_>;
     fn process(&self, task: TaskHandler, bus: Bus) -> Self::ProcessFut<'_>;
     fn result(&self, task: TaskHandler, bus: Bus) -> Self::ResultFut<'_>;
+    fn flush(&self, bus: Bus) -> Self::FlushFut<'_>;
+    fn close(&self) -> Self::CloseFut<'_>;
 }
 
 impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> ReceiverEx<M, R> for H {
@@ -58,6 +69,8 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Receiver
     type RequestFut<'a> = impl Future<Output = Result<R, Error>> + Send + 'a;
     type ResultFut<'a> = impl Future<Output = Result<R, Error>> + Send + 'a;
     type ProcessFut<'a> = impl Future<Output = Result<(), Error>> + Send + 'a;
+    type FlushFut<'a> = impl Future<Output = Result<(), Error>> + Send + 'a;
+    type CloseFut<'a> = impl Future<Output = Result<(), Error>> + Send + 'a;
 
     fn try_send(&self, cell: &mut MsgCell<M>, bus: &Bus) -> Result<TaskHandler, Error> {
         match self.poll_send(cell, None, bus) {
@@ -88,6 +101,14 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Receiver
             self.result(task, bus).await
         }
     }
+
+    fn flush(&self, bus: Bus) -> Self::FlushFut<'_> {
+        poll_fn(move |cx| self.poll_flush(cx, &bus))
+    }
+
+    fn close(&self) -> Self::CloseFut<'_> {
+        poll_fn(move |cx| self.poll_close(cx))
+    }
 }
 
 pub trait AbstractReceiver: Send + Sync + 'static {
@@ -107,6 +128,9 @@ pub trait AbstractReceiver: Send + Sync + 'static {
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>>;
+
+    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>>;
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>>;
 }
 
 pub trait IntoAbstractReceiver<M: Message, R: Message> {
@@ -166,6 +190,14 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Abstract
         };
 
         self.inner.poll_result(task, res, cx, bus)
+    }
+
+    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
+        self.inner.poll_flush(cx, bus)
+    }
+
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.inner.poll_close(cx)
     }
 }
 
@@ -229,5 +261,15 @@ impl dyn AbstractReceiver {
         let mut cell = MsgCell::new(msg);
         let task = self.send(&mut cell, bus.clone()).await?;
         self.result(task, bus).await
+    }
+
+    #[inline]
+    pub async fn flush(&self, bus: Bus) -> Result<(), Error> {
+        poll_fn(move |cx| self.poll_flush(cx, &bus)).await
+    }
+
+    #[inline]
+    pub async fn close(&self) -> Result<(), Error> {
+        poll_fn(move |cx| self.poll_close(cx)).await
     }
 }

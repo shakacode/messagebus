@@ -194,6 +194,14 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
             }
         }
     }
+
+    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 lazy_static::lazy_static! {
@@ -245,7 +253,7 @@ mod tests {
 
     use crate::{
         bus::Bus,
-        cell::MsgCell,
+        cell::{MessageCell, MsgCell},
         error::Error,
         handler::Handler,
         message::{Message, SharedMessage},
@@ -306,7 +314,7 @@ mod tests {
             None
         }
 
-        fn try_clone_into(&self, _into: &mut dyn Message) -> bool {
+        fn try_clone_into(&self, _into: &mut dyn MessageCell) -> bool {
             false
         }
 
@@ -334,6 +342,7 @@ mod tests {
         type Response = Msg;
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
+        type CloseFuture<'a> = std::future::Ready<Result<(), Error>>;
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
             let val = msg.peek().0;
@@ -347,6 +356,10 @@ mod tests {
         fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
+
+        fn close(&mut self) -> Self::CloseFuture<'_> {
+            std::future::ready(Ok(()))
+        }
     }
 
     struct SleepTest {
@@ -357,6 +370,7 @@ mod tests {
         type Response = Msg;
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
+        type CloseFuture<'a> = std::future::Ready<Result<(), Error>>;
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
             let val = msg.peek().0;
@@ -366,7 +380,12 @@ mod tests {
                 Ok(Msg(x + val))
             }
         }
+
         fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
+            std::future::ready(Ok(()))
+        }
+
+        fn close(&mut self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }

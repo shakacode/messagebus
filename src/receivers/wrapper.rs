@@ -16,12 +16,13 @@ use crate::{
     handler::Handler,
     message::Message,
     receiver::Receiver,
+    wakelist::WakeList,
 };
 
 pub struct HandlerWrapper<M: Message, T: Handler<M> + 'static> {
     inner: Arc<T>,
     current_fut: Arc<Mutex<Option<T::HandleFuture<'static>>>>,
-    send_waker: AtomicWaker,
+    send_waker: Mutex<WakeList>,
 }
 
 impl<M: Message, T: Handler<M>> Clone for HandlerWrapper<M, T> {
@@ -29,7 +30,7 @@ impl<M: Message, T: Handler<M>> Clone for HandlerWrapper<M, T> {
         HandlerWrapper {
             inner: self.inner.clone(),
             current_fut: Arc::new(Mutex::new(None)),
-            send_waker: AtomicWaker::new(),
+            send_waker: Mutex::new(WakeList::new()),
         }
     }
 }
@@ -39,7 +40,7 @@ impl<M: Message, T: Handler<M>> HandlerWrapper<M, T> {
         Self {
             inner,
             current_fut: Arc::new(Mutex::new(None)),
-            send_waker: AtomicWaker::new(),
+            send_waker: Mutex::new(WakeList::new()),
         }
     }
 
@@ -83,7 +84,7 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         }
 
         if let Some(cx) = cx {
-            self.send_waker.register(cx.waker());
+            self.send_waker.lock().push(cx.waker().clone());
         }
 
         Poll::Pending
@@ -97,13 +98,13 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         _bus: &Bus,
     ) -> Poll<Result<(), Error>> {
         let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::HandleFuture<'static>>>>() else {
-            println!("cannot cast type");
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
+            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from("cannot cast type"))));
         };
 
         if !std::ptr::eq(&*self.current_fut, task_handle) {
-            println!("pointers are mismatch");
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
+            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from(
+                "pointers are mismatch",
+            ))));
         }
 
         let mut lock = self.current_fut.lock();
@@ -114,7 +115,7 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
             drop(lock.take());
             drop(lock);
 
-            self.send_waker.wake();
+            self.send_waker.lock().wake_all();
 
             if let Some(resp_cell) = resp {
                 resp_cell.put(res);

@@ -3,8 +3,6 @@ use std::{alloc::Layout, any::Any, sync::Arc};
 
 use crate::{cell::MessageCell, type_tag::TypeTag};
 
-pub trait ErrorMessage: Message {}
-
 pub trait Message: fmt::Debug + Unpin + Send + Sync + 'static {
     #[allow(non_snake_case)]
     fn TYPE_TAG() -> TypeTag

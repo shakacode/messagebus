@@ -23,8 +23,9 @@ pub trait Handler<M: Message>: Send + Sync {
 
 pub trait MessageProducer<M: Message>: Send + Sync {
     type Message: Message;
+    type Context: Send;
 
-    type StartFuture<'a>: Future<Output = Result<(), Error>> + Send + 'a
+    type StartFuture<'a>: Future<Output = Result<Self::Context, Error>> + Send + 'a
     where
         Self: 'a;
 
@@ -37,6 +38,6 @@ pub trait MessageProducer<M: Message>: Send + Sync {
         Self: 'a;
 
     fn start(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Self::StartFuture<'_>;
-    fn next(&self, bus: &Bus) -> Self::NextFuture<'_>;
-    fn close(&mut self) -> Self::CloseFuture<'_>;
+    fn next<'a>(&'a self, ctx: &'a mut Self::Context, bus: &Bus) -> Self::NextFuture<'a>;
+    fn close(&self, ctx: Self::Context) -> Self::CloseFuture<'_>;
 }

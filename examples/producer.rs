@@ -1,8 +1,6 @@
 #![feature(type_alias_impl_trait)]
 
 use std::{
-    alloc::Layout,
-    any::Any,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -13,186 +11,55 @@ use std::{
 use futures::Future;
 use messagebus::{
     bus::{Bus, MaskMatch},
-    cell::{MessageCell, MsgCell},
+    cell::MsgCell,
+    derive_message_clone,
     error::Error,
     handler::{Handler, MessageProducer},
-    message::{Message, SharedMessage},
     receivers::{producer::ProducerWrapper, wrapper::HandlerWrapper},
-    type_tag::{TypeTag, TypeTagInfo},
 };
 
 #[derive(Debug, Clone)]
 struct Msg(pub u64);
+derive_message_clone!(EXAMPLE_MSG, Msg, "example::Msg");
 
-impl Message for Msg {
-    fn TYPE_TAG() -> TypeTag
-    where
-        Self: Sized,
-    {
-        TypeTagInfo::parse("demo::Msg").unwrap().into()
-    }
-
-    fn type_tag(&self) -> TypeTag {
-        Msg::TYPE_TAG()
-    }
-
-    fn type_layout(&self) -> Layout {
-        Layout::for_value(self)
-    }
-
-    fn as_any_ref(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn as_any_boxed(self: Box<Self>) -> Box<dyn Any> {
-        self as _
-    }
-
-    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any> {
-        self as _
-    }
-
-    fn as_shared_ref(&self) -> Option<&dyn SharedMessage> {
-        None
-    }
-
-    fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
-        None
-    }
-
-    fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
-        Err(self)
-    }
-
-    fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
-        None
-    }
-
-    fn try_clone_into(&self, _into: &mut dyn MessageCell) -> bool {
-        false
-    }
-
-    fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
-        None
-    }
-
-    fn try_clone(&self) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        Some(Self(self.0))
-    }
-
-    fn is_cloneable(&self) -> bool {
-        false
-    }
-}
 #[derive(Debug, Clone)]
-struct StartMsg;
+struct StartMsg(u64);
+derive_message_clone!(EXAMPLE_START_MSG, StartMsg, "example::StartMsg");
 
-impl Message for StartMsg {
-    fn TYPE_TAG() -> TypeTag
-    where
-        Self: Sized,
-    {
-        TypeTagInfo::parse("demo::StartMsg").unwrap().into()
-    }
-
-    fn type_tag(&self) -> TypeTag {
-        Msg::TYPE_TAG()
-    }
-
-    fn type_layout(&self) -> Layout {
-        Layout::for_value(self)
-    }
-
-    fn as_any_ref(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn as_any_boxed(self: Box<Self>) -> Box<dyn Any> {
-        self as _
-    }
-
-    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any> {
-        self as _
-    }
-
-    fn as_shared_ref(&self) -> Option<&dyn SharedMessage> {
-        None
-    }
-
-    fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
-        None
-    }
-
-    fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
-        Err(self)
-    }
-
-    fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
-        None
-    }
-
-    fn try_clone_into(&self, _into: &mut dyn MessageCell) -> bool {
-        false
-    }
-
-    fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
-        None
-    }
-
-    fn try_clone(&self) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        Some(Self)
-    }
-
-    fn is_cloneable(&self) -> bool {
-        false
-    }
-}
-
-struct Test {
-    inner: AtomicU64,
-}
+struct Test {}
 
 impl MessageProducer<StartMsg> for Test {
     type Message = Msg;
+    type Context = u64;
     type NextFuture<'a> = impl Future<Output = Result<Self::Message, Error>> + 'a;
-    type StartFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type StartFuture<'a> = impl Future<Output = Result<Self::Context, Error>> + 'a;
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
-    fn start(&self, _msg: &mut MsgCell<StartMsg>, _: &Bus) -> Self::StartFuture<'_> {
+    fn start(&self, msg: &mut MsgCell<StartMsg>, _: &Bus) -> Self::StartFuture<'_> {
+        let start_from = msg.get().0;
         async move {
-            println!("start");
+            println!("start {}", start_from);
 
-            Ok(())
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            Ok(start_from)
         }
     }
 
-    fn next(&self, _: &Bus) -> Self::NextFuture<'_> {
+    fn next<'a>(&'a self, ctx: &'a mut Self::Context, _: &Bus) -> Self::NextFuture<'a> {
         async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let msg = Msg(self.inner.fetch_add(1, Ordering::Relaxed));
+            let curr = *ctx;
+            *ctx += 1;
+            let msg = Msg(curr);
             println!("next #{}", msg.0);
-            if msg.0 == 25 {
+            if msg.0 == 25 || msg.0 == 125 {
                 return Err(Error::ProducerFinished);
             }
             Ok(msg)
         }
     }
 
-    fn close(&mut self) -> Self::CloseFuture<'_> {
+    fn close(&self, _ctx: Self::Context) -> Self::CloseFuture<'_> {
         async move { Ok(()) }
     }
 }
@@ -224,14 +91,17 @@ impl Handler<Msg> for Test {
 
 async fn run() -> Result<(), Error> {
     let bus = Bus::new();
-    let test = Arc::new(Test {
-        inner: AtomicU64::new(0),
-    });
+    let test = Arc::new(Test {});
     bus.register(ProducerWrapper::new(test.clone()), MaskMatch::all());
     bus.register(HandlerWrapper::new(test), MaskMatch::all());
 
-    bus.start_producer(StartMsg).await?;
+    println!("111");
+    bus.start_producer(StartMsg(0)).await?;
 
+    println!("222");
+    bus.start_producer(StartMsg(100)).await?;
+
+    println!("333");
     bus.close().await;
     bus.wait().await;
 

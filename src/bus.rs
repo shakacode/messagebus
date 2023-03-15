@@ -63,13 +63,10 @@ impl TaskHandler {
         }
     }
 
-    pub(crate) fn hash(&self) -> u64 {
-        0
-    }
-
     pub(crate) fn finish(&mut self) {
         // TODO
     }
+
     pub(crate) fn is_finished(&self) -> bool {
         // TODO
         false
@@ -267,13 +264,6 @@ impl BusReceivers {
     #[inline]
     pub fn add(&mut self, mask: MaskMatch, inner: Arc<dyn AbstractReceiver>) {
         self.inner.push(BusReceiver { inner, mask })
-    }
-
-    #[inline]
-    pub fn iter(&self, mask: u64) -> impl Iterator<Item = &Arc<dyn AbstractReceiver>> + '_ {
-        self.inner
-            .iter()
-            .filter_map(move |x| x.mask.test(mask).then(move || &x.inner))
     }
 }
 

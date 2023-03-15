@@ -1,20 +1,10 @@
-use core::fmt;
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 use thiserror::Error;
 
-use crate::{message::ErrorMessage, type_tag::TypeTag};
+use crate::{type_tag::TypeTag, Message};
 
-pub trait AbstractError: fmt::Debug + Any {}
-
-#[derive(Debug, Clone)]
-pub enum HandlerErrorKind {
-    InitFailed,
-    HandleFailed,
-    FlushFailed,
-}
-
-#[derive(Debug, Clone, Error)]
-pub enum ErrorKind {}
+pub trait AbstractError: std::error::Error + Message {}
+impl<T: std::error::Error + Message> AbstractError for T {}
 
 #[derive(Debug, Clone, Error)]
 pub enum Error {
@@ -26,9 +16,6 @@ pub enum Error {
 
     #[error("No Such Receiver Error: MessageTypeQuery")]
     AlreadyInitialized,
-
-    #[error("Handler Error")]
-    HandlerError(HandlerErrorKind, Arc<dyn ErrorMessage>),
 
     #[error("Dynamic Cast Failed: got ({0}), but expected({1})")]
     MessageDynamicCastFail(TypeTag, TypeTag),
@@ -53,4 +40,13 @@ pub enum Error {
 
     #[error("Marker indicats that producer finished producing.")]
     ProducerFinished,
+
+    #[error("Handler Error: {0}")]
+    HandlerError(Arc<dyn AbstractError>),
+}
+
+impl<T: AbstractError> From<T> for Error {
+    fn from(value: T) -> Self {
+        Self::HandlerError(Arc::new(value))
+    }
 }

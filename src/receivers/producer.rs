@@ -8,6 +8,7 @@ use std::{
 
 use futures::{ready, task::AtomicWaker, Future};
 use parking_lot::Mutex;
+use sharded_slab::{Clear, Pool, Slab};
 
 use crate::{
     bus::{Bus, TaskHandler, TaskHandlerVTable},
@@ -21,11 +22,167 @@ use crate::{
 type SendFuture<M: Message, T: MessageProducer<M> + 'static> =
     impl Future<Output = Result<(), Error>> + Send;
 
+pub struct FutureCell<F: Future> {
+    inner: Pin<Box<Option<F>>>,
+}
+
+impl<F: Future> Default for FutureCell<F> {
+    fn default() -> Self {
+        Self {
+            inner: Box::pin(None),
+        }
+    }
+}
+
+impl<F: Future> FutureCell<F> {
+    pub fn new() -> Self {
+        Self {
+            inner: Box::pin(None),
+        }
+    }
+
+    pub fn wrap(fut: F) -> Self {
+        Self {
+            inner: Box::pin(Some(fut)),
+        }
+    }
+
+    #[inline]
+    pub fn is_set(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    #[inline]
+    pub fn set(&mut self, fut: F) {
+        self.inner.set(Some(fut))
+    }
+
+    #[inline]
+    pub fn unset(&mut self) {
+        self.inner.set(None)
+    }
+
+    #[inline]
+    pub fn poll_unpin(&mut self, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let Some(fut) = self.inner.as_mut().as_pin_mut() else {
+            return Poll::Pending;
+        };
+
+        let res = ready!(fut.poll(cx));
+        self.unset();
+
+        Poll::Ready(res)
+    }
+    #[inline]
+    pub fn try_poll_unpin(&mut self, cx: &mut Context<'_>) -> Option<Poll<F::Output>> {
+        let fut = self.inner.as_mut().as_pin_mut()?;
+        let res = match fut.poll(cx) {
+            Poll::Ready(res) => res,
+            Poll::Pending => return Some(Poll::Pending),
+        };
+
+        self.unset();
+
+        Some(Poll::Ready(res))
+    }
+}
+
+struct ProducerContextInner<M: Message, T: MessageProducer<M> + 'static> {
+    context: Option<T::Context>,
+    next_fut: FutureCell<T::NextFuture<'static>>,
+    sending_fut: FutureCell<SendFuture<M, T>>,
+    close_fut: FutureCell<T::CloseFuture<'static>>,
+}
+
+impl<M: Message, T: MessageProducer<M>> Default for ProducerContextInner<M, T> {
+    fn default() -> Self {
+        Self {
+            context: None,
+            next_fut: Default::default(),
+            sending_fut: Default::default(),
+            close_fut: Default::default(),
+        }
+    }
+}
+
+impl<M: Message, T: MessageProducer<M>> Clear for ProducerContextInner<M, T> {
+    fn clear(&mut self) {
+        self.context = None;
+        self.next_fut.unset();
+        self.sending_fut.unset();
+        self.close_fut.unset();
+    }
+}
+
+struct ProducerContext<M: Message, T: MessageProducer<M> + 'static> {
+    inner: Mutex<ProducerContextInner<M, T>>,
+}
+
+impl<M: Message, T: MessageProducer<M> + 'static> ProducerContext<M, T> {
+    #[inline]
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, ProducerContextInner<M, T>> {
+        self.inner.lock()
+    }
+
+    fn init(&mut self, ctx: T::Context) {
+        self.inner.get_mut().start(ctx)
+    }
+}
+
+impl<M: Message, T: MessageProducer<M>> Clear for ProducerContext<M, T> {
+    fn clear(&mut self) {
+        self.inner.get_mut().clear();
+    }
+}
+
+impl<M: Message, T: MessageProducer<M>> Default for ProducerContext<M, T> {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(Default::default()),
+        }
+    }
+}
+
+impl<M: Message, T: MessageProducer<M>> ProducerContextInner<M, T> {
+    #[inline]
+    pub fn start(&mut self, ctx: T::Context) {
+        drop(self.context.replace(ctx));
+        self.next_fut.unset();
+        self.sending_fut.unset();
+        self.close_fut.unset();
+    }
+
+    #[inline]
+    pub fn start_next(&mut self, producer: &T, bus: &Bus) {
+        if let Some(ctx) = &mut self.context {
+            // SAFETY:
+            // the lifetime of that future start from poll_send and should end in poll_result,
+            // when it will be ready. To be safe we need drop that future right after it will
+            // be completed in poll_result
+            self.next_fut
+                .set(unsafe { std::mem::transmute(producer.next(ctx, bus)) })
+        }
+    }
+
+    #[inline]
+    pub fn start_close(&mut self, producer: &T) {
+        self.next_fut.unset();
+
+        if let Some(ctx) = self.context.take() {
+            // SAFETY:
+            // the lifetime of that future start from poll_send and should end in poll_result,
+            // when it will be ready. To be safe we need drop that future right after it will
+            // be completed in poll_result
+            self.close_fut
+                .set(unsafe { std::mem::transmute(producer.close(ctx)) })
+        }
+    }
+}
+
 pub struct ProducerWrapper<M: Message, T: MessageProducer<M> + 'static> {
     inner: Arc<T>,
-    start_fut: Arc<Mutex<Option<T::StartFuture<'static>>>>,
-    next_fut: Arc<Mutex<Option<T::NextFuture<'static>>>>,
-    send_fut: Mutex<Pin<Box<Option<SendFuture<M, T>>>>>,
+    start_fut: Mutex<FutureCell<T::StartFuture<'static>>>,
+    producers: Arc<Pool<ProducerContext<M, T>>>,
     send_waker: AtomicWaker,
 }
 
@@ -33,9 +190,8 @@ impl<M: Message, T: MessageProducer<M>> Clone for ProducerWrapper<M, T> {
     fn clone(&self) -> Self {
         ProducerWrapper {
             inner: self.inner.clone(),
-            start_fut: Arc::new(Mutex::new(None)),
-            next_fut: Arc::new(Mutex::new(None)),
-            send_fut: Mutex::new(Box::pin(None)),
+            start_fut: Mutex::new(FutureCell::new()),
+            producers: Arc::new(Pool::new()),
             send_waker: AtomicWaker::new(),
         }
     }
@@ -45,38 +201,23 @@ impl<M: Message, T: MessageProducer<M>> ProducerWrapper<M, T> {
     pub fn new(inner: Arc<T>) -> Self {
         Self {
             inner,
-            start_fut: Arc::new(Mutex::new(None)),
-            next_fut: Arc::new(Mutex::new(None)),
-            send_fut: Mutex::new(Box::pin(None)),
+            start_fut: Mutex::new(FutureCell::new()),
+            producers: Arc::new(Pool::new()),
             send_waker: AtomicWaker::new(),
         }
     }
 
     fn start_start(
         &self,
-        handle: &mut Option<T::StartFuture<'_>>,
+        handle: &mut FutureCell<T::StartFuture<'static>>,
         msg: &mut MsgCell<M>,
         bus: &Bus,
     ) {
-        drop(std::mem::replace(
-            handle,
-            // SAFETY:
-            // the lifetime of that future start from poll_send and should end in poll_result,
-            // when it will be ready. To be safe we need drop that future right after it will
-            // be completed in poll_result
-            Some(unsafe { std::mem::transmute(self.inner.start(msg, bus)) }),
-        ));
-    }
-
-    fn start_next(&self, handle: &mut Option<T::NextFuture<'_>>, bus: &Bus) {
-        drop(std::mem::replace(
-            handle,
-            // SAFETY:
-            // the lifetime of that future start from poll_send and should end in poll_result,
-            // when it will be ready. To be safe we need drop that future right after it will
-            // be completed in poll_result
-            Some(unsafe { std::mem::transmute(self.inner.next(bus)) }),
-        ));
+        // SAFETY:
+        // the lifetime of that future start from poll_send and should end in poll_result,
+        // when it will be ready. To be safe we need drop that future right after it will
+        // be completed in poll_result
+        handle.set(unsafe { std::mem::transmute(self.inner.start(msg, bus)) });
     }
 }
 
@@ -89,29 +230,38 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
         cx: Option<&mut Context<'_>>,
         bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
-        let mut guard = self.start_fut.lock();
+        let guard = self.start_fut.try_lock();
+        let Some(mut guard) = guard else {
+            println!("!!!!!!!!!");
+            // if let Some(cx) = cx {
+               // self.send_waker.register(waker) 
+            // }
 
-        if guard.is_none() {
-            // SAFETY: Box contains none we've checked it!
-            self.start_start(&mut *guard, msg, bus);
-        }
-
-        let Some(fut) = &mut *guard else {
+            // TODO store waker if has
             return Poll::Pending;
         };
 
-        let pinned_fut = unsafe { Pin::new_unchecked(fut) };
-        let _ = ready!(if let Some(cx) = cx {
-            pinned_fut.poll(cx)
+        if !guard.is_set() {
+            self.start_start(&mut *guard, msg, bus);
+        }
+
+        let ctx = ready!(if let Some(cx) = cx {
+            guard.poll_unpin(cx)
         } else {
-            let mut null_cx = NullContext::new();
-            pinned_fut.poll(&mut null_cx)
+            guard.poll_unpin(&mut NullContext::new())
         })?;
+
+        drop(guard);
+
+        let index = self
+            .producers
+            .create_with(|producer| producer.init(ctx))
+            .unwrap();
 
         let task = TaskHandler::new(
             HandlerWrapperHelper::<M, T>::VTABLE,
-            self.next_fut.clone(),
-            0,
+            self.producers.clone(),
+            index,
         );
 
         Poll::Ready(Ok(task))
@@ -124,48 +274,43 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::NextFuture<'static>>>>() else {
-            println!("cannot cast type");
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
+        println!("poll task {}", task.index());
+
+        let Some(task_handle) = task.data().downcast_ref::<Pool<ProducerContext<M, T>>>() else {
+            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from("cannot cast type"))));
         };
 
-        if !std::ptr::eq(&*self.next_fut, task_handle) {
-            println!("pointers are mismatch");
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::new())));
+        if !std::ptr::eq(&*self.producers, task_handle) {
+            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from(
+                "pointers are mismatch",
+            ))));
         }
 
         loop {
-            {
-                let mut lock = self.send_fut.lock();
-                let mb_fut = lock.as_mut();
-                if let Some(fut) = mb_fut.as_pin_mut() {
-                    ready!(fut.poll(cx)).unwrap();
-                }
-                drop(unsafe { lock.as_mut().get_unchecked_mut() }.take());
+            let Some(producer) = self.producers.get(task.index()) else {
+                panic!("internal error: producer with index {} not found!", task.index());
+            };
+
+            let mut lock = producer.inner.lock();
+
+            if let Some(poll) = lock.sending_fut.try_poll_unpin(cx) {
+                ready!(poll).unwrap();
             }
 
-            let mut lock = self.next_fut.lock();
-            if let Some(fut) = &mut *lock {
-                // SAFETY: in box, safly can poll it
-                let res = ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx));
+            if lock.next_fut.is_set() {
+                let res = ready!(lock.next_fut.poll_unpin(cx));
 
-                drop(lock.take());
-                drop(lock);
-
-                self.send_waker.wake();
-
-                let res = if let Some(resp_cell) = resp {
+                return Poll::Ready(if let Some(resp_cell) = resp {
                     resp_cell.put(res);
                     Ok(())
-                } else if TypeId::of::<T::Message>() != TypeId::of::<()>() {
+                } else {
                     match res {
                         Ok(msg) => {
-                            let mut lock = self.send_fut.lock();
-                            let bus = bus.clone();
-                            drop(
-                                unsafe { (&mut *lock).as_mut().get_unchecked_mut() }
-                                    .replace(async move { bus.send(msg).await }),
-                            );
+                            if TypeId::of::<T::Message>() != TypeId::of::<()>() {
+                                let bus = bus.clone();
+                                lock.sending_fut.set(async move { bus.send(msg).await });
+                                lock.sending_fut.try_poll_unpin(cx);
+                            }
                             Ok(())
                         }
                         Err(err) => {
@@ -184,22 +329,18 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
                             }
                         }
                     }
-                } else {
-                    Ok(())
-                };
-
-                return Poll::Ready(res);
+                });
             } else {
-                self.start_next(&mut *lock, bus);
+                lock.start_next(&self.inner, bus)
             }
         }
     }
 
-    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
+    fn poll_flush(&self, _cx: &mut Context<'_>, _bus: &Bus) -> Poll<Result<(), Error>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll_close(&self, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -228,13 +369,13 @@ impl NullContext {
 pub(crate) struct HandlerWrapperHelper<M: Message, T: MessageProducer<M>>(PhantomData<(M, T)>);
 impl<M: Message, T: MessageProducer<M> + 'static> HandlerWrapperHelper<M, T> {
     pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, _| {
-            let Ok(res) = data.downcast::<Mutex<Option<T::NextFuture<'static>>>>() else {
+        drop: |data, idx| {
+            let Ok(res) = data.downcast::<Pool<ProducerContext<M, T>>>() else {
                 println!("wrong type");
                 return;
             };
 
-            drop(res.lock().take());
+            res.clear(idx);
         },
     };
 }

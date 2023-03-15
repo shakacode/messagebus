@@ -12,6 +12,7 @@ use std::{
 
 use crate::{
     bus::{Bus, TaskHandler},
+    error::Error,
     receiver::AbstractReceiver,
 };
 
@@ -124,8 +125,14 @@ impl PollingPool {
 
             match entry.receiver.poll_result(&mut *lock, None, &mut cx, bus) {
                 Poll::Ready(res) => {
-                    if !entry.multiple || (entry.multiple && res.is_err()) {
-                        println!("producer finished");
+                    if !entry.multiple
+                        || (entry.multiple && matches!(res, Err(Error::ProducerFinished)))
+                    {
+                        // println!("producer finished {:?}", res);
+                        self.pool.remove(idx);
+                        self.in_flight.fetch_sub(1, Ordering::Release);
+                    } else if let Err(err) = &res {
+                        println!("{}", err);
                         self.pool.remove(idx);
                         self.in_flight.fetch_sub(1, Ordering::Release);
                     }

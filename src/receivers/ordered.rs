@@ -1,6 +1,9 @@
 use std::{
     marker::PhantomData,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
     task::{ready, Context, Poll},
 };
 
@@ -16,13 +19,14 @@ use crate::{
     Bus, TaskHandler, TaskHandlerVTable,
 };
 
-enum UnorderedSlotState<M: Message> {
+enum OrderedSlotState<M: Message, R: Message> {
     Vacant,
     Sending(MsgCell<M>),
     PollingResult(TaskHandler),
+    Done(ResultCell<R>),
 }
 
-impl<M: Message> UnorderedSlotState<M> {
+impl<M: Message, R: Message> OrderedSlotState<M, R> {
     #[inline]
     pub fn set_vacant(&mut self) -> Self {
         std::mem::replace(self, Self::Vacant)
@@ -38,6 +42,11 @@ impl<M: Message> UnorderedSlotState<M> {
         std::mem::replace(self, Self::PollingResult(task))
     }
 
+    #[inline]
+    pub fn set_done(&mut self, res: ResultCell<R>) -> Self {
+        std::mem::replace(self, Self::Done(res))
+    }
+
     /// Returns `true` if the unordered slot state is [`Vacant`].
     ///
     /// [`Vacant`]: UnorderedSlotState::Vacant
@@ -46,26 +55,38 @@ impl<M: Message> UnorderedSlotState<M> {
     pub fn is_vacant(&self) -> bool {
         matches!(self, Self::Vacant)
     }
+
+    /// Returns `true` if the ordered slot state is [`Done`].
+    ///
+    /// [`Done`]: OrderedSlotState::Done
+    #[must_use]
+    #[inline]
+    fn is_done(&self) -> bool {
+        matches!(self, Self::Done(..))
+    }
 }
 
-struct UnorderedSlot<M: Message, R: Message, T: Receiver<M, R> + 'static> {
+struct OrderedSlot<M: Message, R: Message, T: Receiver<M, R> + 'static> {
     inner: T,
-    state: Mutex<UnorderedSlotState<M>>,
+    generation: AtomicU64,
+    state: Mutex<OrderedSlotState<M, R>>,
     _m: PhantomData<R>,
 }
 
-impl<M: Message, R: Message, T: Receiver<M, R> + 'static> UnorderedSlot<M, R, T> {
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> OrderedSlot<M, R, T> {
     pub fn new(inner: T) -> Self {
         Self {
             inner,
-            state: Mutex::new(UnorderedSlotState::Vacant),
+            generation: AtomicU64::new(0),
+            state: Mutex::new(OrderedSlotState::Vacant),
             _m: PhantomData,
         }
     }
 
-    pub fn send(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Result<(), Error> {
+    pub fn send(&self, msg: &mut MsgCell<M>, bus: &Bus) -> Result<u64, Error> {
         let mut lock = self.state.lock();
         assert!(lock.is_vacant());
+        let gen = self.generation.fetch_add(1, Ordering::Relaxed);
 
         if let Poll::Ready(res) = self.inner.poll_send(msg, None, bus) {
             lock.set_polling(res?);
@@ -73,7 +94,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> UnorderedSlot<M, R, T>
             lock.set_sending(msg.take_cell());
         }
 
-        Ok(())
+        Ok(gen + 1)
     }
 
     pub fn poll_result(
@@ -81,31 +102,53 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> UnorderedSlot<M, R, T>
         cx: &mut Context<'_>,
         res: &mut ResultCell<R>,
         bus: &Bus,
+        result: bool,
     ) -> Poll<Result<(), Error>> {
         let mut lock = self.state.lock();
+
         loop {
             break match lock.set_vacant() {
-                UnorderedSlotState::Vacant => Poll::Ready(Ok(())),
-                UnorderedSlotState::Sending(mut msg) => {
-                    if let Poll::Ready(res) = self.inner.poll_send(&mut msg, Some(cx), bus) {
-                        match res {
-                            Ok(task) => {
-                                lock.set_polling(task);
-                                continue;
-                            }
-                            Err(err) => break Poll::Ready(Err(err)),
+                OrderedSlotState::Vacant => Poll::Ready(Ok(())),
+                OrderedSlotState::Sending(mut msg) => {
+                    match self.inner.poll_send(&mut msg, Some(cx), bus) {
+                        Poll::Ready(Ok(task)) => {
+                            lock.set_polling(task);
+                            continue;
+                        }
+                        Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                        _ => {
+                            lock.set_sending(msg);
+                            Poll::Pending
                         }
                     }
-                    lock.set_sending(msg);
+                }
+                OrderedSlotState::PollingResult(mut task) => {
+                    if result {
+                        if let Poll::Ready(res) = self.inner.poll_result(&mut task, res, cx, bus) {
+                            break Poll::Ready(res);
+                        }
+
+                        lock.set_polling(task);
+                    } else {
+                        let mut cell = ResultCell::empty();
+                        match self.inner.poll_result(&mut task, &mut cell, cx, bus) {
+                            Poll::Ready(Ok(_)) => {
+                                lock.set_done(cell);
+                            }
+                            Poll::Ready(res) => break Poll::Ready(res),
+                            _ => {
+                                lock.set_polling(task);
+                            }
+                        }
+                    }
+
                     Poll::Pending
                 }
-                UnorderedSlotState::PollingResult(mut task) => {
-                    if let Poll::Ready(res) = self.inner.poll_result(&mut task, res, cx, bus) {
-                        Poll::Ready(res)
-                    } else {
-                        lock.set_polling(task);
-                        Poll::Pending
+                OrderedSlotState::Done(cell) => {
+                    if result {
+                        lock.set_done(cell);
                     }
+                    Poll::Pending
                 }
             };
         }
@@ -116,18 +159,18 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> UnorderedSlot<M, R, T>
     }
 }
 
-pub struct UnorderedInner<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> {
+pub struct OrderedInner<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> {
     free_queue: ArrayQueue<usize>,
-    slots: Box<[UnorderedSlot<M, R, T>]>,
+    slots: Box<[OrderedSlot<M, R, T>]>,
 }
 
-impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> UnorderedInner<M, R, T> {
+impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> OrderedInner<M, R, T> {
     pub fn new(inner: T, capacity: usize) -> Self {
         let mut vec = Vec::with_capacity(capacity);
         let free_queue = ArrayQueue::new(capacity);
         for i in 0..capacity {
             free_queue.push(i).unwrap();
-            vec.push(UnorderedSlot::new(inner.clone()))
+            vec.push(OrderedSlot::new(inner.clone()))
         }
 
         Self {
@@ -137,30 +180,35 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> UnorderedInner
     }
 }
 
-pub struct Unordered<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> {
-    inner: Arc<UnorderedInner<M, R, T>>,
+pub struct Ordered<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> {
+    inner: Arc<OrderedInner<M, R, T>>,
+    queue: ArrayQueue<usize>,
+    current: AtomicU64,
     send_wakelist: WakeList,
 }
 
-impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Unordered<M, R, T> {
+impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Ordered<M, R, T> {
     pub fn new(inner: T, capacity: usize) -> Self {
         Self {
-            inner: Arc::new(UnorderedInner::new(inner, capacity)),
+            inner: Arc::new(OrderedInner::new(inner, capacity)),
+            queue: ArrayQueue::new(capacity),
+            current: AtomicU64::new(u64::MAX),
             send_wakelist: WakeList::new(),
         }
     }
 
-    fn create_task(&self, index: usize) -> TaskHandler {
+    #[inline]
+    fn create_task(&self, index: usize, gen: u64) -> TaskHandler {
         TaskHandler::new(
             TaskHelper::<M, R, T>::VTABLE,
             self.inner.clone(),
-            index as _,
+            (gen << 32) | index as u64,
         )
     }
 }
 
 impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M, R>
-    for Unordered<M, R, T>
+    for Ordered<M, R, T>
 {
     fn poll_send(
         &self,
@@ -176,9 +224,9 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M
             return Poll::Pending;
         };
 
-        self.inner.slots[index].send(msg, bus)?;
+        let gen = self.inner.slots[index].send(msg, bus)?;
 
-        Poll::Ready(Ok(self.create_task(index)))
+        Poll::Ready(Ok(self.create_task(index, gen)))
     }
 
     fn poll_result(
@@ -188,10 +236,35 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        ready!(self.inner.slots[task.index() as usize].poll_result(cx, res, bus))?;
-        task.finish();
-        self.send_wakelist.wake_all();
-        Poll::Ready(Ok(()))
+        if !std::ptr::eq(task.data_ptr(), Arc::as_ptr(&self.inner) as *const ()) {
+            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from("ptr not eq"))));
+        }
+
+        if let Some(slot) = self.inner.slots.get(task.index() as usize) {
+            if self.current.load(Ordering::Relaxed) == task.index() {
+
+                // if slot.generation.load(Ordering::Relaxed) != task.generation() {
+                //     return Poll::Ready(Ok(())); // TaskHandler
+                // }
+            }
+
+            let current = if self.current.load(Ordering::Relaxed) == task.index() {
+                true
+            } else {
+                false
+            };
+
+            ready!(slot.poll_result(cx, res, bus, current))?;
+
+            task.finish();
+            self.send_wakelist.wake_all();
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Ready(Err(Error::ErrorPollWrongTask(format!(
+                "index not found {}",
+                task.index()
+            ))))
+        }
     }
 
     fn poll_flush(&self, _cx: &mut Context<'_>, _bus: &Bus) -> Poll<Result<(), Error>> {
@@ -209,7 +282,7 @@ struct TaskHelper<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static>(
 impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> TaskHelper<M, R, T> {
     pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
         drop: |data, index| {
-            let Ok(res) = data.downcast::<UnorderedInner<M, R, T>>() else {
+            let Ok(res) = data.downcast::<OrderedInner<M, R, T>>() else {
                 return;
             };
 
@@ -217,7 +290,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> TaskHelper<M, 
                 slot.cancel();
             }
 
-            let _ = res.free_queue.push(index as usize);
+            let _ = res.free_queue.push(index as _);
         },
     };
 }
@@ -233,7 +306,7 @@ mod tests {
         receivers::wrapper::HandlerWrapper, Bus,
     };
 
-    use super::Unordered;
+    use super::Ordered;
 
     #[derive(Debug, Clone, PartialEq)]
     struct Msg(pub u32);
@@ -279,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_unordered_exec() -> Result<(), Error> {
         let bus = Bus::new();
-        let un = Unordered::new(HandlerWrapper::new(Arc::new(Test { inner: 12 })), 4);
+        let un = Ordered::new(HandlerWrapper::new(Arc::new(Test { inner: 12 })), 4);
         let h1 = un.try_send(&mut MsgCell::new(Msg(1)), &bus).unwrap();
         let h2 = un.try_send(&mut MsgCell::new(Msg(2)), &bus).unwrap();
         let h3 = un.try_send(&mut MsgCell::new(Msg(3)), &bus).unwrap();
@@ -303,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn test_unordered_exec_with_cancel() -> Result<(), Error> {
         let bus = Bus::new();
-        let un = Unordered::new(HandlerWrapper::new(Arc::new(Test { inner: 12 })), 4);
+        let un = Ordered::new(HandlerWrapper::new(Arc::new(Test { inner: 12 })), 4);
         let h1 = un.try_send(&mut MsgCell::new(Msg(1)), &bus).unwrap();
         let h2 = un.try_send(&mut MsgCell::new(Msg(2)), &bus).unwrap();
         let h3 = un.try_send(&mut MsgCell::new(Msg(3)), &bus).unwrap();

@@ -10,7 +10,7 @@ use messagebus::{
     derive_message_clone,
     error::Error,
     handler::{Handler, MessageProducer},
-    receivers::{producer::ProducerWrapper, wrapper::HandlerWrapper},
+    receivers::{producer::ProducerWrapper, unordered::Unordered, wrapper::HandlerWrapper},
 };
 
 #[derive(Debug, Clone)]
@@ -47,8 +47,7 @@ impl MessageProducer<StartMsg> for Test {
             *ctx += 1;
             let msg = Msg(curr);
             println!("next #{}", msg.0);
-            if msg.0 == 25 || msg.0 == 125 {
-                println!(">>>>> stopping");
+            if msg.0 == 99 || msg.0 == 199 {
                 return Err(Error::ProducerFinished);
             }
             Ok(msg)
@@ -89,7 +88,10 @@ async fn run() -> Result<(), Error> {
     let bus = Bus::new();
     let test = Arc::new(Test {});
     bus.register(ProducerWrapper::new(test.clone()), MaskMatch::all());
-    bus.register(HandlerWrapper::new(test), MaskMatch::all());
+    bus.register(
+        Unordered::new(HandlerWrapper::new(test), 25),
+        MaskMatch::all(),
+    );
 
     println!("111");
     bus.start_producer(StartMsg(0)).await?;

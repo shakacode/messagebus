@@ -1,28 +1,28 @@
 use std::{
-    any::TypeId,
     marker::PhantomData,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
-use futures::{ready, task::AtomicWaker, Future};
+use futures::{ready, Future};
 use parking_lot::Mutex;
 
 use crate::{
-    bus::{Bus, TaskHandler, TaskHandlerVTable},
+    bus::Bus,
     cell::{MsgCell, ResultCell},
     error::Error,
     handler::Handler,
     message::Message,
     receiver::Receiver,
-    wakelist::WakeList,
+    utils::wakelist::WakeList,
+    TaskHandler, TaskHandlerVTable,
 };
 
 pub struct HandlerWrapper<M: Message, T: Handler<M> + 'static> {
     inner: Arc<T>,
     current_fut: Arc<Mutex<Option<T::HandleFuture<'static>>>>,
-    send_waker: Mutex<WakeList>,
+    send_waker: WakeList,
 }
 
 impl<M: Message, T: Handler<M>> Clone for HandlerWrapper<M, T> {
@@ -30,7 +30,7 @@ impl<M: Message, T: Handler<M>> Clone for HandlerWrapper<M, T> {
         HandlerWrapper {
             inner: self.inner.clone(),
             current_fut: Arc::new(Mutex::new(None)),
-            send_waker: Mutex::new(WakeList::new()),
+            send_waker: WakeList::new(),
         }
     }
 }
@@ -40,7 +40,7 @@ impl<M: Message, T: Handler<M>> HandlerWrapper<M, T> {
         Self {
             inner,
             current_fut: Arc::new(Mutex::new(None)),
-            send_waker: Mutex::new(WakeList::new()),
+            send_waker: WakeList::new(),
         }
     }
 
@@ -84,7 +84,7 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         }
 
         if let Some(cx) = cx {
-            self.send_waker.lock().push(cx.waker().clone());
+            self.send_waker.register(cx.waker());
         }
 
         Poll::Pending
@@ -93,7 +93,7 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
     fn poll_result(
         &self,
         task: &mut TaskHandler,
-        resp: Option<&mut ResultCell<T::Response>>,
+        resp: &mut ResultCell<T::Response>,
         cx: &mut Context<'_>,
         _bus: &Bus,
     ) -> Poll<Result<(), Error>> {
@@ -110,22 +110,12 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         let mut lock = self.current_fut.lock();
         if let Some(fut) = &mut *lock {
             // SAFETY: in box, safly can poll it
-            let res = ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx));
+            resp.put(ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx)));
 
             drop(lock.take());
             drop(lock);
 
-            self.send_waker.lock().wake_all();
-
-            if let Some(resp_cell) = resp {
-                resp_cell.put(res);
-            } else if TypeId::of::<T::Response>() != TypeId::of::<()>() {
-                println!(
-                    "[{}]: unhandled result message of type `{}`",
-                    std::any::type_name::<T>(),
-                    std::any::type_name::<T::Response>()
-                );
-            }
+            self.send_waker.wake_all();
 
             return Poll::Ready(Ok(()));
         }

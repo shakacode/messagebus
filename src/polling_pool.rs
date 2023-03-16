@@ -10,11 +10,7 @@ use std::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::{
-    bus::{Bus, TaskHandler},
-    error::Error,
-    receiver::AbstractReceiver,
-};
+use crate::{bus::Bus, error::Error, receiver::AbstractReceiver, TaskHandler};
 
 pub static WAKER_QUEUE: SegQueue<usize> = SegQueue::new();
 pub static CURRENT_WAKER: AtomicWaker = AtomicWaker::new();

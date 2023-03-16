@@ -1,5 +1,5 @@
 use std::{
-    pin::Pin,
+    marker::PhantomData,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -12,12 +12,13 @@ use futures::{task::AtomicWaker, Future};
 use parking_lot::Mutex;
 
 use crate::{
-    bus::{Bus, TaskHandler},
+    bus::Bus,
     cell::{MsgCell, ResultCell},
     error::Error,
     message::Message,
     receiver::{Receiver, ReceiverEx},
-    wakelist::WakeList,
+    utils::{future_cell::FutureCell, wakelist::WakeList},
+    TaskHandler, TaskHandlerVTable,
 };
 
 struct QueueItem<M: Message> {
@@ -36,6 +37,23 @@ impl<M: Message> QueueItem<M> {
     }
 }
 
+pub struct Current<M: Message, R: Message, T: Receiver<M, R> + 'static> {
+    fut: FutureCell<SendFuture<M, R, T>>,
+    index: usize,
+    generation: u64,
+    result: ResultCell<R>,
+}
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Current<M, R, T> {
+    fn new(index: usize, generation: u64) -> Current<M, R, T> {
+        Self {
+            fut: FutureCell::new(),
+            index,
+            generation,
+            result: ResultCell::empty(),
+        }
+    }
+}
+
 type SendFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
     impl Future<Output = Result<R, Error>> + Send;
 
@@ -43,10 +61,10 @@ pub struct Queue<M: Message, R: Message, T: Receiver<M, R> + 'static> {
     inner: Arc<T>,
     free: ArrayQueue<usize>,
     queue: ArrayQueue<QueueItem<M>>,
-    wakers: Arc<[AtomicWaker]>,
+    wakers: Arc<Box<[Option<AtomicWaker>]>>,
     limit: usize,
-    wakelist: Mutex<WakeList>,
-    current: Mutex<Pin<Box<Option<SendFuture<M, R, T>>>>>,
+    wakelist: WakeList,
+    current: Arc<Mutex<Current<M, R, T>>>,
     generation_sequence: AtomicU64,
 }
 
@@ -62,9 +80,9 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Queue<M, R, T> {
             inner: Arc::new(inner),
             free,
             queue: ArrayQueue::new(limit),
-            wakers: (0..limit).map(|_| AtomicWaker::new()).collect(),
-            wakelist: Mutex::new(WakeList::new()),
-            current: Mutex::new(Box::pin(None)),
+            wakers: Arc::new((0..limit).map(|_| None).collect()),
+            wakelist: WakeList::new(),
+            current: Arc::new(Mutex::new(Current::new(0, 0))),
             generation_sequence: AtomicU64::new(1),
         }
     }
@@ -72,6 +90,10 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Queue<M, R, T> {
     #[inline(always)]
     fn next_gen(&self) -> u64 {
         self.generation_sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn split_index(&self, index: u64) -> (u64, usize) {
+        (index >> 32, (index & u32::MAX as u64) as usize)
     }
 }
 
@@ -85,33 +107,35 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
         // trying fast track
         if self.free.is_full() {
             if let Some(mut lock) = self.current.try_lock() {
-                if lock.is_none() {
+                if !lock.fut.is_set() {
+                    lock.generation = self.next_gen();
+
                     let inner = self.inner.clone();
                     let bus = bus.clone();
 
-                    enum Val<M: Message> {
-                        Task(TaskHandler),
-                        Cell(MsgCell<M>),
+                    enum TaskState<M: Message> {
+                        Sending(MsgCell<M>),
+                        PollingResult(TaskHandler),
                     }
 
-                    let val = if let Ok(task) = inner.try_send(msg, &bus) {
-                        Val::Task(task)
+                    let val = if let Ok(task) = self.inner.try_send(msg, &bus) {
+                        TaskState::PollingResult(task)
                     } else {
-                        Val::Cell(msg.take_cell())
+                        TaskState::Sending(msg.take_cell())
                     };
 
-                    drop(
-                        unsafe { (&mut *lock).as_mut().get_unchecked_mut() }.replace(async move {
-                            match val {
-                                Val::Task(task) => inner.result(task, bus).await,
-                                Val::Cell(cell) => inner.request(cell, bus).await,
-                            }
-                        }),
-                    );
+                    lock.fut.set(async move {
+                        match val {
+                            TaskState::PollingResult(task) => inner.result(task, bus).await,
+                            TaskState::Sending(cell) => inner.request(cell, bus).await,
+                        }
+                    });
 
-                    let task = todo!();
-
-                    return Poll::Ready(Ok(task));
+                    return Poll::Ready(Ok(TaskHandler::new(
+                        TaskHelperCancel::<M, R, T>::VTABLE,
+                        self.current.clone(),
+                        lock.generation,
+                    )));
                 }
             }
         }
@@ -128,13 +152,17 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
                 })
                 .is_ok());
 
-            let task = todo!();
+            let task = TaskHandler::new(
+                TaskHelperUnqueue::<M, R, T>::VTABLE,
+                self.wakers.clone(),
+                (generation << 32) & index as u64,
+            );
 
             return Poll::Ready(Ok(task));
         }
 
         if let Some(cx) = cx {
-            self.wakelist.lock().push(cx.waker().clone());
+            self.wakelist.register(cx.waker());
         }
 
         Poll::Pending
@@ -143,17 +171,28 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
     fn poll_result(
         &self,
         task: &mut TaskHandler,
-        resp: Option<&mut ResultCell<R>>,
+        resp: &mut ResultCell<R>,
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        let mut lock = self.current.lock();
-        let mb_fut = lock.as_mut();
-        if let Some(fut) = mb_fut.as_pin_mut() {
-            let result = ready!(fut.poll(cx));
-        }
+        if let Some(mut lock) = self.current.try_lock() {
+            if let Some(fut) = lock.fut.try_poll_unpin(cx) {
+                let res = ready!(fut);
+                if task.index() == lock.generation {
+                    resp.put(res);
+                } else {
+                    lock.result.put(res);
+                }
+                if let Some(item) = self.queue.pop() {}
+            }
+        } else {
+            let (gen, idx) = self.split_index(task.index());
+            if idx as u32 != u32::MAX {
+                // self.wakers[idx].waker.register(cx.waker());
+            }
 
-        drop(unsafe { lock.as_mut().get_unchecked_mut() }.take());
+            return Poll::Pending;
+        }
 
         Poll::Pending
     }
@@ -167,6 +206,38 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
     }
 }
 
+struct TaskHelperCancel<M: Message, R: Message, T: Receiver<M, R> + 'static>(
+    PhantomData<(M, R, T)>,
+);
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> TaskHelperCancel<M, R, T> {
+    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
+        drop: |data, gen| {
+            let Ok(res) = data.downcast::<Mutex<Current<M, R, T>>>() else {
+                return;
+            };
+
+            let lock = res.lock();
+            if lock.generation == gen {
+                // lock.fut.unset();
+            }
+        },
+    };
+}
+
+struct TaskHelperUnqueue<M: Message, R: Message, T: Receiver<M, R> + 'static>(
+    PhantomData<(M, R, T)>,
+);
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> TaskHelperUnqueue<M, R, T> {
+    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
+        drop: |data, indexgen| {
+            let Ok(res) = data.downcast::<Box<[Option<AtomicWaker>]>>() else {
+                return;
+            };
+
+            // res[(indexgen & u32::MAX as u64) as usize].clear();
+        },
+    };
+}
 #[cfg(test)]
 mod tests {
     use futures::Future;

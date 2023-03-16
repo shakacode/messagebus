@@ -1,6 +1,4 @@
-use core::fmt;
 use std::{
-    any::Any,
     future::poll_fn,
     sync::{Arc, Weak},
 };
@@ -14,71 +12,10 @@ use crate::{
     message::Message,
     polling_pool::PollingPool,
     receiver::{AbstractReceiver, IntoAbstractReceiver, Receiver},
+    TaskHandler,
 };
 
 pub use crate::handler::*;
-
-pub struct TaskHandlerVTable {
-    pub drop: fn(Arc<dyn Any + Send + Sync>, usize),
-}
-
-pub struct TaskHandler {
-    data: Arc<dyn Any + Send + Sync>,
-    gen: u64,
-    index: usize,
-    vtable: &'static TaskHandlerVTable,
-}
-
-impl fmt::Debug for TaskHandler {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Task #{} in {:?}", self.index, self.data)
-    }
-}
-
-unsafe impl Send for TaskHandler {}
-unsafe impl Sync for TaskHandler {}
-
-impl TaskHandler {
-    #[inline]
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    #[inline]
-    pub fn data(&self) -> &Arc<dyn Any + Send + Sync> {
-        &self.data
-    }
-
-    #[inline]
-    pub fn new(
-        vtable: &'static TaskHandlerVTable,
-        data: Arc<dyn Any + Send + Sync>,
-        index: usize,
-    ) -> Self {
-        Self {
-            data,
-            gen: 0,
-            index,
-            vtable,
-        }
-    }
-
-    pub(crate) fn finish(&mut self) {
-        // TODO
-    }
-
-    pub(crate) fn is_finished(&self) -> bool {
-        // TODO
-        false
-    }
-}
-
-impl Drop for TaskHandler {
-    fn drop(&mut self) {
-        // TODO optimize redundant clone
-        (self.vtable.drop)(self.data.clone(), self.index);
-    }
-}
 
 pub const MASK_ALL: u64 = u64::MAX;
 pub const MASK_NONE: u64 = 0;
@@ -129,7 +66,7 @@ impl Bus {
     }
 
     #[inline]
-    pub fn send_try<M: Message>(&self, msg: M) -> Result<(), Error> {
+    pub fn try_send<M: Message>(&self, msg: M) -> Result<(), Error> {
         let mut msg = MsgCell::new(msg);
 
         self.inner
@@ -170,7 +107,10 @@ impl Bus {
     }
 
     #[inline]
-    pub async fn request<M: Message, R: Message>(&self, msg: M) -> Result<R, Error> {
+    pub async fn request<M: Message, R: Message>(
+        &self,
+        msg: M,
+    ) -> Result<RequestHandler<M, R>, Error> {
         self.inner.request(msg, self).await
     }
 
@@ -420,7 +360,7 @@ impl BusInner {
         &self,
         msg: M,
         bus: &Bus,
-    ) -> Result<R, Error> {
+    ) -> Result<RequestHandler<M, R>, Error> {
         let mtt = M::TYPE_TAG();
         let rtt = R::TYPE_TAG();
 
@@ -430,7 +370,17 @@ impl BusInner {
             .ok_or_else(|| Error::NoSuchReceiver(mtt.clone(), Some(rtt.clone())))?;
 
         if let Some(receiver) = receivers.inner.iter().next() {
-            receiver.inner.request(msg, bus.clone()).await
+            let task = receiver
+                .inner
+                .send(&mut MsgCell::new(msg), bus.clone())
+                .await?;
+
+            Ok(RequestHandler {
+                task,
+                receiver: receiver.clone(),
+                bus: bus.clone(),
+                _m: Default::default(),
+            })
         } else {
             Err(Error::NoSuchReceiver(mtt, Some(rtt)))
         }
@@ -444,5 +394,18 @@ impl BusInner {
 
     pub(crate) async fn close(&self) {
         self.processing.close();
+    }
+}
+
+pub struct RequestHandler<M: Message, R: Message> {
+    task: TaskHandler,
+    receiver: BusReceiver,
+    bus: Bus,
+    _m: std::marker::PhantomData<(M, R)>,
+}
+
+impl<M: Message, R: Message> RequestHandler<M, R> {
+    pub async fn result(self) -> Result<R, Error> {
+        self.receiver.inner.result(self.task, self.bus).await
     }
 }

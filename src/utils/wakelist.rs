@@ -2,14 +2,38 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use std::task::Waker;
 
-const NUM_WAKERS: usize = 16;
+use parking_lot::Mutex;
 
-pub(crate) struct WakeList {
+const NUM_WAKERS: usize = 32;
+
+pub struct WakeList {
+    inner: Mutex<WakeListInner>,
+}
+
+impl WakeList {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(WakeListInner::new()),
+        }
+    }
+
+    #[inline]
+    pub fn register(&self, waker: &Waker) {
+        self.inner.lock().push(waker.clone());
+    }
+
+    #[inline]
+    pub fn wake_all(&self) {
+        self.inner.lock().wake_all();
+    }
+}
+
+pub(crate) struct WakeListInner {
     inner: [MaybeUninit<Waker>; NUM_WAKERS],
     curr: usize,
 }
 
-impl WakeList {
+impl WakeListInner {
     pub(crate) fn new() -> Self {
         Self {
             inner: unsafe {
@@ -28,6 +52,7 @@ impl WakeList {
         self.curr < NUM_WAKERS
     }
 
+    #[inline]
     pub(crate) fn push(&mut self, val: Waker) {
         debug_assert!(self.can_push());
 
@@ -45,7 +70,7 @@ impl WakeList {
     }
 }
 
-impl Drop for WakeList {
+impl Drop for WakeListInner {
     fn drop(&mut self) {
         let slice = ptr::slice_from_raw_parts_mut(self.inner.as_mut_ptr() as *mut Waker, self.curr);
         unsafe { ptr::drop_in_place(slice) };

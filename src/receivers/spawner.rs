@@ -10,17 +10,18 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::{
-    bus::{Bus, TaskHandler},
+    bus::Bus,
     cell::{MsgCell, ResultCell},
     error::Error,
     message::Message,
     receiver::Receiver,
-    wakelist::WakeList,
+    utils::wakelist::WakeListInner,
+    TaskHandler,
 };
 
 struct FreeIndexQueue {
     queue: ArrayQueue<usize>,
-    wakelist: Mutex<WakeList>,
+    wakelist: Mutex<WakeListInner>,
 }
 
 impl FreeIndexQueue {
@@ -49,14 +50,14 @@ impl FreeIndexQueue {
 
         Self {
             queue,
-            wakelist: Mutex::new(WakeList::new()),
+            wakelist: Mutex::new(WakeListInner::new()),
         }
     }
 }
 
 struct SpawnerTaskState<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> {
     task: TaskHandler,
-    result: Option<ResultCell<R>>,
+    result: ResultCell<R>,
     _m: PhantomData<(M, R, T)>,
 }
 
@@ -89,7 +90,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerT
 
     fn poll_result(
         &self,
-        resp: Option<&mut ResultCell<R>>,
+        resp: &mut ResultCell<R>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), Error>> {
         Poll::Pending
@@ -101,10 +102,9 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> SpawnerT
         self.send_waker.register(cx.waker());
 
         if let Some(state) = self.state.lock().as_mut() {
-            let res =
-                ready!(self
-                    .inner
-                    .poll_result(&mut state.task, state.result.as_mut(), cx, bus));
+            let res = ready!(self
+                .inner
+                .poll_result(&mut state.task, &mut state.result, cx, bus));
 
             self.free_index_queue.push(self.index);
             Poll::Ready(res)
@@ -194,7 +194,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver
     fn poll_result(
         &self,
         task: &mut TaskHandler,
-        resp: Option<&mut ResultCell<R>>,
+        resp: &mut ResultCell<R>,
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {

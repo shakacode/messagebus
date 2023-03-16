@@ -1,96 +1,27 @@
 use std::{
-    any::TypeId,
     marker::PhantomData,
-    pin::Pin,
     sync::Arc,
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-use futures::{ready, task::AtomicWaker, Future};
+use futures::ready;
 use parking_lot::Mutex;
-use sharded_slab::{Clear, Pool, Slab};
+use sharded_slab::{Clear, Pool};
 
 use crate::{
-    bus::{Bus, TaskHandler, TaskHandlerVTable},
+    bus::Bus,
     cell::{MsgCell, ResultCell},
     error::Error,
     handler::MessageProducer,
     message::Message,
     receiver::Receiver,
+    utils::{future_cell::FutureCell, wakelist::WakeList},
+    TaskHandler, TaskHandlerVTable,
 };
-
-type SendFuture<M: Message, T: MessageProducer<M> + 'static> =
-    impl Future<Output = Result<(), Error>> + Send;
-
-pub struct FutureCell<F: Future> {
-    inner: Pin<Box<Option<F>>>,
-}
-
-impl<F: Future> Default for FutureCell<F> {
-    fn default() -> Self {
-        Self {
-            inner: Box::pin(None),
-        }
-    }
-}
-
-impl<F: Future> FutureCell<F> {
-    pub fn new() -> Self {
-        Self {
-            inner: Box::pin(None),
-        }
-    }
-
-    pub fn wrap(fut: F) -> Self {
-        Self {
-            inner: Box::pin(Some(fut)),
-        }
-    }
-
-    #[inline]
-    pub fn is_set(&self) -> bool {
-        self.inner.is_some()
-    }
-
-    #[inline]
-    pub fn set(&mut self, fut: F) {
-        self.inner.set(Some(fut))
-    }
-
-    #[inline]
-    pub fn unset(&mut self) {
-        self.inner.set(None)
-    }
-
-    #[inline]
-    pub fn poll_unpin(&mut self, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let Some(fut) = self.inner.as_mut().as_pin_mut() else {
-            return Poll::Pending;
-        };
-
-        let res = ready!(fut.poll(cx));
-        self.unset();
-
-        Poll::Ready(res)
-    }
-    #[inline]
-    pub fn try_poll_unpin(&mut self, cx: &mut Context<'_>) -> Option<Poll<F::Output>> {
-        let fut = self.inner.as_mut().as_pin_mut()?;
-        let res = match fut.poll(cx) {
-            Poll::Ready(res) => res,
-            Poll::Pending => return Some(Poll::Pending),
-        };
-
-        self.unset();
-
-        Some(Poll::Ready(res))
-    }
-}
 
 struct ProducerContextInner<M: Message, T: MessageProducer<M> + 'static> {
     context: Option<T::Context>,
     next_fut: FutureCell<T::NextFuture<'static>>,
-    sending_fut: FutureCell<SendFuture<M, T>>,
     close_fut: FutureCell<T::CloseFuture<'static>>,
 }
 
@@ -99,7 +30,6 @@ impl<M: Message, T: MessageProducer<M>> Default for ProducerContextInner<M, T> {
         Self {
             context: None,
             next_fut: Default::default(),
-            sending_fut: Default::default(),
             close_fut: Default::default(),
         }
     }
@@ -109,7 +39,6 @@ impl<M: Message, T: MessageProducer<M>> Clear for ProducerContextInner<M, T> {
     fn clear(&mut self) {
         self.context = None;
         self.next_fut.unset();
-        self.sending_fut.unset();
         self.close_fut.unset();
     }
 }
@@ -148,7 +77,6 @@ impl<M: Message, T: MessageProducer<M>> ProducerContextInner<M, T> {
     pub fn start(&mut self, ctx: T::Context) {
         drop(self.context.replace(ctx));
         self.next_fut.unset();
-        self.sending_fut.unset();
         self.close_fut.unset();
     }
 
@@ -183,7 +111,7 @@ pub struct ProducerWrapper<M: Message, T: MessageProducer<M> + 'static> {
     inner: Arc<T>,
     start_fut: Mutex<FutureCell<T::StartFuture<'static>>>,
     producers: Arc<Pool<ProducerContext<M, T>>>,
-    send_waker: AtomicWaker,
+    send_wakelist: WakeList,
 }
 
 impl<M: Message, T: MessageProducer<M>> Clone for ProducerWrapper<M, T> {
@@ -192,7 +120,7 @@ impl<M: Message, T: MessageProducer<M>> Clone for ProducerWrapper<M, T> {
             inner: self.inner.clone(),
             start_fut: Mutex::new(FutureCell::new()),
             producers: Arc::new(Pool::new()),
-            send_waker: AtomicWaker::new(),
+            send_wakelist: WakeList::new(),
         }
     }
 }
@@ -203,7 +131,7 @@ impl<M: Message, T: MessageProducer<M>> ProducerWrapper<M, T> {
             inner,
             start_fut: Mutex::new(FutureCell::new()),
             producers: Arc::new(Pool::new()),
-            send_waker: AtomicWaker::new(),
+            send_wakelist: WakeList::new(),
         }
     }
 
@@ -232,12 +160,10 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
     ) -> Poll<Result<TaskHandler, Error>> {
         let guard = self.start_fut.try_lock();
         let Some(mut guard) = guard else {
-            println!("!!!!!!!!!");
-            // if let Some(cx) = cx {
-               // self.send_waker.register(waker) 
-            // }
+            if let Some(cx) = cx {
+                self.send_wakelist.register(cx.waker()) ;
+            }
 
-            // TODO store waker if has
             return Poll::Pending;
         };
 
@@ -261,7 +187,7 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
         let task = TaskHandler::new(
             HandlerWrapperHelper::<M, T>::VTABLE,
             self.producers.clone(),
-            index,
+            index as _,
         );
 
         Poll::Ready(Ok(task))
@@ -270,12 +196,10 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
     fn poll_result(
         &self,
         task: &mut TaskHandler,
-        resp: Option<&mut ResultCell<T::Message>>,
+        resp: &mut ResultCell<T::Message>,
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        println!("poll task {}", task.index());
-
         let Some(task_handle) = task.data().downcast_ref::<Pool<ProducerContext<M, T>>>() else {
             return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from("cannot cast type"))));
         };
@@ -287,49 +211,15 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
         }
 
         loop {
-            let Some(producer) = self.producers.get(task.index()) else {
-                panic!("internal error: producer with index {} not found!", task.index());
+            let Some(producer) = self.producers.get(task.index() as _) else {
+                break Poll::Ready(Err(Error::ErrorPollWrongTask(format!("task index is incorrect {}", task.index()))));
             };
 
-            let mut lock = producer.inner.lock();
-
-            if let Some(poll) = lock.sending_fut.try_poll_unpin(cx) {
-                ready!(poll).unwrap();
-            }
-
+            let mut lock = producer.lock();
             if lock.next_fut.is_set() {
-                let res = ready!(lock.next_fut.poll_unpin(cx));
+                resp.put(ready!(lock.next_fut.poll_unpin(cx)));
 
-                return Poll::Ready(if let Some(resp_cell) = resp {
-                    resp_cell.put(res);
-                    Ok(())
-                } else {
-                    match res {
-                        Ok(msg) => {
-                            if TypeId::of::<T::Message>() != TypeId::of::<()>() {
-                                let bus = bus.clone();
-                                lock.sending_fut.set(async move { bus.send(msg).await });
-                                lock.sending_fut.try_poll_unpin(cx);
-                            }
-                            Ok(())
-                        }
-                        Err(err) => {
-                            task.finish();
-                            match err {
-                                Error::ProducerFinished => Err(Error::ProducerFinished),
-                                err => {
-                                    println!(
-                                        "[{}]: unhandled error result message of type `{}`: {}",
-                                        std::any::type_name::<T>(),
-                                        std::any::type_name::<T::Message>(),
-                                        err
-                                    );
-                                    Ok(())
-                                }
-                            }
-                        }
-                    }
-                });
+                break Poll::Ready(Ok(()));
             } else {
                 lock.start_next(&self.inner, bus)
             }
@@ -375,7 +265,7 @@ impl<M: Message, T: MessageProducer<M> + 'static> HandlerWrapperHelper<M, T> {
                 return;
             };
 
-            res.clear(idx);
+            res.clear(idx as _);
         },
     };
 }
@@ -383,7 +273,6 @@ impl<M: Message, T: MessageProducer<M> + 'static> HandlerWrapperHelper<M, T> {
 #[cfg(test)]
 mod tests {
     use std::{
-        any::Any,
         future::{poll_fn, Future},
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -393,87 +282,13 @@ mod tests {
     };
 
     use crate::{
-        bus::Bus,
-        cell::{MessageCell, MsgCell},
-        error::Error,
-        handler::Handler,
-        message::{Message, SharedMessage},
-        receiver::IntoAbstractReceiver,
-        receivers::wrapper::HandlerWrapper,
-        type_tag::{TypeTag, TypeTagInfo},
+        bus::Bus, cell::MsgCell, derive_message_clone, error::Error, handler::Handler,
+        receiver::IntoAbstractReceiver, receivers::wrapper::HandlerWrapper,
     };
 
     #[derive(Debug, Clone, PartialEq)]
     struct Msg(pub u32);
-
-    impl Message for Msg {
-        #[allow(non_snake_case)]
-        fn TYPE_TAG() -> TypeTag
-        where
-            Self: Sized,
-        {
-            TypeTagInfo::parse("demo::Msg").unwrap().into()
-        }
-
-        fn type_tag(&self) -> TypeTag {
-            Msg::TYPE_TAG()
-        }
-
-        fn type_layout(&self) -> std::alloc::Layout {
-            std::alloc::Layout::for_value(self)
-        }
-
-        fn as_any_ref(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
-        }
-
-        fn as_any_boxed(self: Box<Self>) -> Box<dyn Any> {
-            self as _
-        }
-
-        fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any> {
-            self as _
-        }
-
-        fn as_shared_ref(&self) -> Option<&dyn SharedMessage> {
-            None
-        }
-
-        fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
-            None
-        }
-
-        fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
-            Err(self)
-        }
-
-        fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
-            None
-        }
-
-        fn try_clone_into(&self, _into: &mut dyn MessageCell) -> bool {
-            false
-        }
-
-        fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
-            None
-        }
-
-        fn try_clone(&self) -> Option<Self>
-        where
-            Self: Sized,
-        {
-            Some(Self(self.0))
-        }
-
-        fn is_cloneable(&self) -> bool {
-            false
-        }
-    }
+    derive_message_clone!(TEST_PRODUCER_MSG, Msg, "test::Msg");
 
     struct Test {
         inner: u32,

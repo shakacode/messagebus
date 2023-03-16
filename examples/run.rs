@@ -51,7 +51,7 @@ async fn run() -> Result<(), Error> {
     let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
     bus.register(wrapper, MaskMatch::all());
 
-    let res: Msg = bus.request(Msg(13)).await.unwrap();
+    let res: Msg = bus.request(Msg(13)).await?.result().await?;
     println!("request result got {:?}", res);
 
     bus.send(Msg(12)).await?;

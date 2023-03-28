@@ -6,22 +6,21 @@ use futures::Future;
 use messagebus::{
     bus::{Bus, MaskMatch},
     cell::MsgCell,
-    derive_message_clone,
+    derive::Message,
     error::Error,
     handler::Handler,
     receivers::wrapper::HandlerWrapper,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Message)]
 struct Msg(pub u32);
-derive_message_clone!(EXAMPLE_MSG, Msg, "example::Msg");
 
 struct Test {
     inner: u32,
 }
 
 impl Handler<Msg> for Test {
-    type Response = Msg;
+    type Response = ();
     type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
@@ -31,8 +30,8 @@ impl Handler<Msg> for Test {
 
         async move {
             println!("msg {msg:?}");
-            let x = self.inner;
-            Ok(Msg(x + msg.0))
+            // let x = self.inner;
+            Ok(())
         }
     }
 
@@ -51,7 +50,7 @@ async fn run() -> Result<(), Error> {
     let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
     bus.register(wrapper, MaskMatch::all());
 
-    let res: Msg = bus.request(Msg(13)).await?.result().await?;
+    let res: () = bus.request(Msg(13)).await?.result().await?;
     println!("request result got {:?}", res);
 
     bus.send(Msg(12)).await?;

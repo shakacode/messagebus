@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 edition = "2021"
 
 [dependencies]
-messagebus_derive = "0.2.5"
+messagebus_derive = { path = "./crates/derive" }
 
 anyhow = "1.0"
 thiserror = "1.0"

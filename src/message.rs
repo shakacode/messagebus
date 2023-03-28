@@ -3,7 +3,7 @@ use std::{alloc::Layout, any::Any, sync::Arc};
 
 use crate::{cell::MessageCell, type_tag::TypeTag};
 
-pub trait Message: fmt::Debug + Unpin + Send + Sync + 'static {
+pub trait TypeTagged: fmt::Debug {
     #[allow(non_snake_case)]
     fn TYPE_TAG() -> TypeTag
     where
@@ -11,7 +11,9 @@ pub trait Message: fmt::Debug + Unpin + Send + Sync + 'static {
 
     fn type_tag(&self) -> TypeTag;
     fn type_layout(&self) -> Layout;
+}
 
+pub trait Message: TypeTagged + Unpin + Send + Sync + 'static {
     fn as_any_ref(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn as_any_boxed(self: Box<Self>) -> Box<dyn Any>;

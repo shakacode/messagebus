@@ -2,11 +2,9 @@
 
 extern crate proc_macro;
 
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::Span;
 use quote::quote;
-use std::collections::hash_map;
 use std::fmt::Write;
-use std::hash::Hasher;
 use syn::parse::{Parse, ParseStream};
 use syn::{parenthesized, Result};
 use syn::{punctuated::Punctuated, token::Comma, DeriveInput};
@@ -135,6 +133,7 @@ fn type_tag_part(
         }
 
         impl #impl_generics messagebus::TypeTagged for #class_name #ty_generics #where_clause {
+            #[allow(non_snake_case)]
             fn TYPE_TAG() -> messagebus::TypeTag { #const_name.clone() }
             fn type_tag(&self) -> messagebus::TypeTag {  Self::TYPE_TAG() }
             fn type_layout(&self) -> std::alloc::Layout { std::alloc::Layout::for_value(self) }
@@ -321,8 +320,8 @@ pub fn derive_typetagged(input: proc_macro::TokenStream) -> proc_macro::TokenStr
     tokens.into()
 }
 
-fn hash(input: TokenStream) -> u64 {
-    let mut hasher = hash_map::DefaultHasher::new();
-    hasher.write(input.to_string().as_bytes());
-    hasher.finish()
-}
+// fn hash(input: TokenStream) -> u64 {
+//     let mut hasher = hash_map::DefaultHasher::new();
+//     hasher.write(input.to_string().as_bytes());
+//     hasher.finish()
+// }

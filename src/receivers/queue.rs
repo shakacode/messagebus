@@ -1,100 +1,186 @@
 use std::{
-    marker::PhantomData,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     task::{ready, Context, Poll},
 };
 
-use crossbeam::queue::ArrayQueue;
 use futures::{task::AtomicWaker, Future};
-use parking_lot::Mutex;
+use sharded_slab::{Clear, Pool};
+use tokio::sync::mpsc;
 
 use crate::{
     bus::Bus,
     cell::{MsgCell, ResultCell},
-    error::Error,
+    error::{Error, ErrorKind},
     message::Message,
     receiver::{Receiver, ReceiverEx},
-    utils::{future_cell::FutureCell, wakelist::WakeList},
-    TaskHandler, TaskHandlerVTable,
+    utils::{
+        future_cell::{FutureCell, SyncFutureCell},
+        Mutex, MutexGuard,
+    },
+    TaskHandler,
 };
 
-struct QueueItem<M: Message> {
-    index: usize,
-    generation: u64,
-    message: MsgCell<M>,
-}
-
-impl<M: Message> QueueItem<M> {
-    fn new(index: usize, generation: u64, message: MsgCell<M>) -> QueueItem<M> {
-        Self {
-            index,
-            generation,
-            message,
-        }
-    }
-}
-
 pub struct Current<M: Message, R: Message, T: Receiver<M, R> + 'static> {
-    fut: FutureCell<SendFuture<M, R, T>>,
+    fut: FutureCell<ResultFuture<M, R, T>>,
+    recv: mpsc::Receiver<QueueItem<M>>,
     index: usize,
-    generation: u64,
-    result: ResultCell<R>,
 }
 impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Current<M, R, T> {
-    fn new(index: usize, generation: u64) -> Current<M, R, T> {
+    fn new(recv: mpsc::Receiver<QueueItem<M>>) -> Current<M, R, T> {
         Self {
             fut: FutureCell::new(),
-            index,
-            generation,
-            result: ResultCell::empty(),
+            index: usize::MAX,
+            recv,
         }
+    }
+
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.fut.clear();
+        self.index = usize::MAX;
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.fut.is_set()
+    }
+
+    #[inline]
+    pub fn set(&mut self, index: usize, fut: ResultFuture<M, R, T>) {
+        self.fut.set(fut);
+        self.index = index;
     }
 }
 
 type SendFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
+    impl Future<Output = Result<usize, Error>> + Send;
+
+type ResultFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
     impl Future<Output = Result<R, Error>> + Send;
+
+pub struct QueueItem<M> {
+    msg: MsgCell<M>,
+    index: usize,
+}
+
+impl<M> Drop for QueueItem<M> {
+    fn drop(&mut self) {
+        SLOTS.clear(self.index);
+    }
+}
+
+impl<M> QueueItem<M> {
+    pub fn new(msg: MsgCell<M>) -> Self {
+        Self {
+            msg,
+            index: SLOTS.create_with(|_| ()).unwrap(),
+        }
+    }
+}
+
+pub struct QueueSlot {
+    waker: AtomicWaker,
+    dropped: AtomicBool,
+}
+
+impl QueueSlot {
+    fn mark_dropped(&self) {
+        self.waker.take();
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+impl Default for QueueSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clear for QueueSlot {
+    fn clear(&mut self) {
+        self.waker.take();
+        self.dropped.store(false, Ordering::Release);
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref SLOTS: Arc<Pool<QueueSlot>> = Arc::new(Pool::new());
+}
+
+impl QueueSlot {
+    pub fn new() -> Self {
+        Self {
+            waker: AtomicWaker::new(),
+            dropped: AtomicBool::new(false),
+        }
+    }
+}
 
 pub struct Queue<M: Message, R: Message, T: Receiver<M, R> + 'static> {
     inner: Arc<T>,
-    free: ArrayQueue<usize>,
-    queue: ArrayQueue<QueueItem<M>>,
-    wakers: Arc<Box<[Option<AtomicWaker>]>>,
-    limit: usize,
-    wakelist: WakeList,
+    queue_send: mpsc::Sender<QueueItem<M>>,
+    queue_send_fut: SyncFutureCell<SendFuture<M, R, T>>,
     current: Arc<Mutex<Current<M, R, T>>>,
     generation_sequence: AtomicU64,
 }
 
 impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Queue<M, R, T> {
     pub fn new(inner: T, limit: usize) -> Self {
-        let free = ArrayQueue::new(limit);
-        for i in 0..limit {
-            let _ = free.push(i);
-        }
-
+        let (queue_send, queue_recv) = mpsc::channel(limit);
         Self {
-            limit,
             inner: Arc::new(inner),
-            free,
-            queue: ArrayQueue::new(limit),
-            wakers: Arc::new((0..limit).map(|_| None).collect()),
-            wakelist: WakeList::new(),
-            current: Arc::new(Mutex::new(Current::new(0, 0))),
+            queue_send,
+            queue_send_fut: SyncFutureCell::new(),
+            current: Arc::new(Mutex::new(Current::new(queue_recv))),
             generation_sequence: AtomicU64::new(1),
         }
     }
 
-    #[inline(always)]
-    fn next_gen(&self) -> u64 {
-        self.generation_sequence.fetch_add(1, Ordering::Relaxed)
-    }
+    fn set_current(
+        &self,
+        current: &mut MutexGuard<'_, Current<M, R, T>>,
+        mut item: QueueItem<M>,
+        bus: &Bus,
+    ) -> bool {
+        if let Some(slot) = SLOTS.get(item.index) {
+            if !slot.dropped.load(Ordering::Acquire) {
+                current.set(
+                    item.index as _,
+                    gen_request_fut::<M, R, T>(
+                        self.inner.clone(),
+                        None,
+                        item.msg.take_cell(),
+                        bus.clone(),
+                    ),
+                );
+                drop(current);
 
-    fn split_index(&self, index: u64) -> (u64, usize) {
-        (index >> 32, (index & u32::MAX as u64) as usize)
+                slot.waker.wake();
+
+                return true;
+            }
+        }
+
+        false
     }
+}
+
+async fn gen_request_fut<M: Message, R: Message, T: Receiver<M, R> + 'static>(
+    inner: Arc<T>,
+    task: Option<TaskHandler>,
+    msg: MsgCell<M>,
+    bus: Bus,
+) -> Result<R, Error> {
+    let task = if let Some(task) = task {
+        task
+    } else {
+        inner.send(msg, bus.clone()).await?
+    };
+
+    inner.result(task, bus).await
 }
 
 impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Queue<M, R, T> {
@@ -104,68 +190,99 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
         cx: Option<&mut Context<'_>>,
         bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
-        // trying fast track
-        if self.free.is_full() {
-            if let Some(mut lock) = self.current.try_lock() {
-                if !lock.fut.is_set() {
-                    lock.generation = self.next_gen();
+        if self.queue_send.capacity() == self.queue_send.max_capacity() {
+            if let Some(mut current) = self.current.try_lock() {
+                if current.is_empty() {
+                    match self.inner.poll_send(msg, None, bus) {
+                        Poll::Ready(Ok(task)) => {
+                            current.set(
+                                usize::MAX,
+                                gen_request_fut::<M, R, T>(
+                                    self.inner.clone(),
+                                    Some(task),
+                                    msg.take_cell(),
+                                    bus.clone(),
+                                ),
+                            );
 
-                    let inner = self.inner.clone();
-                    let bus = bus.clone();
-
-                    enum TaskState<M: Message> {
-                        Sending(MsgCell<M>),
-                        PollingResult(TaskHandler),
-                    }
-
-                    let val = if let Ok(task) = self.inner.try_send(msg, &bus) {
-                        TaskState::PollingResult(task)
-                    } else {
-                        TaskState::Sending(msg.take_cell())
-                    };
-
-                    lock.fut.set(async move {
-                        match val {
-                            TaskState::PollingResult(task) => inner.result(task, bus).await,
-                            TaskState::Sending(cell) => inner.request(cell, bus).await,
+                            return Poll::Ready(Ok(TaskHandler::new(
+                                self.current.clone(),
+                                usize::MAX as _,
+                                |data, idx| {
+                                    if let Ok(d) = data.downcast::<Mutex<Current<M, R, T>>>() {
+                                        let mut lock = d.blocking_lock();
+                                        if lock.index == idx as _ {
+                                            lock.clear();
+                                        }
+                                    }
+                                },
+                            )));
                         }
-                    });
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Pending => {
+                            current.set(
+                                usize::MAX,
+                                gen_request_fut::<M, R, T>(
+                                    self.inner.clone(),
+                                    None,
+                                    msg.take_cell(),
+                                    bus.clone(),
+                                ),
+                            );
 
-                    return Poll::Ready(Ok(TaskHandler::new(
-                        TaskHelperCancel::<M, R, T>::VTABLE,
-                        self.current.clone(),
-                        lock.generation,
-                    )));
+                            return Poll::Ready(Ok(TaskHandler::new(
+                                self.current.clone(),
+                                usize::MAX as _,
+                                |data, idx| {
+                                    if let Ok(d) = data.downcast::<Mutex<Current<M, R, T>>>() {
+                                        let mut lock = d.blocking_lock();
+                                        if lock.index == idx as _ {
+                                            lock.clear();
+                                        }
+                                    }
+                                },
+                            )));
+                        }
+                    }
                 }
             }
         }
 
-        // enqueuing the message
-        if let Some(index) = self.free.pop() {
-            let generation = self.next_gen();
-            assert!(self
-                .queue
-                .push(QueueItem {
-                    index,
-                    generation,
-                    message: msg.take_cell(),
-                })
-                .is_ok());
+        let index = if let Some(cx) = cx {
+            ready!(self.queue_send_fut.poll_unpin_with(cx, || {
+                let msg = msg.take_cell();
+                let sender = self.queue_send.clone();
 
-            let task = TaskHandler::new(
-                TaskHelperUnqueue::<M, R, T>::VTABLE,
-                self.wakers.clone(),
-                (generation << 32) & index as u64,
-            );
+                async move {
+                    let item = QueueItem::new(msg);
+                    let index = item.index;
 
-            return Poll::Ready(Ok(task));
-        }
+                    sender.send(item).await.map_err(|_| ErrorKind::SendError)?;
+                    Ok(index)
+                }
+            }))?
+        } else {
+            let item = QueueItem::new(msg.take_cell());
+            let index = item.index;
 
-        if let Some(cx) = cx {
-            self.wakelist.register(cx.waker());
-        }
+            self.queue_send
+                .try_send(item)
+                .map_err(|_| ErrorKind::SendError)?;
 
-        Poll::Pending
+            index
+        };
+
+        Poll::Ready(Ok(TaskHandler::new(
+            SLOTS.clone(),
+            index as _,
+            |data, index| {
+                if let Ok(slots) = data.downcast::<Pool<QueueSlot>>() {
+                    if let Some(item) = slots.get(index as _) {
+                        item.mark_dropped();
+                    }
+                }
+            },
+        )))
     }
 
     fn poll_result(
@@ -175,26 +292,57 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
-        if let Some(mut lock) = self.current.try_lock() {
-            if let Some(fut) = lock.fut.try_poll_unpin(cx) {
-                let res = ready!(fut);
-                if task.index() == lock.generation {
-                    resp.put(res);
-                } else {
-                    lock.result.put(res);
-                }
-                if let Some(item) = self.queue.pop() {}
-            }
-        } else {
-            let (gen, idx) = self.split_index(task.index());
-            if idx as u32 != u32::MAX {
-                // self.wakers[idx].waker.register(cx.waker());
-            }
-
-            return Poll::Pending;
+        if !(std::ptr::eq(task.data_ptr(), Arc::as_ptr(&SLOTS) as _)
+            || std::ptr::eq(task.data_ptr(), Arc::as_ptr(&self.current) as _))
+        {
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask("".into()).into()));
         }
 
-        Poll::Pending
+        let mut current = ready!(self.current.poll_lock(cx));
+        if !current.fut.is_set() || (task.index() == current.index as u64) {
+            if let Some(poll) = current.fut.try_poll_unpin(cx) {
+                resp.put(ready!(poll));
+
+                loop {
+                    if let Ok(item) = current.recv.try_recv() {
+                        if !self.set_current(&mut current, item, bus) {
+                            continue;
+                        }
+                    }
+
+                    break;
+                }
+
+                return Poll::Ready(Ok(()));
+            } else {
+                loop {
+                    let item = ready!(current.recv.poll_recv(cx)).ok_or(ErrorKind::SendError)?;
+
+                    if task.index() as usize == item.index {
+                        cx.waker().wake_by_ref();
+                    }
+
+                    if !self.set_current(&mut current, item, bus) {
+                        continue;
+                    }
+
+                    return Poll::Pending;
+                }
+            }
+        } else {
+            if let Some(slot) = SLOTS.get(task.index() as usize) {
+                if slot.dropped.load(Ordering::Acquire) {
+                    current.fut.clear();
+                    cx.waker().wake_by_ref();
+                } else {
+                    slot.waker.register(cx.waker());
+                }
+            } else {
+                return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask("".into()).into()));
+            }
+
+            Poll::Pending
+        }
     }
 
     fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
@@ -202,64 +350,35 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
     }
 
     fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
+        self.inner.poll_close(cx)
     }
 }
 
-struct TaskHelperCancel<M: Message, R: Message, T: Receiver<M, R> + 'static>(
-    PhantomData<(M, R, T)>,
-);
-impl<M: Message, R: Message, T: Receiver<M, R> + 'static> TaskHelperCancel<M, R, T> {
-    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, gen| {
-            let Ok(res) = data.downcast::<Mutex<Current<M, R, T>>>() else {
-                return;
-            };
-
-            let lock = res.lock();
-            if lock.generation == gen {
-                // lock.fut.unset();
-            }
-        },
-    };
-}
-
-struct TaskHelperUnqueue<M: Message, R: Message, T: Receiver<M, R> + 'static>(
-    PhantomData<(M, R, T)>,
-);
-impl<M: Message, R: Message, T: Receiver<M, R> + 'static> TaskHelperUnqueue<M, R, T> {
-    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, indexgen| {
-            let Ok(res) = data.downcast::<Box<[Option<AtomicWaker>]>>() else {
-                return;
-            };
-
-            // res[(indexgen & u32::MAX as u64) as usize].clear();
-        },
-    };
-}
 #[cfg(test)]
 mod tests {
-    use futures::Future;
-    use std::sync::Arc;
+    use futures::{join, Future};
+    use rand::RngCore;
+    use std::{sync::Arc, task::Poll};
+    use tokio::sync::mpsc;
 
     use crate::{
         bus::Bus,
         cell::MsgCell,
-        derive_message_clone,
-        error::Error,
+        derive::Message,
+        error::{Error, ErrorKind},
         handler::Handler,
-        receiver::IntoAbstractReceiver,
+        receiver::{IntoAbstractReceiver, Receiver, ReceiverEx},
         receivers::{queue::Queue, wrapper::HandlerWrapper},
     };
 
-    #[derive(Debug, Clone, PartialEq)]
-    struct Msg(pub u32);
+    use crate as messagebus;
 
-    derive_message_clone!(MSG1, Msg, "test::Msg");
+    #[derive(Debug, Clone, PartialEq, Message)]
+    struct Msg(pub u32);
 
     struct Test {
         inner: u32,
+        other: bool,
     }
 
     impl Handler<Msg> for Test {
@@ -273,42 +392,261 @@ mod tests {
 
             async move {
                 tokio::time::sleep(std::time::Duration::from_millis(self.inner as _)).await;
+                if self.other {
+                    let val = {
+                        let mut rng = rand::thread_rng();
+                        rng.next_u32() % 10
+                    };
+
+                    tokio::time::sleep(std::time::Duration::from_millis((self.inner + val) as _))
+                        .await;
+                }
 
                 Ok(Msg(msg + 12))
             }
         }
 
-        fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
             async move { Ok(()) }
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             async move { Ok(()) }
         }
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn test_queue_exec() -> Result<(), Error> {
+    async fn test_queue_send_bound() -> Result<(), Error> {
         let bus = Bus::new();
-        let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 1 }));
-        let unordered = Queue::new(wrapper, 100);
-        let receiver = unordered.into_abstract_arc();
-        let mut dest = Vec::new();
+        let wrapper = HandlerWrapper::new(Arc::new(Test {
+            inner: 10,
+            other: false,
+        }));
+        let queue = Queue::new(wrapper, 2);
 
-        let mut handlers = Vec::new();
-        for i in 0..100 {
-            let mut cell = MsgCell::new(Msg(i));
-            handlers.push(receiver.send(&mut cell, bus.clone()).await?);
-        }
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(1)), None, &bus);
+        let _handler = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
 
-        for h in handlers {
-            let r: Msg = receiver.result(h, bus.clone()).await?;
-            println!("pushing result {:?}", r);
-            dest.push(r.0);
-        }
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(2)), None, &bus);
+        let _handler = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
 
-        assert_eq!(dest, (12..112).collect::<Vec<_>>());
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(3)), None, &bus);
+        let _handler = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(4)), None, &bus);
+        assert!(matches!(
+            poll,
+            Poll::Ready(Err(Error {
+                kind: ErrorKind::SendError,
+                ..
+            }))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_queue_poll_result() -> Result<(), Error> {
+        let bus = Bus::new();
+        let wrapper = HandlerWrapper::new(Arc::new(Test {
+            inner: 10,
+            other: false,
+        }));
+        let queue = Queue::new(wrapper, 2);
+        // let waker = waker_fn::waker_fn(move || {});
+        // let cx = Context::from_waker(&waker);
+
+        println!("\n\n  <>  \n\n");
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(1)), None, &bus);
+        let h1 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+
+        println!("h1 {}\n\n", h1.index());
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(2)), None, &bus);
+        let h2 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+        println!("h2 {}\n\n", h2.index());
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(3)), None, &bus);
+        let h3 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+        println!("h3 {}\n\n", h3.index());
+        // let mut res = ResultCell::empty();
+
+        println!("\n\n ------------ \n\n");
+
+        let (r2, r1, r3) = futures::join! {
+            queue.result(h2, bus.clone()),
+            queue.result(h1, bus.clone()),
+            queue.result(h3, bus.clone()),
+        };
+
+        assert_eq!((r1?, r2?, r3?), (Msg(13), Msg(14), Msg(15)));
+
+        Ok(())
+    }
+
+    async fn test_complex(bus: Bus, offset: u32, spread: u32, count: u32, queue: usize) {
+        let wrapper = HandlerWrapper::new(Arc::new(Test {
+            inner: 10,
+            other: true,
+        }));
+        let queue = Arc::new(Queue::new(wrapper, queue));
+        let prod = queue.clone();
+        let bus1 = bus.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            for val in 0..count {
+                let rand = {
+                    let mut rng = rand::thread_rng();
+                    rng.next_u32() % spread
+                };
+
+                tokio::time::sleep(std::time::Duration::from_millis((offset + rand) as _)).await;
+                let task = prod
+                    .send(MsgCell::new(Msg(val)), bus1.clone())
+                    .await
+                    .unwrap();
+
+                tx.send(task).unwrap();
+            }
+        });
+
+        let cons = queue.clone();
+        let vec = tokio::spawn(async move {
+            let mut vec = Vec::new();
+            while let Some(task) = rx.recv().await {
+                vec.push(cons.result(task, bus.clone()).await.unwrap().0);
+            }
+            vec
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(vec, (12..).take(count as _).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test_queue_complex() -> Result<(), Error> {
+        let bus = Bus::new();
+
+        let t1 = tokio::spawn(test_complex(bus.clone(), 10, 10, 100, 10));
+        let t2 = tokio::spawn(test_complex(bus.clone(), 0, 10, 100, 10));
+        let t3 = tokio::spawn(test_complex(bus.clone(), 20, 10, 100, 10));
+        let t4 = tokio::spawn(test_complex(bus.clone(), 10, 20, 200, 100));
+
+        let (r1, r2, r3, r4) = join!(t1, t2, t3, t4);
+        let _ = (r1.unwrap(), r2.unwrap(), r3.unwrap(), r4.unwrap());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_queue_current_dropped() -> Result<(), Error> {
+        let bus = Bus::new();
+        let wrapper = HandlerWrapper::new(Arc::new(Test {
+            inner: 10,
+            other: false,
+        }));
+        let queue = Queue::new(wrapper, 2);
+        // let waker = waker_fn::waker_fn(move || {});
+        // let cx = Context::from_waker(&waker);
+
+        println!("\n\n  <>  \n\n");
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(1)), None, &bus);
+        let h1 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+
+        println!("h1 {}\n\n", h1.index());
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(2)), None, &bus);
+        let h2 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+        println!("h2 {}\n\n", h2.index());
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(3)), None, &bus);
+        let h3 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+        println!("h3 {}\n\n", h3.index());
+        // let mut res = ResultCell::empty();
+
+        drop(h1);
+
+        println!("\n\n ------------ \n\n");
+
+        let (r2, r3) = futures::join! {
+            queue.result(h2, bus.clone()),
+            queue.result(h3, bus.clone()),
+        };
+
+        assert_eq!((r2?, r3?), (Msg(14), Msg(15)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_queue_pending_dropped() -> Result<(), Error> {
+        let bus = Bus::new();
+        let wrapper = HandlerWrapper::new(Arc::new(Test {
+            inner: 10,
+            other: false,
+        }));
+        let queue = Queue::new(wrapper, 2);
+        // let waker = waker_fn::waker_fn(move || {});
+        // let cx = Context::from_waker(&waker);
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(1)), None, &bus);
+        let h1 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(2)), None, &bus);
+        let h2 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+
+        let poll = queue.poll_send(&mut MsgCell::new(Msg(3)), None, &bus);
+        let h3 = match poll {
+            Poll::Ready(Ok(task)) => task,
+            _ => unreachable!(),
+        };
+        // let mut res = ResultCell::empty();
+
+        drop(h2);
+
+        let (r1, r3) = futures::join! {
+            queue.result(h1, bus.clone()),
+            queue.result(h3, bus.clone()),
+        };
+
+        assert_eq!((r1?, r3?), (Msg(13), Msg(15)));
 
         Ok(())
     }

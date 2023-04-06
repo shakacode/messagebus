@@ -1,7 +1,7 @@
 use std::{
     marker::PhantomData,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     task::{ready, Context, Poll},
@@ -16,7 +16,7 @@ use crate::{
     message::Message,
     receiver::Receiver,
     utils::wakelist::WakeList,
-    Bus, TaskHandler, TaskHandlerVTable,
+    Bus, TaskHandler,
 };
 
 enum OrderedSlotState<M: Message, R: Message> {
@@ -200,9 +200,19 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Ordered<M,
     #[inline]
     fn create_task(&self, index: usize, gen: u64) -> TaskHandler {
         TaskHandler::new(
-            TaskHelper::<M, R, T>::VTABLE,
             self.inner.clone(),
             (gen << 32) | index as u64,
+            |data, index| {
+                let Ok(res) = data.downcast::<OrderedInner<M, R, T>>() else {
+                return;
+            };
+
+                if let Some(slot) = res.slots.get(index as usize) {
+                    slot.cancel();
+                }
+
+                let _ = res.free_queue.push(index as _);
+            },
         )
     }
 }
@@ -276,25 +286,6 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M
     }
 }
 
-struct TaskHelper<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static>(
-    PhantomData<(M, R, T)>,
-);
-impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> TaskHelper<M, R, T> {
-    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, index| {
-            let Ok(res) = data.downcast::<OrderedInner<M, R, T>>() else {
-                return;
-            };
-
-            if let Some(slot) = res.slots.get(index as usize) {
-                slot.cancel();
-            }
-
-            let _ = res.free_queue.push(index as _);
-        },
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -302,15 +293,15 @@ mod tests {
     use futures::{stream::FuturesUnordered, Future, TryStreamExt};
 
     use crate::{
-        cell::MsgCell, derive_message_clone, error::Error, handler::Handler, receiver::ReceiverEx,
+        cell::MsgCell, derive, error::Error, handler::Handler, receiver::ReceiverEx,
         receivers::wrapper::HandlerWrapper, Bus,
     };
 
     use super::Ordered;
+    use crate as messagebus;
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, derive::Message)]
     struct Msg(pub u32);
-    derive_message_clone!(TEST_UNORDERED_MSG, Msg, "test::Msg");
 
     #[derive(Clone)]
     struct Test {
@@ -340,11 +331,11 @@ mod tests {
             }
         }
 
-        fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }

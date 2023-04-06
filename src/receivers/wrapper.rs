@@ -1,5 +1,4 @@
 use std::{
-    marker::PhantomData,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -11,13 +10,33 @@ use parking_lot::Mutex;
 use crate::{
     bus::Bus,
     cell::{MsgCell, ResultCell},
-    error::Error,
+    error::{Error, ErrorKind},
     handler::Handler,
     message::Message,
     receiver::Receiver,
     utils::wakelist::WakeList,
-    TaskHandler, TaskHandlerVTable,
+    TaskHandler,
 };
+
+pub trait IntoAsyncReceiver<M: Message, R: Message>
+where
+    Self: Handler<M, Response = R> + Send + Sync + 'static,
+{
+    fn into_async_receiver(self) -> HandlerWrapper<M, Self>
+    where
+        Self: Sized + 'static;
+}
+
+impl<M: Message, R: Message, H: Handler<M, Response = R> + Send + Sync + 'static>
+    IntoAsyncReceiver<M, R> for H
+{
+    fn into_async_receiver(self) -> HandlerWrapper<M, H>
+    where
+        Self: Sized + 'static,
+    {
+        HandlerWrapper::new(Arc::new(self))
+    }
+}
 
 pub struct HandlerWrapper<M: Message, T: Handler<M> + 'static> {
     inner: Arc<T>,
@@ -70,11 +89,14 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
     ) -> Poll<Result<TaskHandler, Error>> {
         if let Some(mut guard) = self.current_fut.try_lock() {
             if guard.is_none() {
-                let task = TaskHandler::new(
-                    HandlerWrapperHelper::<M, T>::VTABLE,
-                    self.current_fut.clone(),
-                    0,
-                );
+                let task = TaskHandler::new(self.current_fut.clone(), 0, |data, _| {
+                    let Ok(res) = data.downcast::<Mutex<Option<T::HandleFuture<'static>>>>() else {
+                println!("wrong type");
+                return;
+            };
+
+                    drop(res.lock().take());
+                });
 
                 // SAFETY: Box contains none we've checked it!
                 self.start_handle(&mut *guard, msg, bus);
@@ -98,13 +120,14 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         _bus: &Bus,
     ) -> Poll<Result<(), Error>> {
         let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::HandleFuture<'static>>>>() else {
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from("cannot cast type"))));
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from("cannot cast type")).into()));
         };
 
         if !std::ptr::eq(&*self.current_fut, task_handle) {
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from(
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from(
                 "pointers are mismatch",
-            ))));
+            ))
+            .into()));
         }
 
         let mut lock = self.current_fut.lock();
@@ -132,20 +155,6 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
     }
 }
 
-pub(crate) struct HandlerWrapperHelper<M: Message, T: Handler<M>>(PhantomData<(M, T)>);
-impl<M: Message, T: Handler<M> + 'static> HandlerWrapperHelper<M, T> {
-    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, _| {
-            let Ok(res) = data.downcast::<Mutex<Option<T::HandleFuture<'static>>>>() else {
-                println!("wrong type");
-                return;
-            };
-
-            drop(res.lock().take());
-        },
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -158,14 +167,15 @@ mod tests {
     };
 
     use crate::{
-        bus::Bus, cell::MsgCell, derive_message_clone, error::Error, handler::Handler,
-        receiver::IntoAbstractReceiver, receivers::wrapper::HandlerWrapper,
+        bus::Bus, cell::MsgCell, error::Error, handler::Handler, receiver::IntoAbstractReceiver,
+        receivers::wrapper::HandlerWrapper,
     };
 
-    #[derive(Debug, Clone, PartialEq)]
-    struct Msg(pub u32);
+    use crate as messagebus;
+    use messagebus::derive::Message;
 
-    derive_message_clone!(TEST_MSG, Msg, "test::Msg");
+    #[derive(Debug, Clone, PartialEq, Message)]
+    struct Msg(pub u32);
 
     struct Test {
         inner: u32,
@@ -186,11 +196,11 @@ mod tests {
             }
         }
 
-        fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }
@@ -213,11 +223,11 @@ mod tests {
                 Ok(Msg(x + val))
             }
         }
-        fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }

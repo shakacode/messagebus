@@ -1,17 +1,21 @@
 use std::{any::Any, fmt, sync::Arc};
 
-pub struct TaskHandlerVTable {
-    pub drop: fn(Arc<dyn Any + Send + Sync>, u64),
+lazy_static::lazy_static! {
+    static ref VOID_DATA: Arc<dyn Any + Send + Sync> = Arc::new(());
 }
 
-impl TaskHandlerVTable {
-    pub const EMPTY: &TaskHandlerVTable = &TaskHandlerVTable { drop: |_, _| {} };
-}
+fn noop_drop(_: Arc<dyn Any + Send + Sync>, _: u64) {}
 
 pub struct TaskHandler {
     data: Arc<dyn Any + Send + Sync>,
     index: u64,
-    vtable: &'static TaskHandlerVTable,
+    drop: fn(Arc<dyn Any + Send + Sync>, u64),
+}
+
+impl PartialEq for TaskHandler {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data) && self.index == other.index
+    }
 }
 
 impl fmt::Debug for TaskHandler {
@@ -41,32 +45,44 @@ impl TaskHandler {
 
     #[inline]
     pub fn new(
-        vtable: &'static TaskHandlerVTable,
         data: Arc<dyn Any + Send + Sync>,
         index: u64,
+        drop: fn(Arc<dyn Any + Send + Sync>, u64),
     ) -> Self {
-        Self {
-            data,
-            index,
-            vtable,
-        }
+        Self { data, index, drop }
     }
 
     #[inline]
     pub(crate) fn finish(&mut self) {
-        (self.vtable.drop)(self.data.clone(), self.index);
-        self.vtable = TaskHandlerVTable::EMPTY;
+        (self.drop)(
+            std::mem::replace(&mut self.data, VOID_DATA.clone()),
+            self.index,
+        );
+
+        self.drop = noop_drop;
     }
 
     #[inline]
     pub(crate) fn is_finished(&self) -> bool {
-        std::ptr::eq(self.vtable, TaskHandlerVTable::EMPTY)
+        Arc::ptr_eq(&self.data, &VOID_DATA)
+    }
+
+    pub(crate) fn noop() -> TaskHandler {
+        Self {
+            data: VOID_DATA.clone(),
+            index: 0,
+            drop: noop_drop,
+        }
     }
 }
 
 impl Drop for TaskHandler {
     fn drop(&mut self) {
-        // TODO optimize redundant clone
-        (self.vtable.drop)(self.data.clone(), self.index);
+        // println!("dropping task {}", self.index);
+
+        (self.drop)(
+            std::mem::replace(&mut self.data, VOID_DATA.clone()),
+            self.index,
+        );
     }
 }

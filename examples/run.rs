@@ -35,11 +35,11 @@ impl Handler<Msg> for Test {
         }
     }
 
-    fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+    fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
         async move { Ok(()) }
     }
 
-    fn close(&mut self) -> Self::CloseFuture<'_> {
+    fn close(&self) -> Self::CloseFuture<'_> {
         async move { Ok(()) }
     }
 }
@@ -48,15 +48,15 @@ async fn run() -> Result<(), Error> {
     let bus = Bus::new();
 
     let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
-    bus.register(wrapper, MaskMatch::all());
+    // bus.register(wrapper, MaskMatch::all());
 
-    let res: () = bus.request(Msg(13)).await?.result().await?;
-    println!("request result got {:?}", res);
+    // let res: () = bus.request(Msg(13)).await?.result().await?;
+    // println!("request result got {:?}", res);
 
-    bus.send(Msg(12)).await?;
+    // bus.send(Msg(12)).await?;
 
-    bus.close().await;
-    bus.wait().await;
+    // bus.close().await;
+    // bus.wait().await;
 
     Ok(())
 }

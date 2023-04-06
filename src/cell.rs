@@ -1,6 +1,10 @@
 use core::any::Any;
 
-use crate::{error::Error, message::Message, type_tag::TypeTag};
+use crate::{
+    error::{Error, ErrorKind},
+    message::Message,
+    type_tag::TypeTag,
+};
 
 pub trait MessageCell: Send + 'static {
     fn is_empty(&self) -> bool;
@@ -16,7 +20,7 @@ impl dyn MessageCell {
         let tt = self.type_tag();
         match self.as_any_mut().downcast_mut::<MsgCell<T>>() {
             Some(inner) => inner.put(val),
-            None => return Err(Error::MessageDynamicCastFail(tt, T::TYPE_TAG())),
+            None => return Err(ErrorKind::MessageDynamicCastFail(tt, T::TYPE_TAG()).into()),
         }
 
         Ok(())
@@ -26,7 +30,7 @@ impl dyn MessageCell {
         let tt = self.type_tag();
         match self.as_any_mut().downcast_mut::<ResultCell<T>>() {
             Some(inner) => inner.put(val),
-            None => return Err(Error::MessageDynamicCastFail(tt, T::TYPE_TAG())),
+            None => return Err(ErrorKind::MessageDynamicCastFail(tt, T::TYPE_TAG()).into()),
         }
 
         Ok(())
@@ -36,7 +40,7 @@ impl dyn MessageCell {
         let tt = self.type_tag();
         match self.as_any_mut().downcast_mut::<MsgCell<T>>() {
             Some(inner) => Ok(inner),
-            None => Err(Error::MessageDynamicCastFail(tt, T::TYPE_TAG())),
+            None => Err(ErrorKind::MessageDynamicCastFail(tt, T::TYPE_TAG()).into()),
         }
     }
 
@@ -44,27 +48,21 @@ impl dyn MessageCell {
         let tt = self.type_tag();
         match self.as_any_mut().downcast_mut::<ResultCell<R>>() {
             Some(inner) => Ok(inner),
-            None => Err(Error::MessageDynamicCastFail(tt, R::TYPE_TAG())),
+            None => Err(ErrorKind::MessageDynamicCastFail(tt, R::TYPE_TAG()).into()),
         }
     }
 
     pub fn take_cell<T: Message>(&mut self) -> Result<MsgCell<T>, Error> {
         match self.as_any_mut().downcast_mut::<MsgCell<T>>() {
             Some(cell) => Ok(MsgCell(cell.0.take())),
-            None => Err(Error::MessageDynamicCastFail(
-                self.type_tag(),
-                T::TYPE_TAG(),
-            )),
+            None => Err(ErrorKind::MessageDynamicCastFail(self.type_tag(), T::TYPE_TAG()).into()),
         }
     }
 
     pub fn take<T: Message>(&mut self) -> Result<T, Error> {
         match self.as_any_mut().downcast_mut::<MsgCell<T>>() {
-            Some(cell) => cell.take().ok_or(Error::EmptyMessageCellError),
-            None => Err(Error::MessageDynamicCastFail(
-                self.type_tag(),
-                T::TYPE_TAG(),
-            )),
+            Some(cell) => cell.take().ok_or(ErrorKind::EmptyMessageCellError.into()),
+            None => Err(ErrorKind::MessageDynamicCastFail(self.type_tag(), T::TYPE_TAG()).into()),
         }
     }
 
@@ -112,7 +110,7 @@ impl<R: Message> ResultCell<R> {
     pub fn unwrap(&mut self) -> Result<R, Error> {
         match self.0.take() {
             Some(inner) => inner,
-            None => Err(Error::HandlerNoResultAttached),
+            None => Err(ErrorKind::HandlerNoResultAttached.into()),
         }
     }
 }

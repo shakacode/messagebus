@@ -8,11 +8,12 @@ use segvec::SegVec;
 
 use crate::{
     cell::{MessageCell, MsgCell},
-    error::Error,
+    error::{Error, ErrorKind},
     message::Message,
     polling_pool::PollingPool,
-    receiver::{AbstractReceiver, IntoAbstractReceiver, Receiver},
-    TaskHandler,
+    receiver::{AbstractReceiver, IntoAbstractReceiver},
+    receivers::{producer::IntoAsyncProducer, wrapper::IntoAsyncReceiver},
+    TaskHandler, TypeTag,
 };
 
 pub use crate::handler::*;
@@ -87,23 +88,48 @@ impl Bus {
     }
 
     #[inline]
-    pub fn register<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static>(
+    pub fn send_blocking<M: Message>(&self, msg: M) -> Result<(), Error> {
+        futures::executor::block_on(self.send(msg))
+    }
+
+    #[inline]
+    pub fn register<M: Message, R: Message, H: IntoAsyncReceiver<M, R> + Send + Sync + 'static>(
         &self,
         r: H,
         mask: MaskMatch,
     ) {
-        self.inner.register(r, mask)
+        self.inner.register(
+            M::TYPE_TAG(),
+            R::TYPE_TAG(),
+            r.into_async_receiver().into_abstract_arc(),
+            mask,
+            false,
+        )
     }
 
     #[inline]
-    pub async fn start_producer<M: Message>(&self, msg: M) -> Result<(), Error> {
-        let mut msg = MsgCell::new(msg);
+    pub fn register_producer<
+        M: Message,
+        R: Message,
+        P: IntoAsyncProducer<M, R> + Send + Sync + 'static,
+    >(
+        &self,
+        r: P,
+        mask: MaskMatch,
+    ) {
+        log::info!(
+            "reg producer start: {}, msg: {}",
+            M::TYPE_TAG(),
+            R::TYPE_TAG()
+        );
 
-        self.inner
-            .producer_start(&mut msg, SendOptions::default(), self)
-            .await?;
-
-        Ok(())
+        self.inner.register(
+            M::TYPE_TAG(),
+            R::TYPE_TAG(),
+            r.into_async_producer().into_abstract_arc(),
+            mask,
+            true,
+        )
     }
 
     #[inline]
@@ -123,6 +149,14 @@ impl Bus {
             .await?;
 
         Ok(())
+    }
+
+    #[inline]
+    pub fn stop(&self) {}
+
+    #[inline]
+    pub async fn flush(&self) {
+        self.inner.wait(self).await
     }
 
     #[inline]
@@ -191,12 +225,14 @@ struct BusReceiver {
 }
 
 struct BusReceivers {
+    is_producer: bool,
     inner: SegVec<BusReceiver>,
 }
 
 impl BusReceivers {
-    pub fn new() -> Self {
+    pub fn new(is_producer: bool) -> Self {
         Self {
+            is_producer,
             inner: SegVec::with_capacity(8),
         }
     }
@@ -204,18 +240,6 @@ impl BusReceivers {
     #[inline]
     pub fn add(&mut self, mask: MaskMatch, inner: Arc<dyn AbstractReceiver>) {
         self.inner.push(BusReceiver { inner, mask })
-    }
-}
-
-impl From<Arc<dyn AbstractReceiver>> for BusReceivers {
-    fn from(inner: Arc<dyn AbstractReceiver>) -> Self {
-        let mut vec = SegVec::with_capacity(8);
-        vec.push(BusReceiver {
-            inner,
-            mask: Default::default(),
-        });
-
-        BusReceivers { inner: vec }
     }
 }
 
@@ -237,23 +261,22 @@ impl BusInner {
         self.processing.is_closed()
     }
 
-    pub(crate) fn register<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static>(
+    pub(crate) fn register(
         &self,
-        r: H,
+        mtt: TypeTag,
+        rtt: TypeTag,
+        receiver: Arc<dyn AbstractReceiver>,
         mask: MaskMatch,
+        is_producer: bool,
     ) {
-        let mtt = M::TYPE_TAG();
-        let rtt = R::TYPE_TAG();
-        let receiver = r.into_abstract_arc();
-
         self.receivers
             .entry((mtt.hash, rtt.hash))
-            .or_insert_with(BusReceivers::new)
+            .or_insert_with(|| BusReceivers::new(is_producer))
             .add(mask, receiver.clone());
 
         self.receivers
             .entry((mtt.hash, 0))
-            .or_insert_with(BusReceivers::new)
+            .or_insert_with(|| BusReceivers::new(is_producer))
             .add(mask, receiver.clone());
     }
 
@@ -268,7 +291,7 @@ impl BusInner {
         let receivers = self
             .receivers
             .get(&(tt.hash, 0))
-            .ok_or_else(|| Error::NoSuchReceiver(tt, None))?;
+            .ok_or_else(|| ErrorKind::NoSuchReceiver(tt, None))?;
 
         for receiver in receivers.inner.iter() {
             if !receiver.mask.test(options.mask) {
@@ -301,7 +324,7 @@ impl BusInner {
         let receivers = self
             .receivers
             .get(&(tt.hash, 0))
-            .ok_or_else(|| Error::NoSuchReceiver(tt, None))?;
+            .ok_or_else(|| ErrorKind::NoSuchReceiver(tt, None))?;
 
         for receiver in receivers.inner.iter() {
             if !receiver.mask.test(options.mask) {
@@ -311,40 +334,8 @@ impl BusInner {
             match receiver.inner.send_dyn(msg, bus.clone()).await {
                 Ok(task) => {
                     let receiver = receiver.clone();
-                    self.processing.push(task, receiver.inner, false);
-                }
-
-                Err(err) => {
-                    println!("send failed {}", err);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn producer_start(
-        &self,
-        msg: &mut dyn MessageCell,
-        options: SendOptions,
-        bus: &Bus,
-    ) -> Result<(), Error> {
-        let tt = msg.type_tag();
-
-        let receivers = self
-            .receivers
-            .get(&(tt.hash, 0))
-            .ok_or_else(|| Error::NoSuchReceiver(tt, None))?;
-
-        for receiver in receivers.inner.iter() {
-            if !receiver.mask.test(options.mask) {
-                continue;
-            }
-
-            match receiver.inner.send_dyn(msg, bus.clone()).await {
-                Ok(task) => {
-                    let receiver = receiver.clone();
-                    self.processing.push(task, receiver.inner, true);
+                    self.processing
+                        .push(task, receiver.inner, receivers.is_producer);
                 }
 
                 Err(err) => {
@@ -367,7 +358,7 @@ impl BusInner {
         let receivers = self
             .receivers
             .get(&(mtt.hash, rtt.hash))
-            .ok_or_else(|| Error::NoSuchReceiver(mtt.clone(), Some(rtt.clone())))?;
+            .ok_or_else(|| ErrorKind::NoSuchReceiver(mtt.clone(), Some(rtt.clone())))?;
 
         if let Some(receiver) = receivers.inner.iter().next() {
             let task = receiver
@@ -382,7 +373,7 @@ impl BusInner {
                 _m: Default::default(),
             })
         } else {
-            Err(Error::NoSuchReceiver(mtt, Some(rtt)))
+            Err(ErrorKind::NoSuchReceiver(mtt, Some(rtt)).into())
         }
     }
 

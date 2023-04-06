@@ -10,7 +10,12 @@ use std::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::{bus::Bus, error::Error, receiver::AbstractReceiver, TaskHandler};
+use crate::{
+    bus::Bus,
+    error::{Error, ErrorKind},
+    receiver::AbstractReceiver,
+    TaskHandler,
+};
 
 pub static WAKER_QUEUE: SegQueue<usize> = SegQueue::new();
 pub static CURRENT_WAKER: AtomicWaker = AtomicWaker::new();
@@ -122,7 +127,14 @@ impl PollingPool {
             match entry.receiver.poll_result(&mut *lock, None, &mut cx, bus) {
                 Poll::Ready(res) => {
                     if !entry.multiple
-                        || (entry.multiple && matches!(res, Err(Error::ProducerFinished)))
+                        || (entry.multiple
+                            && matches!(
+                                res,
+                                Err(Error {
+                                    kind: ErrorKind::ProducerFinished,
+                                    ..
+                                })
+                            ))
                     {
                         // println!("producer finished {:?}", res);
                         self.pool.remove(idx);

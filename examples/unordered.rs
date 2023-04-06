@@ -7,19 +7,17 @@ use futures::Future;
 use messagebus::{
     bus::{Bus, MaskMatch},
     cell::MsgCell,
-    derive_message_clone,
-    error::Error,
+    derive,
+    error::{Error, ErrorKind},
     handler::{Handler, MessageProducer},
-    receivers::{producer::ProducerWrapper, unordered::Unordered, wrapper::HandlerWrapper},
+    receivers::{producer::ProducerWrapper, wrapper::HandlerWrapper},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive::Message)]
 struct Msg(pub u64);
-derive_message_clone!(EXAMPLE_MSG, Msg, "example::Msg");
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive::Message)]
 struct StartMsg(u64);
-derive_message_clone!(EXAMPLE_START_MSG, StartMsg, "example::StartMsg");
 
 struct Test {}
 
@@ -48,7 +46,7 @@ impl MessageProducer<StartMsg> for Test {
             let msg = Msg(curr);
             println!("next #{}", msg.0);
             if msg.0 == 99 || msg.0 == 199 {
-                return Err(Error::ProducerFinished);
+                return Err(ErrorKind::ProducerFinished.into());
             }
             Ok(msg)
         }
@@ -75,11 +73,11 @@ impl Handler<Msg> for Test {
         }
     }
 
-    fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+    fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
         async move { Ok(()) }
     }
 
-    fn close(&mut self) -> Self::CloseFuture<'_> {
+    fn close(&self) -> Self::CloseFuture<'_> {
         async move { Ok(()) }
     }
 }
@@ -87,17 +85,17 @@ impl Handler<Msg> for Test {
 async fn run() -> Result<(), Error> {
     let bus = Bus::new();
     let test = Arc::new(Test {});
-    bus.register(ProducerWrapper::new(test.clone()), MaskMatch::all());
-    bus.register(
-        Unordered::new(HandlerWrapper::new(test), 25),
-        MaskMatch::all(),
-    );
+    // bus.register(ProducerWrapper::new(test.clone()), MaskMatch::all());
+    // bus.register(
+    //     Unordered::new(HandlerWrapper::new(test), 25),
+    //     MaskMatch::all(),
+    // );
 
-    println!("111");
-    bus.start_producer(StartMsg(0)).await?;
+    // println!("111");
+    // bus.start_producer(StartMsg(0)).await?;
 
-    println!("222");
-    bus.start_producer(StartMsg(100)).await?;
+    // println!("222");
+    // bus.start_producer(StartMsg(100)).await?;
 
     println!("333");
     bus.close().await;

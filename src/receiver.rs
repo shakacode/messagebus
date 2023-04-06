@@ -1,7 +1,10 @@
 use std::{
     any::TypeId,
     marker::PhantomData,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{ready, Context, Poll},
 };
 
@@ -12,7 +15,7 @@ use smallvec::SmallVec;
 use crate::{
     bus::Bus,
     cell::{MessageCell, MsgCell, ResultCell},
-    error::Error,
+    error::{Error, ErrorKind},
     message::Message,
     type_tag::TypeTagQuery,
     utils::future_cell::FutureCell,
@@ -79,7 +82,7 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Receiver
     fn try_send(&self, cell: &mut MsgCell<M>, bus: &Bus) -> Result<TaskHandler, Error> {
         match self.poll_send(cell, None, bus) {
             Poll::Ready(handler) => handler,
-            Poll::Pending => Err(Error::TrySendError),
+            Poll::Pending => Err(ErrorKind::TrySendError.into()),
         }
     }
 
@@ -180,16 +183,19 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> IntoAbst
         Arc::new(Stub {
             inner: self,
             sending_fut: Mutex::new(FutureCell::new()),
+            closed: AtomicBool::new(false),
             _m: Default::default(),
         })
     }
 }
+
 type SendFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
     impl Future<Output = Result<(), Error>> + Send;
 
 pub struct Stub<M: Message, R: Message, H: Receiver<M, R> + 'static> {
     inner: H,
     sending_fut: Mutex<FutureCell<SendFuture<M, R, H>>>,
+    closed: AtomicBool,
     _m: PhantomData<(M, R)>,
 }
 
@@ -208,6 +214,10 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Abstract
         cx: Option<&mut Context<'_>>,
         bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Poll::Ready(Err(ErrorKind::BusClosed.into()));
+        }
+
         self.inner.poll_send(msg.into_typed()?, cx, bus)
     }
 
@@ -219,6 +229,10 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Abstract
         cx: &mut Context<'_>,
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Poll::Ready(Err(ErrorKind::BusClosed.into()));
+        }
+
         loop {
             if let Some(poll) = self.sending_fut.lock().try_poll_unpin(cx) {
                 let _ = ready!(poll);
@@ -255,6 +269,7 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Abstract
     }
 
     fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.closed.store(true, Ordering::Release);
         self.inner.poll_close(cx)
     }
 }
@@ -274,7 +289,7 @@ impl dyn AbstractReceiver {
     ) -> Result<TaskHandler, Error> {
         match self.poll_send(cell, None, bus) {
             Poll::Ready(task) => task,
-            Poll::Pending => Err(Error::TrySendError),
+            Poll::Pending => Err(ErrorKind::TrySendError.into()),
         }
     }
 
@@ -329,5 +344,38 @@ impl dyn AbstractReceiver {
     #[inline]
     pub async fn close(&self) -> Result<(), Error> {
         poll_fn(move |cx| self.poll_close(cx)).await
+    }
+}
+
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Arc<T> {
+    #[inline]
+    fn poll_send(
+        &self,
+        msg: &mut MsgCell<M>,
+        cx: Option<&mut Context<'_>>,
+        bus: &Bus,
+    ) -> Poll<Result<TaskHandler, Error>> {
+        (**self).poll_send(msg, cx, bus)
+    }
+
+    #[inline]
+    fn poll_result(
+        &self,
+        task: &mut TaskHandler,
+        res: &mut ResultCell<R>,
+        cx: &mut Context<'_>,
+        bus: &Bus,
+    ) -> Poll<Result<(), Error>> {
+        (**self).poll_result(task, res, cx, bus)
+    }
+
+    #[inline]
+    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
+        (**self).poll_flush(cx, bus)
+    }
+
+    #[inline]
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        (**self).poll_close(cx)
     }
 }

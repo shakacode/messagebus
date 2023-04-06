@@ -1,7 +1,6 @@
 use std::{
-    marker::PhantomData,
     sync::Arc,
-    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    task::{Context, Poll},
 };
 
 use futures::ready;
@@ -11,13 +10,33 @@ use sharded_slab::{Clear, Pool};
 use crate::{
     bus::Bus,
     cell::{MsgCell, ResultCell},
-    error::Error,
+    error::{Error, ErrorKind},
     handler::MessageProducer,
     message::Message,
     receiver::Receiver,
-    utils::{future_cell::FutureCell, wakelist::WakeList},
-    TaskHandler, TaskHandlerVTable,
+    utils::{future_cell::FutureCell, wakelist::WakeList, NullContext},
+    TaskHandler,
 };
+
+pub trait IntoAsyncProducer<M: Message, R: Message>
+where
+    Self: crate::MessageProducer<M, Message = R> + Send + Sync + 'static,
+{
+    fn into_async_producer(self) -> ProducerWrapper<M, Self>
+    where
+        Self: Sized + 'static;
+}
+
+impl<M: Message, H: MessageProducer<M> + Send + Sync + 'static> IntoAsyncProducer<M, H::Message>
+    for H
+{
+    fn into_async_producer(self) -> ProducerWrapper<M, H>
+    where
+        Self: Sized + 'static,
+    {
+        ProducerWrapper::new(Arc::new(self))
+    }
+}
 
 struct ProducerContextInner<M: Message, T: MessageProducer<M> + 'static> {
     context: Option<T::Context>,
@@ -38,8 +57,8 @@ impl<M: Message, T: MessageProducer<M>> Default for ProducerContextInner<M, T> {
 impl<M: Message, T: MessageProducer<M>> Clear for ProducerContextInner<M, T> {
     fn clear(&mut self) {
         self.context = None;
-        self.next_fut.unset();
-        self.close_fut.unset();
+        self.next_fut.clear();
+        self.close_fut.clear();
     }
 }
 
@@ -76,8 +95,8 @@ impl<M: Message, T: MessageProducer<M>> ProducerContextInner<M, T> {
     #[inline]
     pub fn start(&mut self, ctx: T::Context) {
         drop(self.context.replace(ctx));
-        self.next_fut.unset();
-        self.close_fut.unset();
+        self.next_fut.clear();
+        self.close_fut.clear();
     }
 
     #[inline]
@@ -94,7 +113,7 @@ impl<M: Message, T: MessageProducer<M>> ProducerContextInner<M, T> {
 
     #[inline]
     pub fn start_close(&mut self, producer: &T) {
-        self.next_fut.unset();
+        self.next_fut.clear();
 
         if let Some(ctx) = self.context.take() {
             // SAFETY:
@@ -184,11 +203,14 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
             .create_with(|producer| producer.init(ctx))
             .unwrap();
 
-        let task = TaskHandler::new(
-            HandlerWrapperHelper::<M, T>::VTABLE,
-            self.producers.clone(),
-            index as _,
-        );
+        let task = TaskHandler::new(self.producers.clone(), index as _, |data, idx| {
+            let Ok(res) = data.downcast::<Pool<ProducerContext<M, T>>>() else {
+                println!("wrong type");
+                return;
+            };
+
+            res.clear(idx as _);
+        });
 
         Poll::Ready(Ok(task))
     }
@@ -201,18 +223,19 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
         bus: &Bus,
     ) -> Poll<Result<(), Error>> {
         let Some(task_handle) = task.data().downcast_ref::<Pool<ProducerContext<M, T>>>() else {
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from("cannot cast type"))));
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from("cannot cast type")).into()));
         };
 
         if !std::ptr::eq(&*self.producers, task_handle) {
-            return Poll::Ready(Err(Error::ErrorPollWrongTask(String::from(
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from(
                 "pointers are mismatch",
-            ))));
+            ))
+            .into()));
         }
 
         loop {
             let Some(producer) = self.producers.get(task.index() as _) else {
-                break Poll::Ready(Err(Error::ErrorPollWrongTask(format!("task index is incorrect {}", task.index()))));
+                break Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(format!("task index is incorrect {}", task.index())).into()));
             };
 
             let mut lock = producer.lock();
@@ -235,41 +258,6 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
     }
 }
 
-lazy_static::lazy_static! {
-    static ref WAKER: Waker = unsafe {
-        Waker::from_raw(RawWaker::new(std::ptr::null(), NullContext::VTABLE))
-    };
-}
-
-pub struct NullContext;
-impl NullContext {
-    const VTABLE: &RawWakerVTable =
-        &RawWakerVTable::new(Self::clone_stub, Self::stub, Self::stub, Self::stub);
-
-    pub fn clone_stub(data: *const ()) -> RawWaker {
-        RawWaker::new(data, Self::VTABLE)
-    }
-
-    pub fn stub(_: *const ()) {}
-    pub fn new() -> Context<'static> {
-        Context::from_waker(&WAKER)
-    }
-}
-
-pub(crate) struct HandlerWrapperHelper<M: Message, T: MessageProducer<M>>(PhantomData<(M, T)>);
-impl<M: Message, T: MessageProducer<M> + 'static> HandlerWrapperHelper<M, T> {
-    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, idx| {
-            let Ok(res) = data.downcast::<Pool<ProducerContext<M, T>>>() else {
-                println!("wrong type");
-                return;
-            };
-
-            res.clear(idx as _);
-        },
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -282,13 +270,14 @@ mod tests {
     };
 
     use crate::{
-        bus::Bus, cell::MsgCell, derive_message_clone, error::Error, handler::Handler,
+        bus::Bus, cell::MsgCell, derive, error::Error, handler::Handler,
         receiver::IntoAbstractReceiver, receivers::wrapper::HandlerWrapper,
     };
 
-    #[derive(Debug, Clone, PartialEq)]
+    use crate as messagebus;
+
+    #[derive(Debug, Clone, PartialEq, derive::Message)]
     struct Msg(pub u32);
-    derive_message_clone!(TEST_PRODUCER_MSG, Msg, "test::Msg");
 
     struct Test {
         inner: u32,
@@ -309,11 +298,11 @@ mod tests {
             }
         }
 
-        fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }
@@ -337,11 +326,11 @@ mod tests {
             }
         }
 
-        fn flush(&mut self, _: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }

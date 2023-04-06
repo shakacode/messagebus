@@ -13,7 +13,7 @@ use crate::{
     message::Message,
     receiver::Receiver,
     utils::wakelist::WakeList,
-    Bus, TaskHandler, TaskHandlerVTable,
+    Bus, TaskHandler,
 };
 
 enum UnorderedSlotState<M: Message> {
@@ -151,11 +151,17 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Unordered<
     }
 
     fn create_task(&self, index: usize) -> TaskHandler {
-        TaskHandler::new(
-            TaskHelper::<M, R, T>::VTABLE,
-            self.inner.clone(),
-            index as _,
-        )
+        TaskHandler::new(self.inner.clone(), index as _, |data, index| {
+            let Ok(res) = data.downcast::<UnorderedInner<M, R, T>>() else {
+                return;
+            };
+
+            if let Some(slot) = res.slots.get(index as usize) {
+                slot.cancel();
+            }
+
+            let _ = res.free_queue.push(index as usize);
+        })
     }
 }
 
@@ -203,25 +209,6 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M
     }
 }
 
-struct TaskHelper<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static>(
-    PhantomData<(M, R, T)>,
-);
-impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> TaskHelper<M, R, T> {
-    pub const VTABLE: &TaskHandlerVTable = &TaskHandlerVTable {
-        drop: |data, index| {
-            let Ok(res) = data.downcast::<UnorderedInner<M, R, T>>() else {
-                return;
-            };
-
-            if let Some(slot) = res.slots.get(index as usize) {
-                slot.cancel();
-            }
-
-            let _ = res.free_queue.push(index as usize);
-        },
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -229,15 +216,15 @@ mod tests {
     use futures::{stream::FuturesUnordered, Future, TryStreamExt};
 
     use crate::{
-        cell::MsgCell, derive_message_clone, error::Error, handler::Handler, receiver::ReceiverEx,
+        cell::MsgCell, derive::Message, error::Error, handler::Handler, receiver::ReceiverEx,
         receivers::wrapper::HandlerWrapper, Bus,
     };
 
     use super::Unordered;
+    use crate as messagebus;
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Message)]
     struct Msg(pub u32);
-    derive_message_clone!(TEST_UNORDERED_MSG, Msg, "test::Msg");
 
     #[derive(Clone)]
     struct Test {
@@ -267,11 +254,11 @@ mod tests {
             }
         }
 
-        fn flush(&mut self, _bus: &Bus) -> Self::FlushFuture<'_> {
+        fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
             std::future::ready(Ok(()))
         }
 
-        fn close(&mut self) -> Self::CloseFuture<'_> {
+        fn close(&self) -> Self::CloseFuture<'_> {
             std::future::ready(Ok(()))
         }
     }

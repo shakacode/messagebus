@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use thiserror::Error;
-
 use crate::{type_tag::TypeTag, Message};
+use ctxerr::ctxerr;
+use std::sync::Arc;
 
 pub trait AbstractError: std::error::Error + Message {}
 impl<T: std::error::Error + Message> AbstractError for T {}
 
-#[derive(Debug, Clone, Error)]
-pub enum Error {
+#[derive(Clone)]
+#[ctxerr]
+pub enum ErrorKind {
     #[error("Internal Error: {0}")]
     InternalError(&'static str),
 
@@ -41,12 +41,29 @@ pub enum Error {
     #[error("Marker indicats that producer finished producing.")]
     ProducerFinished,
 
+    #[error("Bus is closed!")]
+    BusClosed,
+
     #[error("Handler Error: {0}")]
     HandlerError(Arc<dyn AbstractError>),
 }
 
-impl<T: AbstractError> From<T> for Error {
-    fn from(value: T) -> Self {
-        Self::HandlerError(Arc::new(value))
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            backtrace: None,
+            location: None,
+        }
+    }
+}
+
+pub trait IntoError {
+    fn into_error(self) -> Error;
+}
+
+impl<T: AbstractError> IntoError for T {
+    fn into_error(self) -> Error {
+        ErrorKind::HandlerError(Arc::new(self)).into()
     }
 }

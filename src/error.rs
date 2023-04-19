@@ -14,7 +14,7 @@ pub enum ErrorKind {
     #[error("No Such Receiver Error: MessageTypeQuery ({0:?}) -> {1:?}")]
     NoSuchReceiver(TypeTag, Option<TypeTag>),
 
-    #[error("No Such Receiver Error: MessageTypeQuery")]
+    #[error("Already Initialized")]
     AlreadyInitialized,
 
     #[error("Dynamic Cast Failed: got ({0}), but expected({1})")]
@@ -43,6 +43,9 @@ pub enum ErrorKind {
 
     #[error("Bus is closed!")]
     BusClosed,
+
+    #[error("Uninitialized")]
+    Uninitialized,
 
     #[error("Handler Error: {0}")]
     HandlerError(Arc<dyn AbstractError>),

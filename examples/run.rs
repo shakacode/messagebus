@@ -1,4 +1,4 @@
-#![feature(type_alias_impl_trait)]
+#![feature(type_alias_impl_trait, impl_trait_in_assoc_type)]
 
 use std::sync::Arc;
 
@@ -21,9 +21,15 @@ struct Test {
 
 impl Handler<Msg> for Test {
     type Response = ();
+
+    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
+        async move { Ok(()) }
+    }
 
     fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
         let msg = msg.get();

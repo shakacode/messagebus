@@ -1,6 +1,6 @@
 use std::{
     future::poll_fn,
-    sync::{Arc, Weak},
+    sync::{atomic::AtomicU8, Arc, Weak},
 };
 
 use dashmap::DashMap;
@@ -77,14 +77,17 @@ impl Bus {
     }
 
     #[inline]
+    pub async fn init(&self) {
+        self.inner.init(self).await
+    }
+
+    #[inline]
     pub async fn send<M: Message>(&self, msg: M) -> Result<(), Error> {
         let mut msg = MsgCell::new(msg);
 
         self.inner
             .send(&mut msg, SendOptions::default(), self)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     #[inline]
@@ -244,6 +247,7 @@ impl BusReceivers {
 }
 
 pub struct BusInner {
+    state: AtomicU8,
     receivers: DashMap<(u64, u64), BusReceivers>,
     processing: Arc<PollingPool>,
 }
@@ -251,6 +255,7 @@ pub struct BusInner {
 impl BusInner {
     pub(crate) fn new() -> Self {
         Self {
+            state: AtomicU8::new(0),
             receivers: DashMap::new(),
             processing: Arc::new(PollingPool::new()),
         }
@@ -278,6 +283,19 @@ impl BusInner {
             .entry((mtt.hash, 0))
             .or_insert_with(|| BusReceivers::new(is_producer))
             .add(mask, receiver.clone());
+    }
+
+    pub(crate) async fn init(&self, bus: &Bus) {
+        let mut vec = Vec::new();
+        for recvs in self.receivers.iter() {
+            for recv in recvs.inner.iter().cloned() {
+                vec.push(async move { (recv.inner.initialize(bus).await, recv) });
+            }
+        }
+
+        for res in futures::future::join_all(vec.into_iter()).await {
+            println!("init {:?}", res.0);
+        }
     }
 
     pub(crate) fn try_send(

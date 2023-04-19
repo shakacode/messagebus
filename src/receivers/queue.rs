@@ -183,13 +183,33 @@ async fn gen_request_fut<M: Message, R: Message, T: Receiver<M, R> + 'static>(
     inner.result(task, bus).await
 }
 
-impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Queue<M, R, T> {
+impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Queue<M, R, T> {
+    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    #[inline]
+    fn close(&self) -> Self::CloseFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    #[inline]
+    fn flush(&self, bus: &Bus) -> Self::FlushFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    #[inline]
+    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+        async move { Ok(()) }
+    }
+
     fn poll_send(
         &self,
         msg: &mut MsgCell<M>,
         cx: Option<&mut Context<'_>>,
         bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
+        // trying fast track
         if self.queue_send.capacity() == self.queue_send.max_capacity() {
             if let Some(mut current) = self.current.try_lock() {
                 if current.is_empty() {
@@ -344,14 +364,6 @@ impl<'a, M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for
             Poll::Pending
         }
     }
-
-    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        self.inner.poll_close(cx)
-    }
 }
 
 #[cfg(test)]
@@ -367,7 +379,7 @@ mod tests {
         derive::Message,
         error::{Error, ErrorKind},
         handler::Handler,
-        receiver::{IntoAbstractReceiver, Receiver, ReceiverEx},
+        receiver::{Receiver, ReceiverEx},
         receivers::{queue::Queue, wrapper::HandlerWrapper},
     };
 
@@ -386,6 +398,11 @@ mod tests {
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
         type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+        type InitFuture<'a> = std::future::Ready<Result<(), Error>>;
+
+        fn init(&self, _: &Bus) -> Self::InitFuture<'_> {
+            std::future::ready(Ok(()))
+        }
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
             let msg = msg.peek().0;

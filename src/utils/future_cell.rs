@@ -193,4 +193,9 @@ impl<F: Future> SyncFutureCell<F> {
             Err(ErrorKind::TrySendError.into())
         }
     }
+
+    #[inline]
+    pub(crate) fn set(&self, fut: F) {
+        self.inner.lock().set(fut)
+    }
 }

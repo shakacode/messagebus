@@ -81,35 +81,23 @@ impl<M: Message, T: Handler<M>> HandlerWrapper<M, T> {
 }
 
 impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWrapper<M, T> {
-    fn poll_send(
-        &self,
-        msg: &mut MsgCell<M>,
-        cx: Option<&mut Context<'_>>,
-        bus: &Bus,
-    ) -> Poll<Result<TaskHandler, Error>> {
-        if let Some(mut guard) = self.current_fut.try_lock() {
-            if guard.is_none() {
-                let task = TaskHandler::new(self.current_fut.clone(), 0, |data, _| {
-                    let Ok(res) = data.downcast::<Mutex<Option<T::HandleFuture<'static>>>>() else {
-                println!("wrong type");
-                return;
-            };
+    type InitFuture<'a> = T::InitFuture<'a>;
+    type CloseFuture<'a> = T::CloseFuture<'a>;
+    type FlushFuture<'a> = T::FlushFuture<'a>;
 
-                    drop(res.lock().take());
-                });
+    #[inline]
+    fn close(&self) -> Self::CloseFuture<'_> {
+        self.inner.close()
+    }
 
-                // SAFETY: Box contains none we've checked it!
-                self.start_handle(&mut *guard, msg, bus);
+    #[inline]
+    fn flush(&self, bus: &Bus) -> Self::FlushFuture<'_> {
+        self.inner.flush(bus)
+    }
 
-                return Poll::Ready(Ok(task));
-            }
-        }
-
-        if let Some(cx) = cx {
-            self.send_waker.register(cx.waker());
-        }
-
-        Poll::Pending
+    #[inline]
+    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+        self.inner.init(bus)
     }
 
     fn poll_result(
@@ -146,12 +134,35 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         Poll::Pending
     }
 
-    fn poll_flush(&self, cx: &mut Context<'_>, bus: &Bus) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
-    }
+    fn poll_send(
+        &self,
+        msg: &mut MsgCell<M>,
+        cx: Option<&mut Context<'_>>,
+        bus: &Bus,
+    ) -> Poll<Result<TaskHandler, Error>> {
+        if let Some(mut guard) = self.current_fut.try_lock() {
+            if guard.is_none() {
+                let task = TaskHandler::new(self.current_fut.clone(), 0, |data, _| {
+                    let Ok(res) = data.downcast::<Mutex<Option<T::HandleFuture<'static>>>>() else {
+                        println!("wrong type");
+                        return;
+                    };
 
-    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
+                    drop(res.lock().take());
+                });
+
+                // SAFETY: Box contains none we've checked it!
+                self.start_handle(&mut *guard, msg, bus);
+
+                return Poll::Ready(Ok(task));
+            }
+        }
+
+        if let Some(cx) = cx {
+            self.send_waker.register(cx.waker());
+        }
+
+        Poll::Pending
     }
 }
 
@@ -186,6 +197,11 @@ mod tests {
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
         type CloseFuture<'a> = std::future::Ready<Result<(), Error>>;
+        type InitFuture<'a> = std::future::Ready<Result<(), Error>>;
+
+        fn init(&self, _: &Bus) -> Self::InitFuture<'_> {
+            std::future::ready(Ok(()))
+        }
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
             let val = msg.peek().0;
@@ -214,6 +230,11 @@ mod tests {
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
         type CloseFuture<'a> = std::future::Ready<Result<(), Error>>;
+        type InitFuture<'a> = std::future::Ready<Result<(), Error>>;
+
+        fn init(&self, _: &Bus) -> Self::InitFuture<'_> {
+            std::future::ready(Ok(()))
+        }
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
             let val = msg.peek().0;
@@ -238,6 +259,8 @@ mod tests {
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
 
+        receiver.initialize(&bus).await.unwrap();
+
         let mut cell = MsgCell::new(Msg(12));
         let task = poll_fn(|cx| receiver.poll_send(&mut cell, Some(cx), &bus)).await?;
         let r: Msg = receiver.result(task, bus).await?;
@@ -252,6 +275,7 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
         assert_eq!(receiver.request::<_, Msg>(Msg(13), bus).await?, Msg(25));
         Ok(())
     }
@@ -261,6 +285,7 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
 
         let flag1 = Arc::new(AtomicBool::new(false));
         let flag1_clone = flag1.clone();
@@ -291,6 +316,8 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(SleepTest { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
+
         let src = (0u32..128).map(Msg).collect::<Vec<_>>();
         let dst = (0u32..128).map(|x| x + 12).map(Msg).collect::<Vec<_>>();
         let mut target = Vec::<Msg>::new();

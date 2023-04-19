@@ -1,16 +1,15 @@
-#![feature(type_alias_impl_trait)]
+#![feature(type_alias_impl_trait, impl_trait_in_assoc_type)]
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Future;
 use messagebus::{
-    bus::{Bus, MaskMatch},
+    bus::Bus,
     cell::MsgCell,
     derive,
     error::{Error, ErrorKind},
     handler::{Handler, MessageProducer},
-    receivers::{producer::ProducerWrapper, wrapper::HandlerWrapper},
 };
 
 #[derive(Debug, Clone, derive::Message)]
@@ -24,9 +23,14 @@ struct Test {}
 impl MessageProducer<StartMsg> for Test {
     type Message = Msg;
     type Context = u64;
+    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type NextFuture<'a> = impl Future<Output = Result<Self::Message, Error>> + 'a;
     type StartFuture<'a> = impl Future<Output = Result<Self::Context, Error>> + 'a;
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
+        async move { Ok(()) }
+    }
 
     fn start(&self, msg: &mut MsgCell<StartMsg>, _: &Bus) -> Self::StartFuture<'_> {
         let start_from = msg.get().0;
@@ -59,9 +63,14 @@ impl MessageProducer<StartMsg> for Test {
 
 impl Handler<Msg> for Test {
     type Response = ();
+    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
+        async move { Ok(()) }
+    }
 
     fn handle(&self, msg: &mut MsgCell<Msg>, _bus: &Bus) -> Self::HandleFuture<'_> {
         let msg = msg.get();

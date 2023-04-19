@@ -3,6 +3,8 @@ use std::{
     task::{Context, Poll},
 };
 
+use futures::Future;
+
 use crate::{
     bus::Bus,
     cell::{MsgCell, ResultCell},
@@ -27,6 +29,25 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Clone + Send + Sync + 'static> 
 impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver<M, R>
     for Spawner<M, R, T>
 {
+    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    #[inline]
+    fn close(&self) -> Self::CloseFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    #[inline]
+    fn flush(&self, bus: &Bus) -> Self::FlushFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    #[inline]
+    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+        async move { Ok(()) }
+    }
+
     #[inline]
     fn poll_send(
         &self,
@@ -62,14 +83,6 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver
         // } else {
         Poll::Pending
         // }
-    }
-
-    fn poll_flush(&self, _cx: &mut Context<'_>, _bus: &Bus) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(&self, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
     }
 }
 

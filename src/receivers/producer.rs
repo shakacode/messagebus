@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::ready;
+use futures::{ready, Future};
 use parking_lot::Mutex;
 use sharded_slab::{Clear, Pool};
 
@@ -171,6 +171,25 @@ impl<M: Message, T: MessageProducer<M>> ProducerWrapper<M, T> {
 impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
     for ProducerWrapper<M, T>
 {
+    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+
+    #[inline]
+    fn close(&self) -> Self::CloseFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    #[inline]
+    fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
+        async move { Ok(()) }
+    }
+
+    #[inline]
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
+        async move { Ok(()) }
+    }
+
     fn poll_send(
         &self,
         msg: &mut MsgCell<M>,
@@ -248,14 +267,6 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
             }
         }
     }
-
-    fn poll_flush(&self, _cx: &mut Context<'_>, _bus: &Bus) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(&self, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        Poll::Ready(Ok(()))
-    }
 }
 
 #[cfg(test)]
@@ -288,6 +299,11 @@ mod tests {
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
         type CloseFuture<'a> = std::future::Ready<Result<(), Error>>;
+        type InitFuture<'a> = std::future::Ready<Result<(), Error>>;
+
+        fn init(&self, _: &Bus) -> Self::FlushFuture<'_> {
+            std::future::ready(Ok(()))
+        }
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
             let val = msg.peek().0;
@@ -316,6 +332,11 @@ mod tests {
         type HandleFuture<'a> = impl Future<Output = Result<Self::Response, Error>> + 'a;
         type FlushFuture<'a> = std::future::Ready<Result<(), Error>>;
         type CloseFuture<'a> = std::future::Ready<Result<(), Error>>;
+        type InitFuture<'a> = std::future::Ready<Result<(), Error>>;
+
+        fn init(&self, _: &Bus) -> Self::FlushFuture<'_> {
+            std::future::ready(Ok(()))
+        }
 
         fn handle(&self, msg: &mut MsgCell<Msg>, _: &Bus) -> Self::HandleFuture<'_> {
             let val = msg.peek().0;
@@ -340,6 +361,7 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
 
         let mut cell = MsgCell::new(Msg(12));
         let task = poll_fn(|cx| receiver.poll_send(&mut cell, Some(cx), &bus)).await?;
@@ -355,6 +377,8 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
+
         assert_eq!(receiver.request::<_, Msg>(Msg(13), bus).await?, Msg(25));
         Ok(())
     }
@@ -364,6 +388,7 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
 
         let flag1 = Arc::new(AtomicBool::new(false));
         let flag1_clone = flag1.clone();
@@ -394,6 +419,8 @@ mod tests {
         let bus = Bus::new();
         let wrapper = HandlerWrapper::new(Arc::new(SleepTest { inner: 12 }));
         let receiver = wrapper.into_abstract_arc();
+        receiver.initialize(&bus).await.unwrap();
+
         let src = (0u32..128).map(Msg).collect::<Vec<_>>();
         let dst = (0u32..128).map(|x| x + 12).map(Msg).collect::<Vec<_>>();
         let mut target = Vec::<Msg>::new();

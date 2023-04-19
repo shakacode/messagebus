@@ -70,12 +70,15 @@ pub trait ReceiverEx<M: Message, R: Message>: Receiver<M, R> {
     type SendFut<'a>: Future<Output = Result<TaskHandler, Error>> + Send + 'a
     where
         Self: 'a;
+
     type RequestFut<'a>: Future<Output = Result<R, Error>> + Send + 'a
     where
         Self: 'a;
+
     type ResultFut<'a>: Future<Output = Result<R, Error>> + Send + 'a
     where
         Self: 'a;
+
     type ProcessFut<'a>: Future<Output = Result<(), Error>> + Send + 'a
     where
         Self: 'a;

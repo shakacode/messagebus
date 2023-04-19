@@ -28,7 +28,11 @@ impl MessageProducer<StartMsg> for Test {
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
     fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
-        async move { Ok(()) }
+        async move {
+            println!("Message producer initialized !!!");
+
+            Ok(())
+        }
     }
 
     fn start(&self, msg: &mut MsgCell<StartMsg>, _: &Bus) -> Self::StartFuture<'_> {
@@ -97,10 +101,12 @@ impl Handler<Msg> for Test {
 
 async fn run() -> Result<(), Error> {
     let bus = Bus::new();
-    let test = Arc::new(Test {});
-    bus.register_producer(test.clone(), MaskMatch::all());
-    bus.register(test, MaskMatch::all());
-    bus.init().await;
+
+    bus.register(Test {})
+        .handler(MaskMatch::all())
+        .await?
+        .producer(MaskMatch::all())
+        .await?;
 
     bus.send(StartMsg(0)).await?;
     bus.send(StartMsg(100)).await?;

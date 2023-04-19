@@ -52,17 +52,17 @@ impl Handler<Msg> for Test {
 
 async fn run() -> Result<(), Error> {
     let bus = Bus::new();
+    bus.register(Test { inner: 12 })
+        .handler(MaskMatch::all())
+        .await?;
 
-    let wrapper = HandlerWrapper::new(Arc::new(Test { inner: 12 }));
-    // bus.register(wrapper, MaskMatch::all());
+    let res: () = bus.request(Msg(13)).await?.result().await?;
+    println!("request result got {:?}", res);
 
-    // let res: () = bus.request(Msg(13)).await?.result().await?;
-    // println!("request result got {:?}", res);
+    bus.send(Msg(12)).await?;
 
-    // bus.send(Msg(12)).await?;
-
-    // bus.close().await;
-    // bus.wait().await;
+    bus.close().await;
+    bus.wait().await;
 
     Ok(())
 }

@@ -22,7 +22,7 @@ pub trait IntoAsyncProducer<M: Message, R: Message>
 where
     Self: crate::MessageProducer<M, Message = R> + Send + Sync + 'static,
 {
-    fn into_async_producer(self) -> ProducerWrapper<M, Self>
+    fn into_async_producer(self: Arc<Self>) -> ProducerWrapper<M, Self>
     where
         Self: Sized + 'static;
 }
@@ -30,11 +30,11 @@ where
 impl<M: Message, H: MessageProducer<M> + Send + Sync + 'static> IntoAsyncProducer<M, H::Message>
     for H
 {
-    fn into_async_producer(self) -> ProducerWrapper<M, H>
+    fn into_async_producer(self: Arc<Self>) -> ProducerWrapper<M, H>
     where
         Self: Sized + 'static,
     {
-        ProducerWrapper::new(Arc::new(self))
+        ProducerWrapper::new(self)
     }
 }
 
@@ -171,13 +171,17 @@ impl<M: Message, T: MessageProducer<M>> ProducerWrapper<M, T> {
 impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
     for ProducerWrapper<M, T>
 {
-    type InitFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
+    type InitFuture<'a> = T::InitFuture<'a>;
     type CloseFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
     type FlushFuture<'a> = impl Future<Output = Result<(), Error>> + 'a;
 
     #[inline]
     fn close(&self) -> Self::CloseFuture<'_> {
-        async move { Ok(()) }
+        async move {
+            // self.producers.iter()
+
+            Ok(())
+        }
     }
 
     #[inline]
@@ -186,8 +190,8 @@ impl<M: Message, T: MessageProducer<M> + 'static> Receiver<M, T::Message>
     }
 
     #[inline]
-    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
-        async move { Ok(()) }
+    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+        self.inner.init(bus)
     }
 
     fn poll_send(

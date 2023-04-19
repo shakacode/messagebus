@@ -22,7 +22,7 @@ pub trait IntoAsyncReceiver<M: Message, R: Message>
 where
     Self: Handler<M, Response = R> + Send + Sync + 'static,
 {
-    fn into_async_receiver(self) -> HandlerWrapper<M, Self>
+    fn into_async_receiver(self: Arc<Self>) -> HandlerWrapper<M, Self>
     where
         Self: Sized + 'static;
 }
@@ -30,11 +30,11 @@ where
 impl<M: Message, R: Message, H: Handler<M, Response = R> + Send + Sync + 'static>
     IntoAsyncReceiver<M, R> for H
 {
-    fn into_async_receiver(self) -> HandlerWrapper<M, H>
+    fn into_async_receiver(self: Arc<Self>) -> HandlerWrapper<M, H>
     where
         Self: Sized + 'static,
     {
-        HandlerWrapper::new(Arc::new(self))
+        HandlerWrapper::new(self)
     }
 }
 

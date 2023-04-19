@@ -43,6 +43,57 @@ pub struct BusContext {
     name: String,
 }
 
+pub struct Registrator<'a, H: Send + Sync + 'static> {
+    bus: &'a Bus,
+    r: Arc<H>,
+}
+
+impl<'a, H: Send + Sync + 'static> Registrator<'a, H> {
+    pub async fn handler<M: Message, R: Message>(
+        self,
+        mask: MaskMatch,
+    ) -> Result<Registrator<'a, H>, Error>
+    where
+        H: IntoAsyncReceiver<M, R> + Send + Sync + 'static,
+    {
+        self.bus
+            .inner
+            .register(
+                M::TYPE_TAG(),
+                R::TYPE_TAG(),
+                self.r.clone().into_async_receiver().into_abstract_arc(),
+                mask,
+                false,
+                self.bus,
+            )
+            .await?;
+
+        Ok(self)
+    }
+
+    pub async fn producer<M: Message, R: Message>(
+        self,
+        mask: MaskMatch,
+    ) -> Result<Registrator<'a, H>, Error>
+    where
+        H: IntoAsyncProducer<M, R> + Send + Sync + 'static,
+    {
+        self.bus
+            .inner
+            .register(
+                M::TYPE_TAG(),
+                R::TYPE_TAG(),
+                self.r.clone().into_async_producer().into_abstract_arc(),
+                mask,
+                true,
+                self.bus,
+            )
+            .await?;
+
+        Ok(self)
+    }
+}
+
 #[derive(Clone)]
 pub struct Bus {
     inner: Arc<BusInner>,
@@ -67,6 +118,14 @@ impl Bus {
     }
 
     #[inline]
+    pub fn register<H: Send + Sync + 'static>(&self, r: H) -> Registrator<H> {
+        Registrator {
+            bus: self,
+            r: Arc::new(r),
+        }
+    }
+
+    #[inline]
     pub fn try_send<M: Message>(&self, msg: M) -> Result<(), Error> {
         let mut msg = MsgCell::new(msg);
 
@@ -74,11 +133,6 @@ impl Bus {
             .try_send(&mut msg, SendOptions::default(), self)?;
 
         Ok(())
-    }
-
-    #[inline]
-    pub async fn init(&self) {
-        self.inner.init(self).await
     }
 
     #[inline]
@@ -93,46 +147,6 @@ impl Bus {
     #[inline]
     pub fn send_blocking<M: Message>(&self, msg: M) -> Result<(), Error> {
         futures::executor::block_on(self.send(msg))
-    }
-
-    #[inline]
-    pub fn register<M: Message, R: Message, H: IntoAsyncReceiver<M, R> + Send + Sync + 'static>(
-        &self,
-        r: H,
-        mask: MaskMatch,
-    ) {
-        self.inner.register(
-            M::TYPE_TAG(),
-            R::TYPE_TAG(),
-            r.into_async_receiver().into_abstract_arc(),
-            mask,
-            false,
-        )
-    }
-
-    #[inline]
-    pub fn register_producer<
-        M: Message,
-        R: Message,
-        P: IntoAsyncProducer<M, R> + Send + Sync + 'static,
-    >(
-        &self,
-        r: P,
-        mask: MaskMatch,
-    ) {
-        log::info!(
-            "reg producer start: {}, msg: {}",
-            M::TYPE_TAG(),
-            R::TYPE_TAG()
-        );
-
-        self.inner.register(
-            M::TYPE_TAG(),
-            R::TYPE_TAG(),
-            r.into_async_producer().into_abstract_arc(),
-            mask,
-            true,
-        )
     }
 
     #[inline]
@@ -173,7 +187,7 @@ impl Bus {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaskMatch {
     pos: u64,
     neg: u64,
@@ -227,6 +241,20 @@ struct BusReceiver {
     mask: MaskMatch,
 }
 
+impl std::hash::Hash for BusReceiver {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(Arc::as_ptr(&self.inner) as *const () as _);
+    }
+}
+
+impl PartialEq for BusReceiver {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for BusReceiver {}
+
 struct BusReceivers {
     is_producer: bool,
     inner: SegVec<BusReceiver>,
@@ -253,6 +281,15 @@ pub struct BusInner {
 }
 
 impl BusInner {
+    pub(crate) async fn close(&self) {
+        self.processing.close();
+    }
+
+    #[inline]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.processing.is_closed()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             state: AtomicU8::new(0),
@@ -261,19 +298,17 @@ impl BusInner {
         }
     }
 
-    #[inline]
-    pub(crate) fn is_closed(&self) -> bool {
-        self.processing.is_closed()
-    }
-
-    pub(crate) fn register(
+    pub(crate) async fn register(
         &self,
         mtt: TypeTag,
         rtt: TypeTag,
         receiver: Arc<dyn AbstractReceiver>,
         mask: MaskMatch,
         is_producer: bool,
-    ) {
+        bus: &Bus,
+    ) -> Result<(), Error> {
+        receiver.initialize(bus).await?;
+
         self.receivers
             .entry((mtt.hash, rtt.hash))
             .or_insert_with(|| BusReceivers::new(is_producer))
@@ -283,52 +318,38 @@ impl BusInner {
             .entry((mtt.hash, 0))
             .or_insert_with(|| BusReceivers::new(is_producer))
             .add(mask, receiver.clone());
+
+        Ok(())
     }
 
-    pub(crate) async fn init(&self, bus: &Bus) {
-        let mut vec = Vec::new();
-        for recvs in self.receivers.iter() {
-            for recv in recvs.inner.iter().cloned() {
-                vec.push(async move { (recv.inner.initialize(bus).await, recv) });
-            }
-        }
-
-        for res in futures::future::join_all(vec.into_iter()).await {
-            println!("init {:?}", res.0);
-        }
-    }
-
-    pub(crate) fn try_send(
+    pub(crate) async fn request<M: Message, R: Message>(
         &self,
-        msg: &mut dyn MessageCell,
-        options: SendOptions,
+        msg: M,
         bus: &Bus,
-    ) -> Result<(), Error> {
-        let tt = msg.type_tag();
+    ) -> Result<RequestHandler<M, R>, Error> {
+        let mtt = M::TYPE_TAG();
+        let rtt = R::TYPE_TAG();
 
         let receivers = self
             .receivers
-            .get(&(tt.hash, 0))
-            .ok_or_else(|| ErrorKind::NoSuchReceiver(tt, None))?;
+            .get(&(mtt.hash, rtt.hash))
+            .ok_or_else(|| ErrorKind::NoSuchReceiver(mtt.clone(), Some(rtt.clone())))?;
 
-        for receiver in receivers.inner.iter() {
-            if !receiver.mask.test(options.mask) {
-                continue;
-            }
+        if let Some(receiver) = receivers.inner.iter().next() {
+            let task = receiver
+                .inner
+                .send(&mut MsgCell::new(msg), bus.clone())
+                .await?;
 
-            match receiver.inner.try_send_dyn(msg, bus) {
-                Ok(task) => {
-                    let receiver = receiver.clone();
-                    self.processing.push(task, receiver.inner, false);
-                }
-
-                Err(err) => {
-                    println!("send failed {}", err);
-                }
-            }
+            Ok(RequestHandler {
+                task,
+                receiver: receiver.clone(),
+                bus: bus.clone(),
+                _m: Default::default(),
+            })
+        } else {
+            Err(ErrorKind::NoSuchReceiver(mtt, Some(rtt)).into())
         }
-
-        Ok(())
     }
 
     pub(crate) async fn send(
@@ -365,44 +386,36 @@ impl BusInner {
         Ok(())
     }
 
-    pub(crate) async fn request<M: Message, R: Message>(
+    pub(crate) fn try_send(
         &self,
-        msg: M,
+        msg: &mut dyn MessageCell,
+        options: SendOptions,
         bus: &Bus,
-    ) -> Result<RequestHandler<M, R>, Error> {
-        let mtt = M::TYPE_TAG();
-        let rtt = R::TYPE_TAG();
+    ) -> Result<(), Error> {
+        let tt = msg.type_tag();
 
         let receivers = self
             .receivers
-            .get(&(mtt.hash, rtt.hash))
-            .ok_or_else(|| ErrorKind::NoSuchReceiver(mtt.clone(), Some(rtt.clone())))?;
+            .get(&(tt.hash, 0))
+            .ok_or_else(|| ErrorKind::NoSuchReceiver(tt, None))?;
 
-        if let Some(receiver) = receivers.inner.iter().next() {
-            let task = receiver
-                .inner
-                .send(&mut MsgCell::new(msg), bus.clone())
-                .await?;
+        for receiver in receivers.inner.iter() {
+            if !receiver.mask.test(options.mask) {
+                continue;
+            }
 
-            Ok(RequestHandler {
-                task,
-                receiver: receiver.clone(),
-                bus: bus.clone(),
-                _m: Default::default(),
-            })
-        } else {
-            Err(ErrorKind::NoSuchReceiver(mtt, Some(rtt)).into())
+            let task = receiver.inner.try_send_dyn(msg, bus)?;
+            let receiver = receiver.clone();
+            self.processing.push(task, receiver.inner, false);
         }
+
+        Ok(())
     }
 
     pub(crate) async fn wait(&self, bus: &Bus) {
         let pool = self.processing.clone();
 
         poll_fn(move |cx| pool.poll(cx, bus)).await
-    }
-
-    pub(crate) async fn close(&self) {
-        self.processing.close();
     }
 }
 

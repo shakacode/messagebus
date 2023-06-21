@@ -116,9 +116,9 @@ impl PollingPool {
 
             let waker = WakerHelper::waker(idx);
             let mut cx = Context::from_waker(&waker);
+
             let mut lock = entry.task.lock();
             if lock.is_finished() {
-                println!("producer finished");
                 self.pool.remove(idx);
                 self.in_flight.fetch_sub(1, Ordering::Release);
                 continue;
@@ -136,7 +136,6 @@ impl PollingPool {
                                 })
                             ))
                     {
-                        // println!("producer finished {:?}", res);
                         self.pool.remove(idx);
                         self.in_flight.fetch_sub(1, Ordering::Release);
                     } else if let Err(err) = &res {

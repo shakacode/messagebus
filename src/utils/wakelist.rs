@@ -31,6 +31,7 @@ impl WakeList {
 pub(crate) struct WakeListInner {
     inner: [MaybeUninit<Waker>; NUM_WAKERS],
     curr: usize,
+    pending: bool,
 }
 
 impl WakeListInner {
@@ -44,6 +45,7 @@ impl WakeListInner {
                 MaybeUninit::uninit().assume_init()
             },
             curr: 0,
+            pending: false,
         }
     }
 
@@ -56,12 +58,18 @@ impl WakeListInner {
     pub(crate) fn push(&mut self, val: Waker) {
         debug_assert!(self.can_push());
 
-        self.inner[self.curr] = MaybeUninit::new(val);
-        self.curr += 1;
+        if self.pending {
+            val.wake();
+            self.pending = false;
+        } else {
+            self.inner[self.curr] = MaybeUninit::new(val);
+            self.curr += 1;
+        }
     }
 
     pub(crate) fn wake_all(&mut self) {
         assert!(self.curr <= NUM_WAKERS);
+        self.pending = true;
         while self.curr > 0 {
             self.curr -= 1;
             let waker = unsafe { ptr::read(self.inner[self.curr].as_mut_ptr()) };

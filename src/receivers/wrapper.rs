@@ -100,40 +100,6 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
         self.inner.init(bus)
     }
 
-    fn poll_result(
-        &self,
-        task: &mut TaskHandler,
-        resp: &mut ResultCell<T::Response>,
-        cx: &mut Context<'_>,
-        _bus: &Bus,
-    ) -> Poll<Result<(), Error>> {
-        let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::HandleFuture<'static>>>>() else {
-            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from("cannot cast type")).into()));
-        };
-
-        if !std::ptr::eq(&*self.current_fut, task_handle) {
-            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from(
-                "pointers are mismatch",
-            ))
-            .into()));
-        }
-
-        let mut lock = self.current_fut.lock();
-        if let Some(fut) = &mut *lock {
-            // SAFETY: in box, safly can poll it
-            resp.put(ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx)));
-
-            drop(lock.take());
-            drop(lock);
-
-            self.send_waker.wake_all();
-
-            return Poll::Ready(Ok(()));
-        }
-
-        Poll::Pending
-    }
-
     fn poll_send(
         &self,
         msg: &mut MsgCell<M>,
@@ -160,6 +126,41 @@ impl<M: Message, T: Handler<M> + 'static> Receiver<M, T::Response> for HandlerWr
 
         if let Some(cx) = cx {
             self.send_waker.register(cx.waker());
+        }
+
+        Poll::Pending
+    }
+
+    fn poll_result(
+        &self,
+        task: &mut TaskHandler,
+        resp: &mut ResultCell<T::Response>,
+        cx: &mut Context<'_>,
+        _bus: &Bus,
+    ) -> Poll<Result<(), Error>> {
+        let Some(task_handle) = task.data().downcast_ref::<Mutex<Option<T::HandleFuture<'static>>>>() else {
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from("cannot cast type")).into()));
+        };
+
+        if !std::ptr::eq(&*self.current_fut, task_handle) {
+            return Poll::Ready(Err(ErrorKind::ErrorPollWrongTask(String::from(
+                "pointers are mismatch",
+            ))
+            .into()));
+        }
+
+        let mut lock = self.current_fut.lock();
+        if let Some(fut) = &mut *lock {
+            // SAFETY: in box, safly can poll it
+            resp.put(ready!(unsafe { Pin::new_unchecked(fut) }.poll(cx)));
+
+            drop(lock.take());
+            drop(lock);
+
+            task.finish();
+            self.send_waker.wake_all();
+
+            return Poll::Ready(Ok(()));
         }
 
         Poll::Pending

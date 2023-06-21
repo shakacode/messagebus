@@ -259,6 +259,9 @@ impl<M: Message, R: Message, H: Receiver<M, R> + Send + Sync + 'static> Abstract
         loop {
             if let Some(poll) = self.sending_fut.lock().try_poll_unpin(cx) {
                 let _ = ready!(poll);
+                if task.is_finished() {
+                    break Poll::Ready(Ok(()));
+                }
             }
 
             break match res {

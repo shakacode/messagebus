@@ -58,7 +58,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Current<M, R, T> {
 type SendFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
     impl Future<Output = Result<usize, Error>> + Send;
 
-type ResultFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
+pub type ResultFuture<M: Message, R: Message, T: Receiver<M, R> + 'static> =
     impl Future<Output = Result<R, Error>> + Send;
 
 pub struct QueueItem<M> {
@@ -194,12 +194,12 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Que
     }
 
     #[inline]
-    fn flush(&self, bus: &Bus) -> Self::FlushFuture<'_> {
+    fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
         async move { Ok(()) }
     }
 
     #[inline]
-    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
         async move { Ok(()) }
     }
 
@@ -333,7 +333,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + 'static> Receiver<M, R> for Que
                     break;
                 }
 
-                return Poll::Ready(Ok(()));
+                Poll::Ready(Ok(()))
             } else {
                 loop {
                     let item = ready!(current.recv.poll_recv(cx)).ok_or(ErrorKind::SendError)?;

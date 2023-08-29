@@ -55,7 +55,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M, R>
     fn poll_send(
         &self,
         msg: &mut MsgCell<M>,
-        cx: Option<&mut Context<'_>>,
+        _cx: Option<&mut Context<'_>>,
         bus: &Bus,
     ) -> Poll<Result<TaskHandler, Error>> {
         let bus = bus.clone();
@@ -119,11 +119,11 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M, R>
         }
     }
 
-    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
         async move { Ok(()) }
     }
 
-    fn flush(&self, bus: &Bus) -> Self::FlushFuture<'_> {
+    fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
         async move { Ok(()) }
     }
 
@@ -135,7 +135,7 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Clone + 'static> Receiver<M, R>
 #[cfg(test)]
 mod tests {
     use futures::{
-        stream::{FuturesOrdered, FuturesUnordered},
+        stream::{FuturesOrdered},
         Future, TryStreamExt, join,
     };
     use std::sync::Arc;

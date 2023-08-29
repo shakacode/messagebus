@@ -106,12 +106,10 @@ impl fmt::Display for TypeTagQuery<'_> {
             }
 
             write!(f, "{}", &self.name)?;
+        } else if let QueryEntry::Value(name) = &self.name {
+            write!(f, "**::{}", name)?;
         } else {
-            if let QueryEntry::Value(name) = &self.name {
-                write!(f, "**::{}", name)?;
-            } else {
-                write!(f, "**")?;
-            }
+            write!(f, "**")?;
         };
 
         if let QueryEntry::Value(sts) = &self.subtypes {
@@ -182,7 +180,7 @@ impl<'s> TypeTagQuery<'s> {
         let x = TypeTagQuery::parse_inner(s)?;
 
         if x.1.trim() != "" {
-            return None;
+            None
         } else {
             Some(x.0)
         }
@@ -211,7 +209,7 @@ impl<'s> TypeTagQuery<'s> {
                 }
             }
 
-            if !ns_inner.is_empty() || !period.is_some() {
+            if !ns_inner.is_empty() || period.is_none() {
                 if let Some("**") = period {
                     ns_inner.push(QueryEntry::Any(true));
                 }
@@ -316,9 +314,9 @@ impl<'s> TypeTagQuery<'s> {
         let mut borrowed = self.as_borrowed();
 
         if borrowed.reduce() {
-            return Some(borrowed);
+            Some(borrowed)
         } else {
-            return None;
+            None
         }
     }
 
@@ -354,25 +352,23 @@ impl<'s> TypeTagQuery<'s> {
                 self.subtypes.make_any();
 
                 false
-            } else {
-                if self.name.is_any() {
-                    self.subtypes.make_any();
-                    false
-                } else if let QueryEntry::Value(sts) = &mut self.subtypes {
-                    let mut flag = false;
+            } else if self.name.is_any() {
+                self.subtypes.make_any();
+                false
+            } else if let QueryEntry::Value(sts) = &mut self.subtypes {
+                let mut flag = false;
 
-                    for st in sts {
-                        if flag {
-                            st.make_any();
-                        } else if !st.make_hashable() {
-                            flag = true
-                        }
+                for st in sts {
+                    if flag {
+                        st.make_any();
+                    } else if !st.make_hashable() {
+                        flag = true
                     }
-
-                    !flag
-                } else {
-                    false
                 }
+
+                !flag
+            } else {
+                false
             }
         } else {
             self.name.make_any();
@@ -409,37 +405,35 @@ impl<'s> TypeTagQuery<'s> {
                             if t_iter.next().is_none() {
                                 return false;
                             }
-                        } else {
-                            if let Some(qns_next) = q_iter.peek() {
-                                match qns_next {
-                                    QueryEntry::Value(qns_next) => {
+                        } else if let Some(qns_next) = q_iter.peek() {
+                            match qns_next {
+                                QueryEntry::Value(qns_next) => {
+                                    q_iter.next();
+
+                                    for tns in t_iter.by_ref() {
+                                        if tns == qns_next {
+                                            continue;
+                                        }
+                                    }
+
+                                    return false;
+                                }
+                                QueryEntry::Any(p) => {
+                                    if *p {
+                                        continue;
+                                    } else {
                                         q_iter.next();
 
-                                        while let Some(tns) = t_iter.next() {
-                                            if tns == qns_next {
-                                                continue;
-                                            }
+                                        if t_iter.next().is_none() {
+                                            return false;
                                         }
 
-                                        return false;
-                                    }
-                                    QueryEntry::Any(p) => {
-                                        if *p {
-                                            continue;
-                                        } else {
-                                            q_iter.next();
-
-                                            if t_iter.next().is_none() {
-                                                return false;
-                                            }
-
-                                            continue;
-                                        }
+                                        continue;
                                     }
                                 }
-                            } else {
-                                break;
                             }
+                        } else {
+                            break;
                         }
                     }
 

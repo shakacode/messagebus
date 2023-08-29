@@ -59,12 +59,18 @@ impl Message for () {
 
     fn try_clone_into(&self, into: &mut dyn crate::cell::MessageCell) -> bool {
         into.into_typed::<Self>()
-            .map(|c| c.put(self.clone()))
+            .map(|c| {
+                *self;
+                c.put(())
+            })
             .is_ok()
     }
 
     fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
-        Some(Box::new(self.clone()))
+        Some({
+            *self;
+            Box::new(())
+        })
     }
 
     fn is_cloneable(&self) -> bool {

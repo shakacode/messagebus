@@ -124,7 +124,7 @@ impl PollingPool {
                 continue;
             }
 
-            match entry.receiver.poll_result(&mut *lock, None, &mut cx, bus) {
+            match entry.receiver.poll_result(&mut lock, None, &mut cx, bus) {
                 Poll::Ready(res) => {
                     if !entry.multiple
                         || (entry.multiple

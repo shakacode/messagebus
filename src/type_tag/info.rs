@@ -64,7 +64,7 @@ impl fmt::Display for TypeTagInfo<'_> {
 
 impl<'s> AsRef<TypeTagInfo<'s>> for &'_ TypeTagInfo<'s> {
     fn as_ref(&self) -> &TypeTagInfo<'s> {
-        &*self
+        self
     }
 }
 

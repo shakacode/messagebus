@@ -39,12 +39,12 @@ impl<M: Message, R: Message, T: Receiver<M, R> + Send + Sync + 'static> Receiver
     }
 
     #[inline]
-    fn flush(&self, bus: &Bus) -> Self::FlushFuture<'_> {
+    fn flush(&self, _bus: &Bus) -> Self::FlushFuture<'_> {
         async move { Ok(()) }
     }
 
     #[inline]
-    fn init(&self, bus: &Bus) -> Self::InitFuture<'_> {
+    fn init(&self, _bus: &Bus) -> Self::InitFuture<'_> {
         async move { Ok(()) }
     }
 

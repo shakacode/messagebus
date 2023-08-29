@@ -14,7 +14,7 @@ lazy_static::lazy_static! {
 
 pub struct NullContext;
 impl NullContext {
-    const VTABLE: &RawWakerVTable =
+    const VTABLE: &'static RawWakerVTable =
         &RawWakerVTable::new(Self::clone_stub, Self::stub, Self::stub, Self::stub);
 
     pub fn clone_stub(data: *const ()) -> RawWaker {

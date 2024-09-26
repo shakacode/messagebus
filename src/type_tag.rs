@@ -56,7 +56,7 @@ impl TypeRegistry {
     }
 
     pub fn register<M: Message + serde::Serialize + serde::de::DeserializeOwned>(&self) {
-        println!("insert {}", M::type_tag_());
+        log::trace!("insert {}", M::type_tag_());
 
         self.message_types
             .write()

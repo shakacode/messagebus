@@ -327,7 +327,7 @@ impl Bus {
             self.idle_all().await;
         }
 
-        println!("flushing all begin");
+        log::info!("flushing all begin");
         self.flush_all().await;
         self.sync_all().await;
     }
@@ -338,7 +338,7 @@ impl Bus {
             self.idle::<M>().await;
         }
 
-        println!("flushing 1 begin");
+        log::info!("flushing 1 begin");
         self.flush::<M>().await;
         self.sync::<M>().await;
     }
@@ -348,7 +348,7 @@ impl Bus {
         if !force {
             self.idle2::<M1, M2>().await;
         }
-        println!("flushing 2 begin");
+        log::info!("flushing 2 begin");
         self.flush2::<M1, M2>().await;
         self.sync2::<M1, M2>().await;
     }

@@ -94,10 +94,10 @@ impl<T: TypeTagged> TypeTagged for Arc<T> {
     }
 
     fn type_tag(&self) -> TypeTag {
-        T::type_tag(&*self)
+        T::type_tag(&**self)
     }
     fn type_name(&self) -> Cow<str> {
-        T::type_name(&*self)
+        T::type_name(&**self)
     }
     fn type_layout(&self) -> Layout {
         Layout::for_value(self)
@@ -110,10 +110,10 @@ impl<T: TypeTagged> TypeTagged for Box<T> {
     }
 
     fn type_tag(&self) -> TypeTag {
-        T::type_tag(&*self)
+        T::type_tag(&**self)
     }
     fn type_name(&self) -> Cow<str> {
-        T::type_name(&*self)
+        T::type_name(&**self)
     }
     fn type_layout(&self) -> Layout {
         Layout::for_value(self)

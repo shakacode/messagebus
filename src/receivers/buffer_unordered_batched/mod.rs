@@ -7,6 +7,7 @@ pub use r#async::BufferUnorderedBatchedAsync;
 use serde_derive::{Deserialize, Serialize};
 pub use sync::BufferUnorderedBatchedSync;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct BufferUnorderedBatchedStats {
     pub buffer: AtomicU64,
@@ -74,7 +75,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
-                            #[allow(clippy::redundant_closure_call)]
+                            #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
                             let _ =
                                 ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
                         }
@@ -93,7 +94,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                             let buffer_clone = buffer.drain(..).collect();
                             let task_permit = semaphore.clone().acquire_owned().await;
 
-                            #[allow(clippy::redundant_closure_call)]
+                            #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
                             let _ =
                                 ($st1)(buffer_mid_clone, buffer_clone, bus, ut, task_permit, stx);
                         }

@@ -135,6 +135,7 @@ pub trait ReceiverTrait: TypeTagAccept + Send + Sync {
     fn start_polling(self: Arc<Self>) -> BusPollerCallback;
 }
 
+#[allow(dead_code)]
 pub trait ReceiverPollerBuilder {
     fn build(bus: Bus) -> Box<dyn Future<Output = ()>>;
 }
@@ -576,7 +577,7 @@ impl<'a> AnyReceiver<'a> {
         }
 
         Some(unsafe {
-            mem::transmute(TraitObject {
+            mem::transmute::<TraitObject, &dyn SendTypedReceiver<M>>(TraitObject {
                 data: self.data,
                 vtable: self.typed.1,
             })
@@ -637,7 +638,7 @@ impl<'a> AnyWrapperRef<'a> {
         }
 
         Some(unsafe {
-            mem::transmute(TraitObject {
+            mem::transmute::<TraitObject, &dyn WrapperReturnTypeOnly<R>>(TraitObject {
                 data: self.data,
                 vtable: self.wrapper_r.1,
             })
@@ -653,7 +654,7 @@ impl<'a> AnyWrapperRef<'a> {
         }
 
         Some(unsafe {
-            mem::transmute(TraitObject {
+            mem::transmute::<TraitObject, &dyn WrapperErrorTypeOnly<E>>(TraitObject {
                 data: self.data,
                 vtable: self.wrapper_e.1,
             })
@@ -669,7 +670,7 @@ impl<'a> AnyWrapperRef<'a> {
         }
 
         Some(unsafe {
-            mem::transmute(TraitObject {
+            mem::transmute::<TraitObject, &dyn WrapperReturnTypeAndError<R, E>>(TraitObject {
                 data: self.data,
                 vtable: self.wrapper_re.1,
             })

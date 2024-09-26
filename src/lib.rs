@@ -432,7 +432,7 @@ impl Bus {
 
     #[inline]
     pub async fn send<M: Message + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
-        Ok(self.send_ext(msg, SendOptions::Broadcast).await?)
+        self.send_ext(msg, SendOptions::Broadcast).await
     }
 
     pub async fn send_ext<M: Message + Clone>(

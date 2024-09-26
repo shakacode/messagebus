@@ -7,6 +7,7 @@ pub use r#async::SynchronizedBatchedAsync;
 use serde_derive::{Deserialize, Serialize};
 pub use sync::SynchronizedBatchedSync;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SynchronizedBatchedStats {
     pub buffer: AtomicU64,
@@ -67,7 +68,7 @@ macro_rules! batch_synchronized_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
-                            #[allow(clippy::redundant_closure_call)]
+                            #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
                             let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                         }
                     }
@@ -84,7 +85,7 @@ macro_rules! batch_synchronized_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
-                            #[allow(clippy::redundant_closure_call)]
+                            #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
                             let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
                         }
 

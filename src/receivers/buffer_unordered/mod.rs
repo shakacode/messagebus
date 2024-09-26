@@ -7,6 +7,7 @@ pub use r#async::BufferUnorderedAsync;
 use serde_derive::{Deserialize, Serialize};
 pub use sync::BufferUnorderedSync;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct BufferUnorderedStats {
     pub buffer: AtomicU64,
@@ -52,7 +53,7 @@ macro_rules! buffer_unordered_poller_macro {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     Request::Request(mid, msg, _req) => {
-                        #[allow(clippy::redundant_closure_call)]
+                        #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
                         let _ = ($st1)(
                             mid,
                             msg,

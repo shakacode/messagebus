@@ -29,6 +29,9 @@ buffer_unordered_batch_poller_macro!(
     |mids: Vec<_>, msgs, bus, ut: Arc<T>, task_permit, stx: UnboundedSender<_>| {
         tokio::task::spawn_blocking(move || {
             let resp = ut.handle(msgs, &bus);
+            if let Err(err) = &resp {
+                log::error!("BatchHandler error: {err}");
+            }
             drop(task_permit);
 
             crate::process_batch_result!(resp, mids, stx);

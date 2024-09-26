@@ -29,6 +29,9 @@ buffer_unordered_poller_macro!(
     |mid, msg, bus, ut: Arc<T>, stx: UnboundedSender<_>, task_permit| {
         tokio::task::spawn_blocking(move || {
             let resp = ut.handle(msg, &bus);
+            if let Err(err) = &resp {
+                log::error!("Handler error: {err}");
+            }
             drop(task_permit);
 
             stx.send(Event::Response(mid, resp.map_err(Error::Other)))

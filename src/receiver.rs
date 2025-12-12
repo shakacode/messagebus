@@ -18,7 +18,7 @@ use core::{
 use futures::{pin_mut, Stream};
 use futures::{Future, FutureExt, StreamExt};
 use std::hash::{Hash, Hasher};
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{oneshot, Notify};
 
 pub type BusPollerCallback = Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>;
@@ -557,7 +557,7 @@ impl<'a> AnyReceiver<'a> {
         M: Message,
         S: SendTypedReceiver<M> + 'static,
     {
-        let send_typed_receiver = rcvr as &(dyn SendTypedReceiver<M>);
+        let send_typed_receiver = rcvr as &dyn SendTypedReceiver<M>;
         let send_typed_receiver: TraitObject = unsafe { mem::transmute(send_typed_receiver) };
 
         Self {
@@ -605,9 +605,9 @@ impl<'a> AnyWrapperRef<'a> {
             + WrapperReturnTypeAndError<R, E>
             + 'static,
     {
-        let wrapper_r = rcvr as &(dyn WrapperReturnTypeOnly<R>);
-        let wrapper_e = rcvr as &(dyn WrapperErrorTypeOnly<E>);
-        let wrapper_re = rcvr as &(dyn WrapperReturnTypeAndError<R, E>);
+        let wrapper_r = rcvr as &dyn WrapperReturnTypeOnly<R>;
+        let wrapper_e = rcvr as &dyn WrapperErrorTypeOnly<E>;
+        let wrapper_re = rcvr as &dyn WrapperReturnTypeAndError<R, E>;
 
         let wrapper_r: TraitObject = unsafe { mem::transmute(wrapper_r) };
         let wrapper_e: TraitObject = unsafe { mem::transmute(wrapper_e) };
@@ -679,29 +679,6 @@ impl<'a> AnyWrapperRef<'a> {
 }
 
 unsafe impl Send for AnyWrapperRef<'_> {}
-
-#[derive(Debug, Clone)]
-pub struct ReceiverStats {
-    pub name: Cow<'static, str>,
-    pub fields: Vec<(Cow<'static, str>, u64)>,
-}
-
-impl fmt::Display for ReceiverStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "-- {}: {{ ", self.name)?;
-
-        for (idx, (k, v)) in self.fields.iter().enumerate() {
-            if idx != 0 {
-                write!(f, ", ")?;
-            }
-
-            write!(f, "{}: {}", k, v)?;
-        }
-
-        write!(f, " }}")?;
-        Ok(())
-    }
-}
 
 struct ReceiverContext {
     limit: u64,

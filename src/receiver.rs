@@ -842,7 +842,6 @@ impl Receiver {
                 .cast_send_typed::<M>()
                 .unwrap()
                 .send(mid, msg, req, bus)
-                .map_err(Into::into)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
@@ -871,7 +870,6 @@ impl Receiver {
                 .cast_send_typed::<M>()
                 .unwrap()
                 .send(mid, msg, req, bus)
-                .map_err(Into::into)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
@@ -904,6 +902,7 @@ impl Receiver {
     }
 
     #[inline]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn add_response_waiter_boxed(
         &self,
     ) -> Result<(u64, impl Future<Output = Result<Box<dyn Message>, Error>>), Error> {
@@ -919,6 +918,7 @@ impl Receiver {
     }
 
     #[inline]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn add_response_waiter_boxed_we<E: StdSyncSendError>(
         &self,
     ) -> Result<
@@ -986,6 +986,7 @@ impl Receiver {
     }
 
     #[inline]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn add_response_waiter_we<R: Message, E: StdSyncSendError>(
         &self,
     ) -> Result<(u64, impl Future<Output = Result<R, Error<(), E>>>), Error> {

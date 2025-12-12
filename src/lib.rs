@@ -56,19 +56,14 @@ type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SendOptions {
+    #[default]
     Broadcast,
     Except(u64),
     Direct(u64),
     Random,
     Balanced,
-}
-
-impl Default for SendOptions {
-    fn default() -> Self {
-        Self::Broadcast
-    }
 }
 
 pub struct BusInner {

@@ -25,16 +25,50 @@ pub struct BufferUnorderedBatchedStats {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// Bus::build()
-///     .register(MyBatchHandler)
-///     .subscribe_batch_async::<MyMessage>(64, BufferUnorderedBatchedConfig {
-///         batch_size: 100,
-///         max_parallel: 4,
-///         ..Default::default()
-///     })
-///     .done()
-///     .build();
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncBatchHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use messagebus::receivers::BufferUnorderedBatchedConfig;
+/// use async_trait::async_trait;
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum BatchError {
+///     #[error("Batch processing failed")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage(String);
+///
+/// struct MyBatchHandler;
+///
+/// #[async_trait]
+/// impl AsyncBatchHandler<MyMessage> for MyBatchHandler {
+///     type Error = BatchError;
+///     type Response = ();
+///     type InBatch = Vec<MyMessage>;
+///     type OutBatch = Vec<()>;
+///
+///     async fn handle(&self, msgs: Vec<MyMessage>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
+///         Ok(vec![(); msgs.len()])
+///     }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyBatchHandler)
+///         .subscribe_batch_async::<MyMessage>(64, BufferUnorderedBatchedConfig {
+///             batch_size: 100,
+///             max_parallel: 4,
+///             ..Default::default()
+///         })
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+/// }
 /// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedBatchedConfig {

@@ -25,15 +25,56 @@ pub struct SynchronizedBatchedStats {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// Bus::build()
-///     .register_unsync(MyBatchStatefulHandler::new())
-///     .subscribe_batch_async::<MyMessage>(32, SynchronizedBatchedConfig {
-///         batch_size: 50,
-///         ..Default::default()
-///     })
-///     .done()
-///     .build();
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncBatchSynchronizedHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use messagebus::receivers::SynchronizedBatchedConfig;
+/// use async_trait::async_trait;
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum BatchError {
+///     #[error("Batch processing failed")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage(String);
+///
+/// struct MyBatchStatefulHandler {
+///     count: u64,
+/// }
+///
+/// impl MyBatchStatefulHandler {
+///     fn new() -> Self { Self { count: 0 } }
+/// }
+///
+/// #[async_trait]
+/// impl AsyncBatchSynchronizedHandler<MyMessage> for MyBatchStatefulHandler {
+///     type Error = BatchError;
+///     type Response = ();
+///     type InBatch = Vec<MyMessage>;
+///     type OutBatch = Vec<()>;
+///
+///     async fn handle(&mut self, msgs: Vec<MyMessage>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
+///         self.count += msgs.len() as u64;
+///         Ok(vec![(); msgs.len()])
+///     }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register_unsync(MyBatchStatefulHandler::new())
+///         .subscribe_batch_async::<MyMessage>(32, SynchronizedBatchedConfig {
+///             batch_size: 50,
+///             ..Default::default()
+///         })
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+/// }
 /// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct SynchronizedBatchedConfig {

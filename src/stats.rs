@@ -9,12 +9,40 @@ use std::borrow::Cow;
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// let stats = bus.stats();
-/// for stat in stats {
-///     println!("Message type: {}", stat.msg_type_tag);
-///     if stat.has_queue {
-///         println!("  Queue: {}/{}", stat.queue_size, stat.queue_capacity);
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage(String);
+///
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<MyMessage> for MyHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyHandler)
+///         .subscribe_async::<MyMessage>(8, Default::default())
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+///     bus.ready().await;
+///
+///     let stats = bus.stats();
+///     for stat in stats {
+///         println!("Message type: {}", stat.msg_type_tag);
+///         if stat.has_queue {
+///             println!("  Queue: {}/{}", stat.queue_size, stat.queue_capacity);
+///         }
 ///     }
 /// }
 /// ```

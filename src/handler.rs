@@ -64,16 +64,24 @@ pub trait AsyncProducer<M: Message>: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, Handler, error};
+/// use messagebus::derive::Message;
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicU32, Ordering};
+///
+/// #[derive(Debug, Clone, Message)]
+/// struct MyMessage(String);
+///
 /// struct MyHandler {
 ///     counter: Arc<AtomicU32>,
 /// }
 ///
 /// impl Handler<MyMessage> for MyHandler {
-///     type Error = MyError;
+///     type Error = error::GenericError;
 ///     type Response = ();
 ///
-///     fn handle(&self, msg: MyMessage, bus: &Bus) -> Result<(), MyError> {
+///     fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> {
 ///         self.counter.fetch_add(1, Ordering::SeqCst);
 ///         Ok(())
 ///     }
@@ -109,15 +117,25 @@ pub trait Handler<M: Message>: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// struct FetchUrl { url: String }
+///
+/// struct HttpClient;
+///
 /// #[async_trait]
 /// impl AsyncHandler<FetchUrl> for HttpClient {
-///     type Error = MyError;
-///     type Response = String;
+///     type Error = error::GenericError;
+///     type Response = ();
 ///
-///     async fn handle(&self, msg: FetchUrl, _bus: &Bus) -> Result<String, MyError> {
-///         let response = self.client.get(&msg.url).await?;
-///         Ok(response.text().await?)
+///     async fn handle(&self, msg: FetchUrl, _bus: &Bus) -> Result<(), Self::Error> {
+///         // In real code, you'd make an HTTP request here
+///         println!("Fetching {}", msg.url);
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -149,23 +167,29 @@ pub trait AsyncHandler<M: Message>: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, SynchronizedHandler, error};
+/// use messagebus::derive::Message;
+///
+/// #[derive(Debug, Clone, Message)]
+/// struct Increment;
+///
 /// struct Counter {
 ///     count: u64,
 /// }
 ///
 /// impl SynchronizedHandler<Increment> for Counter {
-///     type Error = MyError;
+///     type Error = error::GenericError;
 ///     type Response = ();
 ///
-///     fn handle(&mut self, _msg: Increment, _bus: &Bus) -> Result<(), MyError> {
+///     fn handle(&mut self, _msg: Increment, _bus: &Bus) -> Result<(), Self::Error> {
 ///         self.count += 1;
 ///         Ok(())
 ///     }
 /// }
 ///
 /// // Register with register_unsync
-/// let bus = Bus::build()
+/// let (bus, poller) = Bus::build()
 ///     .register_unsync(Counter { count: 0 })
 ///     .subscribe_sync::<Increment>(8, Default::default())
 ///     .done()
@@ -228,23 +252,40 @@ pub trait AsyncSynchronizedHandler<M: Message>: Send {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, BatchHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use messagebus::receivers::BufferUnorderedBatchedConfig;
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum BatchError {
+///     #[error("Processing failed")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct LogEntry(String);
+///
+/// struct BatchLogger;
+///
 /// impl BatchHandler<LogEntry> for BatchLogger {
-///     type Error = MyError;
+///     type Error = BatchError;
 ///     type Response = ();
 ///     type InBatch = Vec<LogEntry>;
 ///     type OutBatch = Vec<()>;
 ///
-///     fn handle(&self, msgs: Vec<LogEntry>, _bus: &Bus) -> Result<Vec<()>, MyError> {
+///     fn handle(&self, msgs: Vec<LogEntry>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
 ///         // Process all log entries at once
-///         self.write_batch(&msgs)?;
+///         println!("Processing {} log entries", msgs.len());
 ///         Ok(vec![(); msgs.len()])
 ///     }
 /// }
 ///
 /// // Register with batch subscription
-/// let bus = Bus::build()
-///     .register(BatchLogger::new())
+/// let (bus, poller) = Bus::build()
+///     .register(BatchLogger)
 ///     .subscribe_batch_sync::<LogEntry>(64, BufferUnorderedBatchedConfig {
 ///         batch_size: 100,
 ///         ..Default::default()
@@ -282,20 +323,39 @@ pub trait BatchHandler<M: Message>: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncBatchHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use async_trait::async_trait;
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum DbError {
+///     #[error("Database error")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct DbRecord { id: u64, data: String }
+///
+/// struct AsyncBatchWriter;
+///
 /// #[async_trait]
 /// impl AsyncBatchHandler<DbRecord> for AsyncBatchWriter {
-///     type Error = MyError;
+///     type Error = DbError;
 ///     type Response = ();
 ///     type InBatch = Vec<DbRecord>;
 ///     type OutBatch = Vec<()>;
 ///
-///     async fn handle(&self, msgs: Vec<DbRecord>, _bus: &Bus) -> Result<Vec<()>, MyError> {
+///     async fn handle(&self, msgs: Vec<DbRecord>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
 ///         // Async bulk insert
-///         self.db.bulk_insert(&msgs).await?;
+///         println!("Inserting {} records", msgs.len());
 ///         Ok(vec![(); msgs.len()])
 ///     }
 /// }
+///
+/// fn main() {}
 /// ```
 #[async_trait]
 pub trait AsyncBatchHandler<M: Message>: Send + Sync {
@@ -330,19 +390,33 @@ pub trait AsyncBatchHandler<M: Message>: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, BatchSynchronizedHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum CountError {
+///     #[error("Count error")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct CountMsg { value: u64 }
+///
 /// struct BatchCounter {
 ///     total: u64,
 ///     batch_count: u32,
 /// }
 ///
 /// impl BatchSynchronizedHandler<CountMsg> for BatchCounter {
-///     type Error = MyError;
+///     type Error = CountError;
 ///     type Response = ();
 ///     type InBatch = Vec<CountMsg>;
 ///     type OutBatch = Vec<()>;
 ///
-///     fn handle(&mut self, msgs: Vec<CountMsg>, _bus: &Bus) -> Result<Vec<()>, MyError> {
+///     fn handle(&mut self, msgs: Vec<CountMsg>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
 ///         self.batch_count += 1;
 ///         for msg in &msgs {
 ///             self.total += msg.value;
@@ -350,6 +424,8 @@ pub trait AsyncBatchHandler<M: Message>: Send + Sync {
 ///         Ok(vec![(); msgs.len()])
 ///     }
 /// }
+///
+/// fn main() {}
 /// ```
 pub trait BatchSynchronizedHandler<M: Message>: Send {
     /// The error type returned by this handler.
@@ -383,21 +459,42 @@ pub trait BatchSynchronizedHandler<M: Message>: Send {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncBatchSynchronizedHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use async_trait::async_trait;
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum EventError {
+///     #[error("Event processing failed")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct EventMsg { event_type: String }
+///
+/// struct AsyncEventProcessor {
+///     batch_count: u32,
+/// }
+///
 /// #[async_trait]
 /// impl AsyncBatchSynchronizedHandler<EventMsg> for AsyncEventProcessor {
-///     type Error = MyError;
+///     type Error = EventError;
 ///     type Response = ();
 ///     type InBatch = Vec<EventMsg>;
 ///     type OutBatch = Vec<()>;
 ///
-///     async fn handle(&mut self, msgs: Vec<EventMsg>, _bus: &Bus) -> Result<Vec<()>, MyError> {
+///     async fn handle(&mut self, msgs: Vec<EventMsg>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
 ///         self.batch_count += 1;
 ///         // Async batch processing
-///         self.db.insert_events(&msgs).await?;
+///         println!("Processing batch {} with {} events", self.batch_count, msgs.len());
 ///         Ok(vec![(); msgs.len()])
 ///     }
 /// }
+///
+/// fn main() {}
 /// ```
 #[async_trait]
 pub trait AsyncBatchSynchronizedHandler<M: Message>: Send {

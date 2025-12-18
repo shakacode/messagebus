@@ -138,12 +138,43 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// // Send to all receivers (default)
-/// bus.send(msg).await?;
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, SendOptions, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
 ///
-/// // Send with explicit options
-/// bus.send_ext(msg, SendOptions::Broadcast).await?;
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct Msg(String);
+///
+/// struct Handler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<Msg> for Handler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let (bus, poller) = Bus::build()
+///         .register(Handler)
+///         .subscribe_async::<Msg>(8, Default::default())
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+///     bus.ready().await;
+///
+///     let msg = Msg("hello".into());
+///     // Send to all receivers (default)
+///     bus.send(msg.clone()).await?;
+///     // Send with explicit options
+///     bus.send_ext(msg, SendOptions::Broadcast).await?;
+///
+///     bus.close().await;
+///     Ok(())
+/// }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SendOptions {
@@ -230,15 +261,34 @@ impl BusInner {
 ///
 /// Use [`Bus::build()`] to create a new bus with the builder pattern:
 ///
-/// ```rust,ignore
-/// let (bus, poller) = Bus::build()
-///     .register(MyHandler)
-///     .subscribe_async::<MyMessage>(8, Default::default())
-///     .done()
-///     .build();
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
 ///
-/// // The poller future must be awaited to process messages
-/// tokio::spawn(poller);
+/// #[derive(Debug, Clone, Message)]
+/// struct MyMessage(String);
+///
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<MyMessage> for MyHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _: MyMessage, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyHandler)
+///         .subscribe_async::<MyMessage>(8, Default::default())
+///         .done()
+///         .build();
+///
+///     // The poller future must be awaited to process messages
+///     tokio::spawn(poller);
+/// }
 /// ```
 ///
 /// # Sending Messages
@@ -269,9 +319,24 @@ impl Bus {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// struct Msg;
+    ///
+    /// struct MyHandler;
+    /// #[async_trait]
+    /// impl AsyncHandler<Msg> for MyHandler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
     /// let (bus, poller) = Bus::build()
-    ///     .register(handler)
+    ///     .register(MyHandler)
     ///     .subscribe_async::<Msg>(8, Default::default())
     ///     .done()
     ///     .build();
@@ -314,10 +379,34 @@ impl Bus {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// bus.flush_all().await;  // Ensure all messages are processed
-    /// bus.close().await;       // Shut down the bus
-    /// poller.await;            // Wait for complete shutdown
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// struct Msg;
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<Msg> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(Handler)
+    ///         .subscribe_async::<Msg>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     let handle = tokio::spawn(poller);
+    ///
+    ///     bus.flush_all().await;  // Ensure all messages are processed
+    ///     bus.close().await;       // Shut down the bus
+    ///     handle.await.unwrap();   // Wait for complete shutdown
+    /// }
     /// ```
     pub async fn close(&self) {
         let _handle = self.inner.maintain.lock().await;
@@ -342,13 +431,41 @@ impl Bus {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Send some messages
-    /// bus.send(msg1).await?;
-    /// bus.send(msg2).await?;
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
     ///
-    /// // Wait for all messages to be processed
-    /// bus.flush_all().await;
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct Msg(i32);
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<Msg> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(Handler)
+    ///         .subscribe_async::<Msg>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     tokio::spawn(poller);
+    ///     bus.ready().await;
+    ///
+    ///     // Send some messages
+    ///     bus.send(Msg(1)).await?;
+    ///     bus.send(Msg(2)).await?;
+    ///
+    ///     // Wait for all messages to be processed
+    ///     bus.flush_all().await;
+    ///     bus.close().await;
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn flush_all(&self) {
         let fuse_count = 32i32;
@@ -571,7 +688,28 @@ impl Bus {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct MyMessage(String);
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<MyMessage> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: MyMessage, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// let (bus, _poller) = Bus::build()
+    ///     .register(Handler)
+    ///     .subscribe_async::<MyMessage>(8, Default::default())
+    ///     .done()
+    ///     .build();
+    ///
     /// match bus.try_send(MyMessage("test".into())) {
     ///     Ok(()) => println!("Sent!"),
     ///     Err(e) => println!("Failed: {:?}", e),
@@ -666,8 +804,36 @@ impl Bus {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// bus.send(MyMessage("hello".into())).await?;
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct MyMessage(String);
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<MyMessage> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: MyMessage, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(Handler)
+    ///         .subscribe_async::<MyMessage>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     tokio::spawn(poller);
+    ///     bus.ready().await;
+    ///
+    ///     bus.send(MyMessage("hello".into())).await?;
+    ///     bus.close().await;
+    ///     Ok(())
+    /// }
     /// ```
     #[inline]
     pub async fn send<M: Message + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
@@ -845,14 +1011,42 @@ impl Bus {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
     /// #[derive(Debug, Clone, Message)]
     /// struct GetUser(u64);
     ///
     /// #[derive(Debug, Clone, Message)]
     /// struct User { name: String }
     ///
-    /// let user: User = bus.request(GetUser(123), Default::default()).await?;
+    /// struct UserHandler;
+    /// #[async_trait]
+    /// impl AsyncHandler<GetUser> for UserHandler {
+    ///     type Error = error::GenericError;
+    ///     type Response = User;
+    ///     async fn handle(&self, msg: GetUser, _: &Bus) -> Result<User, Self::Error> {
+    ///         Ok(User { name: format!("User{}", msg.0) })
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(UserHandler)
+    ///         .subscribe_async::<GetUser>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     tokio::spawn(poller);
+    ///     bus.ready().await;
+    ///
+    ///     let user: User = bus.request(GetUser(123), Default::default()).await?;
+    ///     println!("Got user: {}", user.name);
+    ///     bus.close().await;
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn request<M: Message, R: Message>(
         &self,

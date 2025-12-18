@@ -23,15 +23,37 @@ pub struct BufferUnorderedStats {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// Bus::build()
-///     .register(MyHandler)
-///     .subscribe_async::<MyMessage>(8, BufferUnorderedConfig {
-///         buffer_size: 16,
-///         max_parallel: 4,
-///     })
-///     .done()
-///     .build();
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use messagebus::receivers::BufferUnorderedConfig;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage(String);
+///
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<MyMessage> for MyHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyHandler)
+///         .subscribe_async::<MyMessage>(8, BufferUnorderedConfig {
+///             buffer_size: 16,
+///             max_parallel: 4,
+///         })
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+/// }
 /// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedConfig {

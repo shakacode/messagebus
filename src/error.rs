@@ -10,7 +10,7 @@
 //!
 //! Use the derive macro to create handler error types:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use messagebus::derive::Error as MbError;
 //! use thiserror::Error;
 //!
@@ -22,6 +22,8 @@
 //!     #[error("Invalid input")]
 //!     InvalidInput,
 //! }
+//!
+//! fn main() {}
 //! ```
 
 use core::fmt;

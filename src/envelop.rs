@@ -7,7 +7,7 @@
 //!
 //! The easiest way to implement [`Message`] is using the derive macro:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use messagebus::derive::Message;
 //!
 //! // Basic message
@@ -23,13 +23,6 @@
 //!     value: i32,
 //! }
 //!
-//! // Message that can be serialized for remote transport
-//! #[derive(Debug, Clone, Message, serde::Serialize, serde::Deserialize)]
-//! #[message(shared)]
-//! struct RemoteMessage {
-//!     payload: Vec<u8>,
-//! }
-//!
 //! // Message with custom type tag
 //! #[derive(Debug, Clone, Message)]
 //! #[type_tag("my_app::custom::MyMessage")]
@@ -39,7 +32,12 @@
 //! #[derive(Debug, Clone, Message)]
 //! #[namespace("my_app::messages")]
 //! struct NamespacedMessage;
+//!
+//! fn main() {}
 //! ```
+//!
+//! For messages that need to be serialized for remote transport, use `#[message(shared)]`
+//! along with serde's `Serialize` and `Deserialize` derives.
 //!
 //! # Type Tags
 //!
@@ -100,7 +98,7 @@ pub trait TypeTagged {
 ///
 /// Use the derive macro instead of implementing manually:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use messagebus::derive::Message;
 ///
 /// #[derive(Debug, Clone, Message)]
@@ -108,6 +106,8 @@ pub trait TypeTagged {
 /// struct MyMessage {
 ///     data: String,
 /// }
+///
+/// fn main() {}
 /// ```
 ///
 /// # Cloning

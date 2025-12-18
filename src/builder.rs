@@ -5,28 +5,78 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use messagebus::{Bus, derive::Message};
+//! ```rust,no_run
+//! use messagebus::{Bus, AsyncHandler, error};
+//! use messagebus::derive::Message;
+//! use async_trait::async_trait;
 //!
 //! #[derive(Debug, Clone, Message)]
+//! #[message(clone)]
 //! struct MyMessage(String);
 //!
-//! // Build the bus with handlers
-//! let (bus, poller) = Bus::build()
-//!     .register(MyHandler)
-//!     .subscribe_async::<MyMessage>(8, Default::default())
-//!     .done()
-//!     .build();
+//! struct MyHandler;
 //!
-//! // The poller future must be awaited to process messages
-//! tokio::spawn(poller);
+//! #[async_trait]
+//! impl AsyncHandler<MyMessage> for MyHandler {
+//!     type Error = error::GenericError;
+//!     type Response = ();
+//!
+//!     async fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     // Build the bus with handlers
+//!     let (bus, poller) = Bus::build()
+//!         .register(MyHandler)
+//!         .subscribe_async::<MyMessage>(8, Default::default())
+//!         .done()
+//!         .build();
+//!
+//!     // The poller future must be awaited to process messages
+//!     tokio::spawn(poller);
+//! }
 //! ```
 //!
 //! # Modular Registration
 //!
 //! Use [`Module`] to group related handlers:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! use messagebus::{Bus, Module, AsyncHandler, error};
+//! use messagebus::derive::Message;
+//! use async_trait::async_trait;
+//!
+//! #[derive(Debug, Clone, Message)]
+//! #[message(clone)]
+//! struct CreateUser(String);
+//!
+//! #[derive(Debug, Clone, Message)]
+//! #[message(clone)]
+//! struct DeleteUser(u64);
+//!
+//! struct UserHandler;
+//!
+//! impl UserHandler {
+//!     fn new() -> Self { Self }
+//! }
+//!
+//! #[async_trait]
+//! impl AsyncHandler<CreateUser> for UserHandler {
+//!     type Error = error::GenericError;
+//!     type Response = ();
+//!     async fn handle(&self, _msg: CreateUser, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+//! }
+//!
+//! #[async_trait]
+//! impl AsyncHandler<DeleteUser> for UserHandler {
+//!     type Error = error::GenericError;
+//!     type Response = ();
+//!     async fn handle(&self, _msg: DeleteUser, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+//! }
+//!
 //! fn create_user_module() -> Module {
 //!     Module::new()
 //!         .register(UserHandler::new())
@@ -35,9 +85,13 @@
 //!         .done()
 //! }
 //!
-//! let (bus, poller) = Bus::build()
-//!     .add_module(create_user_module())
-//!     .build();
+//! #[tokio::main]
+//! async fn main() {
+//!     let (bus, poller) = Bus::build()
+//!         .add_module(create_user_module())
+//!         .build();
+//!     tokio::spawn(poller);
+//! }
 //! ```
 
 use core::{marker::PhantomData, pin::Pin};
@@ -346,7 +400,39 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use messagebus::{Bus, Module, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct LoginRequest { username: String }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct LogoutRequest { session_id: u64 }
+///
+/// struct AuthHandler;
+///
+/// impl AuthHandler {
+///     fn new() -> Self { Self }
+/// }
+///
+/// #[async_trait]
+/// impl AsyncHandler<LoginRequest> for AuthHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _msg: LoginRequest, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[async_trait]
+/// impl AsyncHandler<LogoutRequest> for AuthHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _msg: LogoutRequest, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
 /// fn create_auth_module() -> Module {
 ///     Module::new()
 ///         .register(AuthHandler::new())
@@ -355,9 +441,13 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
 ///         .done()
 /// }
 ///
-/// let (bus, poller) = Bus::build()
-///     .add_module(create_auth_module())
-///     .build();
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .add_module(create_auth_module())
+///         .build();
+///     tokio::spawn(poller);
+/// }
 /// ```
 #[derive(Default)]
 pub struct Module {
@@ -465,18 +555,41 @@ impl Module {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// let (bus, poller) = Bus::build()
-///     .register(MyHandler)
-///     .subscribe_async::<MyMessage>(8, Default::default())
-///     .done()
-///     .build();
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
 ///
-/// // Spawn the poller to process messages
-/// tokio::spawn(poller);
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage { data: String }
 ///
-/// // Now you can send messages
-/// bus.send(MyMessage { data: "hello".into() }).await?;
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<MyMessage> for MyHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let (bus, poller) = Bus::build()
+///         .register(MyHandler)
+///         .subscribe_async::<MyMessage>(8, Default::default())
+///         .done()
+///         .build();
+///
+///     // Spawn the poller to process messages
+///     tokio::spawn(poller);
+///     bus.ready().await;
+///
+///     // Now you can send messages
+///     bus.send(MyMessage { data: "hello".into() }).await?;
+///     bus.close().await;
+///     Ok(())
+/// }
 /// ```
 pub struct BusBuilder {
     inner: Module,
@@ -578,12 +691,34 @@ impl BusBuilder {
     /// The poller future **must** be spawned or awaited for the bus to function.
     /// Typically you'll spawn it as a background task:
     ///
-    /// ```rust,ignore
-    /// let (bus, poller) = Bus::build()
-    ///     // ... register handlers ...
-    ///     .build();
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
     ///
-    /// tokio::spawn(poller);  // Required for message processing
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct MyMessage(String);
+    ///
+    /// struct MyHandler;
+    ///
+    /// #[async_trait]
+    /// impl AsyncHandler<MyMessage> for MyHandler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(MyHandler)
+    ///         .subscribe_async::<MyMessage>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///
+    ///     tokio::spawn(poller);  // Required for message processing
+    /// }
     /// ```
     pub fn build(self) -> (Bus, impl Future<Output = ()>) {
         let bus = Bus {

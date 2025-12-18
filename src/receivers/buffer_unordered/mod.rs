@@ -16,9 +16,34 @@ pub struct BufferUnorderedStats {
     pub parallel_total: AtomicU64,
 }
 
+/// Configuration for concurrent (buffer unordered) receivers.
+///
+/// Used with [`Handler`](crate::Handler) and [`AsyncHandler`](crate::AsyncHandler)
+/// when subscribing with `subscribe_sync` or `subscribe_async`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// Bus::build()
+///     .register(MyHandler)
+///     .subscribe_async::<MyMessage>(8, BufferUnorderedConfig {
+///         buffer_size: 16,
+///         max_parallel: 4,
+///     })
+///     .done()
+///     .build();
+/// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedConfig {
+    /// Size of the internal message buffer.
+    ///
+    /// Higher values allow more messages to be queued before backpressure.
+    /// Default: 8
     pub buffer_size: usize,
+
+    /// Maximum number of messages to process concurrently.
+    ///
+    /// Controls parallelism for async handlers. Default: 8
     pub max_parallel: usize,
 }
 

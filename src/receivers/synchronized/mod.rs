@@ -14,8 +14,30 @@ pub struct SynchronizedStats {
     pub buffer_total: AtomicU64,
 }
 
+/// Configuration for synchronized (sequential) receivers.
+///
+/// Used with [`SynchronizedHandler`](crate::SynchronizedHandler) and
+/// [`AsyncSynchronizedHandler`](crate::AsyncSynchronizedHandler)
+/// when subscribing with `subscribe_sync` or `subscribe_async` on
+/// handlers registered with `register_unsync`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// Bus::build()
+///     .register_unsync(MyStatefulHandler::new())
+///     .subscribe_async::<MyMessage>(8, SynchronizedConfig {
+///         buffer_size: 4,
+///     })
+///     .done()
+///     .build();
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SynchronizedConfig {
+    /// Size of the internal message buffer.
+    ///
+    /// Since messages are processed sequentially, this determines how many
+    /// can be queued while waiting. Default: 1
     pub buffer_size: usize,
 }
 

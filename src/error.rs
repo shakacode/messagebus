@@ -1,3 +1,29 @@
+//! Error types for the message bus.
+//!
+//! This module provides error types used throughout the messagebus library:
+//!
+//! - [`enum@Error`] - The main error type for bus operations
+//! - [`SendError`] - Error when sending messages
+//! - [`GenericError`] - A type-erased error wrapper
+//!
+//! # Creating Custom Error Types
+//!
+//! Use the derive macro to create handler error types:
+//!
+//! ```rust,ignore
+//! use messagebus::derive::Error as MbError;
+//! use thiserror::Error;
+//!
+//! #[derive(Debug, Error, MbError)]
+//! enum MyHandlerError {
+//!     #[error("Not found: {0}")]
+//!     NotFound(String),
+//!
+//!     #[error("Invalid input")]
+//!     InvalidInput,
+//! }
+//! ```
+
 use core::fmt;
 use std::any::type_name;
 
@@ -9,20 +35,36 @@ use crate::{
     Message,
 };
 
+/// Trait for dynamic error types that can provide a description.
 pub trait DynError: TypeTagged {
+    /// Returns a human-readable description of the error.
     fn description(&self) -> String;
 }
 
+/// Trait bound for error types that can be used in handlers.
+///
+/// This trait is automatically implemented for any type that implements
+/// `Error + TypeTagged + Send + Sync + Unpin + 'static`.
+///
+/// Use `#[derive(Error)]` from `messagebus::derive` to implement `TypeTagged`
+/// on your error types.
 pub trait StdSyncSendError: std::error::Error + TypeTagged + Send + Sync + Unpin + 'static {}
 impl<T: std::error::Error + TypeTagged + Send + Sync + Unpin + 'static> StdSyncSendError for T {}
 
+/// A type-erased error wrapper.
+///
+/// Used when the concrete error type is not known at compile time,
+/// such as when errors need to be stored or passed through dynamic contexts.
 #[derive(Debug)]
 pub struct GenericError {
+    /// The type tag of the original error.
     pub type_tag: TypeTag,
+    /// A formatted description of the error.
     pub description: String,
 }
 
 impl GenericError {
+    /// Creates a GenericError from any TypeTagged displayable value.
     pub fn from_any<T: TypeTagged + fmt::Display>(err: T) -> Self {
         GenericError {
             type_tag: err.type_tag(),
@@ -30,6 +72,7 @@ impl GenericError {
         }
     }
 
+    /// Creates a GenericError from a type tag and displayable error.
     pub fn from_err(tt: TypeTag, err: impl fmt::Display) -> Self {
         GenericError {
             description: format!("{}[{}]", tt, err),
@@ -63,16 +106,22 @@ impl TypeTagged for GenericError {
     }
 }
 
+/// Error returned when sending a message fails.
+///
+/// Contains the original message so it can be recovered or retried.
 #[derive(Debug, Error)]
 pub enum SendError<M: fmt::Debug> {
+    /// The bus or receiver has been closed.
     #[error("Closed")]
     Closed(M),
 
+    /// The receiver's queue is full (for non-blocking sends).
     #[error("Full")]
     Full(M),
 }
 
 impl<M: fmt::Debug> SendError<M> {
+    /// Maps the message type to a different type.
     pub fn map_msg<UM: fmt::Debug + 'static, F: FnOnce(M) -> UM>(self, f: F) -> SendError<UM> {
         match self {
             SendError::Closed(inner) => SendError::Closed(f(inner)),
@@ -82,6 +131,7 @@ impl<M: fmt::Debug> SendError<M> {
 }
 
 impl<M: Message> SendError<M> {
+    /// Converts to a SendError with a boxed message.
     pub fn into_boxed(self) -> SendError<Box<dyn Message>> {
         match self {
             SendError::Closed(m) => SendError::Closed(m.into_boxed()),
@@ -90,44 +140,66 @@ impl<M: Message> SendError<M> {
     }
 }
 
+/// The main error type for bus operations.
+///
+/// This error can occur when sending messages, making requests, or during
+/// handler execution.
+///
+/// # Type Parameters
+///
+/// - `M` - The message type (defaults to `()` for errors without a message)
+/// - `E` - The handler error type (defaults to [`GenericError`])
 #[derive(Debug, Error)]
 pub enum Error<M: fmt::Debug + 'static = (), E: StdSyncSendError = GenericError> {
+    /// Error sending a message.
     #[error("Message Send Error: {0}")]
     SendError(#[from] SendError<M>),
 
+    /// The receiver dropped the message; try another receiver.
     #[error("Message receiver dropped try again another receiver")]
     TryAgain(M),
 
+    /// No response was received for a request.
     #[error("NoResponse")]
     NoResponse,
 
+    /// No receivers are registered for the message type.
     #[error("NoReceivers")]
     NoReceivers,
 
+    /// Failed to add a response listener.
     #[error("AddListenerError")]
     AddListenerError,
 
+    /// Failed to cast a message to the expected type.
     #[error("MessageCastError")]
     MessageCastError,
 
+    /// The bus or receiver is not ready.
     #[error("Not Ready")]
     NotReady,
 
+    /// A handler-specific error.
     #[error("Other({0})")]
     Other(E),
 
+    /// Serialization error (for remote messages).
     #[error("Serialization({0})")]
     Serialization(#[from] erased_serde::Error),
 
+    /// A boxed handler error (type-erased).
     #[error("Other({0})")]
     OtherBoxed(Box<dyn StdSyncSendError>),
 
+    /// The message was of the wrong type.
     #[error("WrongMessageType()")]
     WrongMessageType(M),
 
+    /// The type tag is not registered with the bus.
     #[error("TypeTagNotRegistered({0})")]
     TypeTagNotRegistered(TypeTag),
 
+    /// An unknown error occurred.
     #[error("Unknown Error: {0}")]
     Unknown(String),
 }

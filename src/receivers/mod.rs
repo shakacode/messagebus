@@ -1,3 +1,24 @@
+//! Receiver implementations and configurations.
+//!
+//! This module provides different receiver types that determine how messages
+//! are processed. Each receiver type has an associated configuration struct.
+//!
+//! # Receiver Types
+//!
+//! | Type | Thread-Safe | Batched | Description |
+//! |------|-------------|---------|-------------|
+//! | [`BufferUnorderedSync`] / [`BufferUnorderedAsync`] | Yes | No | Concurrent processing with thread-safe handlers |
+//! | [`BufferUnorderedBatchedSync`] / [`BufferUnorderedBatchedAsync`] | Yes | Yes | Batched concurrent processing |
+//! | [`SynchronizedSync`] / [`SynchronizedAsync`] | No | No | Sequential processing with mutable state |
+//! | [`SynchronizedBatchedSync`] / [`SynchronizedBatchedAsync`] | No | Yes | Batched sequential processing |
+//!
+//! # Configuration Types
+//!
+//! - [`BufferUnorderedConfig`] - For concurrent handlers (Handler, AsyncHandler)
+//! - [`BufferUnorderedBatchedConfig`] - For concurrent batch handlers
+//! - [`SynchronizedConfig`] - For synchronized handlers with mutable state
+//! - [`SynchronizedBatchedConfig`] - For synchronized batch handlers
+
 mod buffer_unordered;
 mod buffer_unordered_batched;
 // mod producer;

@@ -342,7 +342,7 @@ impl<T, F, P, B> RegisterEntry<SyncEntry, T, F, P, B> {
 ///
 /// Modules allow you to organize related handlers together and compose
 /// them into larger applications. Create a module, register handlers
-/// with their subscriptions, then add the module to a `BusBuilder`.
+/// with their subscriptions, then add the module to a [`BusBuilder`].
 ///
 /// # Example
 ///
@@ -390,7 +390,7 @@ impl Module {
     /// - Are stateless or use interior mutability (e.g., `Arc<Mutex<T>>`)
     /// - Implement [`Handler`] or [`AsyncHandler`]
     ///
-    /// Returns a `RegisterEntry` to configure message subscriptions.
+    /// Returns a [`RegisterEntry`] to configure message subscriptions.
     #[allow(clippy::type_complexity)]
     pub fn register<T: Send + Sync + 'static>(
         self,
@@ -422,7 +422,7 @@ impl Module {
     /// - Implement [`SynchronizedHandler`] or [`AsyncSynchronizedHandler`]
     ///
     /// Messages are processed sequentially to ensure exclusive access.
-    /// Returns a `RegisterEntry` to configure message subscriptions.
+    /// Returns a [`RegisterEntry`] to configure message subscriptions.
     #[allow(clippy::type_complexity)]
     pub fn register_unsync<T: Send + 'static>(
         self,

@@ -110,13 +110,11 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use builder::BusBuilder;
 use error::{Error, SendError, StdSyncSendError};
 use receiver::{Permit, Receiver};
-use stats::Stats;
 
 // public
-pub use builder::Module;
+pub use builder::{BusBuilder, Module, RegisterEntry, SyncEntry, UnsyncEntry};
 pub use ctor;
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 pub use handler::*;
@@ -125,6 +123,7 @@ pub use receiver::{
     SendUntypedReceiver, TypeTagAccept, TypeTagAcceptItem,
 };
 pub use relay::Relay;
+pub use stats::Stats;
 pub use type_tag::{deserialize_shared_message, register_shared_message};
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
@@ -266,7 +265,7 @@ pub struct Bus {
 }
 
 impl Bus {
-    /// Creates a new `BusBuilder` for constructing a bus.
+    /// Creates a new [`BusBuilder`] for constructing a bus.
     ///
     /// # Example
     ///

@@ -77,9 +77,11 @@ async fn test_batch_handler_basic() {
 
     b.flush_all().await;
 
-    let lock = batches.lock();
-    let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
-    assert_eq!(total_items, 12);
+    {
+        let lock = batches.lock();
+        let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
+        assert_eq!(total_items, 12);
+    }
 
     b.close().await;
     poller.await;
@@ -111,14 +113,16 @@ async fn test_batch_handler_exact_batches() {
 
     b.flush_all().await;
 
-    let lock = batches.lock();
-    let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
-    assert_eq!(total_items, 8);
+    {
+        let lock = batches.lock();
+        let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
+        assert_eq!(total_items, 8);
 
-    // Verify all values are present
-    let all_values: Vec<i32> = lock.iter().flatten().copied().collect();
-    for i in 1..=8 {
-        assert!(all_values.contains(&i), "Missing value {}", i);
+        // Verify all values are present
+        let all_values: Vec<i32> = lock.iter().flatten().copied().collect();
+        for i in 1..=8 {
+            assert!(all_values.contains(&i), "Missing value {}", i);
+        }
     }
 
     b.close().await;
@@ -149,9 +153,11 @@ async fn test_batch_handler_single_message() {
 
     b.flush_all().await;
 
-    let lock = batches.lock();
-    let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
-    assert_eq!(total_items, 1);
+    {
+        let lock = batches.lock();
+        let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
+        assert_eq!(total_items, 1);
+    }
 
     b.close().await;
     poller.await;
@@ -521,8 +527,10 @@ async fn test_batch_handler_no_messages() {
     // Don't send any messages, just flush
     b.flush_all().await;
 
-    let lock = batches.lock();
-    assert_eq!(lock.len(), 0);
+    {
+        let lock = batches.lock();
+        assert_eq!(lock.len(), 0);
+    }
 
     b.close().await;
     poller.await;
@@ -554,9 +562,11 @@ async fn test_batch_handler_size_one() {
 
     b.flush_all().await;
 
-    let lock = batches.lock();
-    let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
-    assert_eq!(total_items, 5);
+    {
+        let lock = batches.lock();
+        let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
+        assert_eq!(total_items, 5);
+    }
 
     b.close().await;
     poller.await;
@@ -588,9 +598,11 @@ async fn test_batch_handler_large_batch_size() {
 
     b.flush_all().await;
 
-    let lock = batches.lock();
-    let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
-    assert_eq!(total_items, 250);
+    {
+        let lock = batches.lock();
+        let total_items: usize = lock.iter().map(|batch| batch.len()).sum();
+        assert_eq!(total_items, 250);
+    }
 
     b.close().await;
     poller.await;

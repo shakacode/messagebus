@@ -353,10 +353,7 @@ enum OwnedError {
 #[test]
 fn test_error_derive_owned_variants() {
     let err1 = OwnedError::OwnedString("test".to_string());
-    let err2: OwnedError = OwnedError::Boxed(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "io error",
-    )));
+    let err2: OwnedError = OwnedError::Boxed(Box::new(std::io::Error::other("io error")));
 
     assert_eq!(err1.type_tag().as_ref(), "OwnedError");
     assert_eq!(err2.type_tag().as_ref(), "OwnedError");

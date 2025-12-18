@@ -4,6 +4,7 @@ use messagebus::{
 };
 use thiserror::Error;
 
+#[allow(dead_code)]
 #[derive(Debug, Error, MbError)]
 enum Error {
     #[error("Error({0})")]

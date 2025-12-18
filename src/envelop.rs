@@ -376,6 +376,7 @@ mod tests {
     use erased_serde::Serializer;
     use std::{any::type_name, borrow::Cow};
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone)]
     struct Msg0;
 

@@ -25,6 +25,9 @@ batch_synchronized_poller_macro! {
     |mids: Vec<_>, msgs, bus, ut: Arc<Mutex<T>>, stx: UnboundedSender<_>| {
         tokio::spawn(async move {
             let resp = ut.lock().await.handle(msgs, &bus).await;
+            if let Err(err) = &resp {
+                log::error!("AsyncBatchSynchronizedHandler error: {err}");
+            }
 
             crate::process_batch_result!(resp, mids, stx);
         })

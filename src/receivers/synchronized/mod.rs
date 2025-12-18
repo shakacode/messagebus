@@ -7,6 +7,7 @@ pub use r#async::SynchronizedAsync;
 use serde_derive::{Deserialize, Serialize};
 pub use sync::SynchronizedSync;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SynchronizedStats {
     pub buffer: AtomicU64,

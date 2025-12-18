@@ -16,7 +16,7 @@ pub trait TypeTagged {
         Self: Sized;
 
     fn type_tag(&self) -> TypeTag;
-    fn type_name(&self) -> Cow<str>;
+    fn type_name(&self) -> Cow<'_, str>;
     fn type_layout(&self) -> Layout;
 }
 
@@ -48,7 +48,7 @@ macro_rules! gen_impls {
             fn type_tag(&self) -> TypeTag {
                 type_name::<$t>().into()
             }
-            fn type_name(&self) -> Cow<str> {
+            fn type_name(&self) -> Cow<'_, str> {
                 type_name::<$t>().into()
             }
             fn type_layout(&self) -> Layout {
@@ -67,7 +67,7 @@ macro_rules! gen_impls {
             fn type_tag(&self) -> TypeTag {
                 type_name::<$t>().into()
             }
-            fn type_name(&self) -> Cow<str> {
+            fn type_name(&self) -> Cow<'_, str> {
                 type_name::<$t>().into()
             }
             fn type_layout(&self) -> Layout {
@@ -94,10 +94,10 @@ impl<T: TypeTagged> TypeTagged for Arc<T> {
     }
 
     fn type_tag(&self) -> TypeTag {
-        T::type_tag(&*self)
+        T::type_tag(&**self)
     }
-    fn type_name(&self) -> Cow<str> {
-        T::type_name(&*self)
+    fn type_name(&self) -> Cow<'_, str> {
+        T::type_name(&**self)
     }
     fn type_layout(&self) -> Layout {
         Layout::for_value(self)
@@ -110,10 +110,10 @@ impl<T: TypeTagged> TypeTagged for Box<T> {
     }
 
     fn type_tag(&self) -> TypeTag {
-        T::type_tag(&*self)
+        T::type_tag(&**self)
     }
-    fn type_name(&self) -> Cow<str> {
-        T::type_name(&*self)
+    fn type_name(&self) -> Cow<'_, str> {
+        T::type_name(&**self)
     }
     fn type_layout(&self) -> Layout {
         Layout::for_value(self)
@@ -245,7 +245,7 @@ mod tests {
         fn type_tag(&self) -> TypeTag {
             type_name::<Self>().into()
         }
-        fn type_name(&self) -> Cow<str> {
+        fn type_name(&self) -> Cow<'_, str> {
             type_name::<Self>().into()
         }
         fn type_layout(&self) -> Layout {
@@ -301,7 +301,7 @@ mod tests {
         fn type_tag(&self) -> TypeTag {
             type_name::<Self>().into()
         }
-        fn type_name(&self) -> Cow<str> {
+        fn type_name(&self) -> Cow<'_, str> {
             type_name::<Self>().into()
         }
         fn type_layout(&self) -> Layout {
@@ -366,7 +366,7 @@ mod tests {
         fn type_tag(&self) -> TypeTag {
             type_name::<Self>().into()
         }
-        fn type_name(&self) -> Cow<str> {
+        fn type_name(&self) -> Cow<'_, str> {
             type_name::<Self>().into()
         }
         fn type_layout(&self) -> Layout {

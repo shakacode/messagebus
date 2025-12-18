@@ -244,6 +244,7 @@ impl Module {
         self
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn register<T: Send + Sync + 'static>(
         self,
         item: T,
@@ -267,6 +268,7 @@ impl Module {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn register_unsync<T: Send + 'static>(
         self,
         item: T,
@@ -317,6 +319,7 @@ impl BusBuilder {
         BusBuilder { inner }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn register<T: Send + Sync + 'static>(
         self,
         item: T,
@@ -340,6 +343,7 @@ impl BusBuilder {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn register_unsync<T: Send + 'static>(
         self,
         item: T,

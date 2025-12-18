@@ -56,19 +56,14 @@ type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SendOptions {
+    #[default]
     Broadcast,
     Except(u64),
     Direct(u64),
     Random,
     Balanced,
-}
-
-impl Default for SendOptions {
-    fn default() -> Self {
-        Self::Broadcast
-    }
 }
 
 pub struct BusInner {
@@ -327,7 +322,7 @@ impl Bus {
             self.idle_all().await;
         }
 
-        println!("flushing all begin");
+        log::info!("flushing all begin");
         self.flush_all().await;
         self.sync_all().await;
     }
@@ -338,7 +333,7 @@ impl Bus {
             self.idle::<M>().await;
         }
 
-        println!("flushing 1 begin");
+        log::info!("flushing 1 begin");
         self.flush::<M>().await;
         self.sync::<M>().await;
     }
@@ -348,7 +343,7 @@ impl Bus {
         if !force {
             self.idle2::<M1, M2>().await;
         }
-        println!("flushing 2 begin");
+        log::info!("flushing 2 begin");
         self.flush2::<M1, M2>().await;
         self.sync2::<M1, M2>().await;
     }
@@ -432,7 +427,7 @@ impl Bus {
 
     #[inline]
     pub async fn send<M: Message + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
-        Ok(self.send_ext(msg, SendOptions::Broadcast).await?)
+        self.send_ext(msg, SendOptions::Broadcast).await
     }
 
     pub async fn send_ext<M: Message + Clone>(

@@ -22,6 +22,9 @@ synchronized_poller_macro! {
     |mid, msg, bus, ut: Arc<Mutex<T>>, stx: UnboundedSender<_>| {
         tokio::spawn(async move {
             let resp = ut.lock().await.handle(msg, &bus).await;
+            if let Err(err) = &resp {
+                log::error!("AsyncSynchronizedHandler error: {err}");
+            }
 
             stx.send(Event::Response(mid, resp.map_err(Error::Other)))
                 .unwrap();

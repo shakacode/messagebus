@@ -1,5 +1,6 @@
 use crate::error::Error;
 use futures::{Future, Stream};
+use pin_project_lite::pin_project;
 use quinn::Connecting;
 use std::{
     net::SocketAddr,
@@ -10,9 +11,12 @@ use std::{
 
 use super::WaitIdle;
 
-pub struct QuicServerEndpoint {
-    endpoint: quinn::Endpoint,
-    incoming: quinn::Incoming,
+pin_project! {
+    pub struct QuicServerEndpoint {
+        endpoint: quinn::Endpoint,
+        #[pin]
+        incoming: quinn::Incoming,
+    }
 }
 
 impl QuicServerEndpoint {
@@ -51,8 +55,7 @@ impl Stream for QuicServerEndpoint {
     type Item = Connecting;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        unsafe { Pin::new_unchecked(&mut this.incoming) }.poll_next(cx)
+        self.project().incoming.poll_next(cx)
     }
 }
 

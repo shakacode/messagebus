@@ -21,6 +21,13 @@ pub struct BufferUnorderedStats {
 /// Used with [`Handler`](crate::Handler) and [`AsyncHandler`](crate::AsyncHandler)
 /// when subscribing with `subscribe_sync` or `subscribe_async`.
 ///
+/// # Important: Avoiding Deadlocks
+///
+/// Do not call [`Bus::flush_all()`](crate::Bus::flush_all) or
+/// [`Bus::flush::<M>()`](crate::Bus::flush) from within a handler where `M` is
+/// the same message type being handled. This creates a circular dependency that
+/// will deadlock.
+///
 /// # Example
 ///
 /// ```rust,no_run

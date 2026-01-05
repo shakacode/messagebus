@@ -388,6 +388,13 @@ pub trait AsyncBatchHandler<M: Message>: Send + Sync {
 /// Combines the benefits of [`BatchHandler`] and [`SynchronizedHandler`].
 /// Register with [`register_unsync()`](crate::builder::Module::register_unsync).
 ///
+/// # Important: Avoiding Deadlocks
+///
+/// Do not call [`Bus::flush_all()`] or [`Bus::flush::<M>()`](Bus::flush) from within
+/// the `handle` method where `M` is the same message type being handled. This creates
+/// a circular dependency that will deadlock: the flush waits for in-flight handlers
+/// to complete, but the handler is waiting for the flush to return.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -456,6 +463,13 @@ pub trait BatchSynchronizedHandler<M: Message>: Send {
 ///
 /// The most feature-complete handler, combining batching, async, and mutable state.
 /// Register with [`register_unsync()`](crate::builder::Module::register_unsync).
+///
+/// # Important: Avoiding Deadlocks
+///
+/// Do not call [`Bus::flush_all()`] or [`Bus::flush::<M>()`](Bus::flush) from within
+/// the `handle` method where `M` is the same message type being handled. This creates
+/// a circular dependency that will deadlock: the flush waits for in-flight handlers
+/// to complete, but the handler is waiting for the flush to return.
 ///
 /// # Example
 ///

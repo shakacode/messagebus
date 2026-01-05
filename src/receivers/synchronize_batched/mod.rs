@@ -23,6 +23,13 @@ pub struct SynchronizedBatchedStats {
 /// when subscribing with `subscribe_batch_sync` or `subscribe_batch_async` on
 /// handlers registered with `register_unsync`.
 ///
+/// # Important: Avoiding Deadlocks
+///
+/// Do not call [`Bus::flush_all()`](crate::Bus::flush_all) or
+/// [`Bus::flush::<M>()`](crate::Bus::flush) from within a handler where `M` is
+/// the same message type being handled. This creates a circular dependency that
+/// will deadlock.
+///
 /// # Example
 ///
 /// ```rust,no_run

@@ -429,6 +429,12 @@ impl Bus {
     ///
     /// Call this before [`close()`](Bus::close) to ensure all messages are processed.
     ///
+    /// # Important: Avoiding Deadlocks
+    ///
+    /// Do not call this method from within a message handler. Flushing waits for
+    /// in-flight handlers to complete, so calling flush from inside a handler creates
+    /// a circular dependency that will deadlock.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -502,6 +508,13 @@ impl Bus {
     /// Flushes pending messages for a specific message type.
     ///
     /// Only receivers handling message type `M` will be flushed.
+    ///
+    /// # Important: Avoiding Deadlocks
+    ///
+    /// Do not call this method from within a handler that processes the same message
+    /// type `M`. Flushing waits for in-flight handlers to complete, so calling
+    /// `flush::<M>()` from inside a handler for `M` creates a circular dependency
+    /// that will deadlock. Flushing a *different* message type is safe.
     pub async fn flush<M: Message>(&self) {
         let fuse_count = 32i32;
         let mut breaked = false;

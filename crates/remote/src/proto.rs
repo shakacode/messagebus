@@ -151,6 +151,7 @@ impl From<(u64, Box<dyn SharedMessage>, bool)> for ProtocolItem {
 }
 
 impl ProtocolItem {
+    #[allow(clippy::result_large_err)]
     pub fn unwrap_send(self) -> Result<(u64, Box<dyn SharedMessage>, bool), ProtocolItem> {
         match self {
             ProtocolItem::Send(a, b, c) => Ok((a, b, c)),
@@ -187,7 +188,7 @@ impl ProtocolItem {
                 flags.set(ProtocolHeaderFlags::BODY, true);
                 flags.set(ProtocolHeaderFlags::TYPE_TAG, true);
                 type_tag = Some(msg.type_tag());
-                body = Some(generic_serialize(body_type, &*msg, body_buff)?);
+                body = Some(generic_serialize(body_type, msg, body_buff)?);
 
                 ProtocolHeaderActionKind::Send
             }
@@ -205,7 +206,7 @@ impl ProtocolItem {
                                 .ok_or(crate::error::Error::UnknownCodec)?;
 
                             type_tag = Some(msg.type_tag());
-                            body = Some(generic_serialize(body_type, &*msg, body_buff)?);
+                            body = Some(generic_serialize(body_type, msg, body_buff)?);
                         }
 
                         Err(err) => {

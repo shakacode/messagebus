@@ -125,6 +125,8 @@ macro_rules! batch_synchronized_poller_macro {
 
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
             let mut buffer = Vec::with_capacity(cfg.batch_size);
+            // Track in-flight batch processing tasks
+            let mut pending_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
             while let Some(msg) = rx.recv().await {
                 let bus = bus.clone();
@@ -140,14 +142,19 @@ macro_rules! batch_synchronized_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
-                            #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
-                            let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
+                            #[allow(clippy::redundant_closure_call)]
+                            let handle = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
+                            pending_tasks.push(handle);
                         }
                     }
                     Request::Action(Action::Init(..)) => {
                         stx.send(Event::Ready).unwrap();
                     }
                     Request::Action(Action::Close) => {
+                        // Wait for all pending tasks before closing
+                        for handle in pending_tasks.drain(..) {
+                            let _ = handle.await;
+                        }
                         rx.close();
                     }
                     Request::Action(Action::Flush) => {
@@ -157,14 +164,25 @@ macro_rules! batch_synchronized_poller_macro {
                             let buffer_mid_clone = buffer_mid.drain(..).collect::<Vec<_>>();
                             let buffer_clone = buffer.drain(..).collect();
 
-                            #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
-                            let _ = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
+                            #[allow(clippy::redundant_closure_call)]
+                            let handle = ($st1)(buffer_mid_clone, buffer_clone, bus, ut, stx);
+                            pending_tasks.push(handle);
+                        }
+
+                        // Wait for all pending batch tasks to complete before signaling flushed
+                        for handle in pending_tasks.drain(..) {
+                            let _ = handle.await;
                         }
 
                         stx_clone.send(Event::Flushed).unwrap();
                     }
 
                     Request::Action(Action::Sync) => {
+                        // Wait for pending tasks before sync
+                        for handle in pending_tasks.drain(..) {
+                            let _ = handle.await;
+                        }
+
                         #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         stx.send(Event::Synchronized(resp.map_err(Error::Other)))

@@ -350,7 +350,7 @@ impl Bus {
     ///
     /// Once closing begins, new messages will be rejected with a `Closed` error.
     pub fn is_closing(&self) -> bool {
-        self.inner.closed.load(Ordering::SeqCst)
+        self.inner.closed.load(Ordering::Acquire)
     }
 
     pub(crate) fn init(&self) {
@@ -410,7 +410,7 @@ impl Bus {
     /// ```
     pub async fn close(&self) {
         let _handle = self.inner.maintain.lock().await;
-        self.inner.closed.store(true, Ordering::SeqCst);
+        self.inner.closed.store(true, Ordering::Release);
 
         for r in self.inner.receivers.iter() {
             let err = tokio::time::timeout(Duration::from_secs(20), r.close(self)).await;
@@ -741,7 +741,7 @@ impl Bus {
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -861,7 +861,7 @@ impl Bus {
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -909,7 +909,7 @@ impl Bus {
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -947,7 +947,7 @@ impl Bus {
     /// - [`SendError::Closed`] - Bus is closed
     #[inline]
     pub fn try_send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -982,7 +982,7 @@ impl Bus {
     /// - [`Error::NoReceivers`] - No receiver for this message type
     /// - [`SendError::Closed`] - Bus is closed
     pub async fn send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -1131,7 +1131,7 @@ impl Bus {
         msg: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -1171,7 +1171,7 @@ impl Bus {
         msg: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -1191,7 +1191,7 @@ impl Bus {
         req: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(req).into());
         }
 
@@ -1223,7 +1223,7 @@ impl Bus {
         req: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>, E>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(req).into());
         }
 
@@ -1258,7 +1258,7 @@ impl Bus {
         de: &'b mut dyn erased_serde::Deserializer<'c>,
         _options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             warn!("closed message bus");
             return Err(Error::NoResponse);
         }
@@ -1285,7 +1285,7 @@ impl Bus {
         de: &'b mut dyn erased_serde::Deserializer<'c>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             warn!("closed message bus");
             return Err(Error::NoResponse);
         }

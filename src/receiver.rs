@@ -11,7 +11,6 @@ use core::{
     any::{Any, TypeId},
     fmt,
     marker::PhantomData,
-    mem,
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicI64, Ordering},
 };
@@ -557,15 +556,12 @@ impl<'a> AnyReceiver<'a> {
         M: Message,
         S: SendTypedReceiver<M> + 'static,
     {
-        let send_typed_receiver = rcvr as &dyn SendTypedReceiver<M>;
-        let send_typed_receiver: TraitObject = unsafe { mem::transmute(send_typed_receiver) };
+        let dyn_ref: &dyn SendTypedReceiver<M> = rcvr;
+        let raw = TraitObject::from_dyn(dyn_ref);
 
         Self {
-            data: send_typed_receiver.data,
-            typed: (
-                TypeId::of::<dyn SendTypedReceiver<M>>(),
-                send_typed_receiver.vtable,
-            ),
+            data: raw.data,
+            typed: (TypeId::of::<dyn SendTypedReceiver<M>>(), raw.vtable),
             _m: Default::default(),
         }
     }
@@ -576,12 +572,10 @@ impl<'a> AnyReceiver<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn SendTypedReceiver<M>>(TraitObject {
-                data: self.data,
-                vtable: self.typed.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.typed.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 }
 
@@ -605,13 +599,13 @@ impl<'a> AnyWrapperRef<'a> {
             + WrapperReturnTypeAndError<R, E>
             + 'static,
     {
-        let wrapper_r = rcvr as &dyn WrapperReturnTypeOnly<R>;
-        let wrapper_e = rcvr as &dyn WrapperErrorTypeOnly<E>;
-        let wrapper_re = rcvr as &dyn WrapperReturnTypeAndError<R, E>;
+        let dyn_r: &dyn WrapperReturnTypeOnly<R> = rcvr;
+        let dyn_e: &dyn WrapperErrorTypeOnly<E> = rcvr;
+        let dyn_re: &dyn WrapperReturnTypeAndError<R, E> = rcvr;
 
-        let wrapper_r: TraitObject = unsafe { mem::transmute(wrapper_r) };
-        let wrapper_e: TraitObject = unsafe { mem::transmute(wrapper_e) };
-        let wrapper_re: TraitObject = unsafe { mem::transmute(wrapper_re) };
+        let wrapper_r = TraitObject::from_dyn(dyn_r);
+        let wrapper_e = TraitObject::from_dyn(dyn_e);
+        let wrapper_re = TraitObject::from_dyn(dyn_re);
 
         Self {
             data: wrapper_r.data,
@@ -637,12 +631,10 @@ impl<'a> AnyWrapperRef<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn WrapperReturnTypeOnly<R>>(TraitObject {
-                data: self.data,
-                vtable: self.wrapper_r.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.wrapper_r.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 
     #[inline]
@@ -653,12 +645,10 @@ impl<'a> AnyWrapperRef<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn WrapperErrorTypeOnly<E>>(TraitObject {
-                data: self.data,
-                vtable: self.wrapper_e.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.wrapper_e.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 
     #[inline]
@@ -669,12 +659,10 @@ impl<'a> AnyWrapperRef<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn WrapperReturnTypeAndError<R, E>>(TraitObject {
-                data: self.data,
-                vtable: self.wrapper_re.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.wrapper_re.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 }
 

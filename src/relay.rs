@@ -261,14 +261,14 @@ where
                         Event::Error(err) => error!("Batch Error: {}", err),
                         Event::Pause => self.context.ready_flag.store(false, Ordering::SeqCst),
                         Event::Ready => {
+                            self.context.ready_flag.store(true, Ordering::SeqCst);
                             self.context.ready.notify_waiters();
-                            self.context.ready_flag.store(true, Ordering::SeqCst)
                         }
                         Event::InitFailed(err) => {
                             error!("Relay init failed: {}", err);
 
-                            self.context.ready.notify_waiters();
                             self.context.ready_flag.store(false, Ordering::SeqCst);
+                            self.context.ready.notify_waiters();
                         }
                         Event::Exited => {
                             self.context.closed.notify_waiters();

@@ -227,14 +227,14 @@ where
                         Event::Error(err) => error!("Batch Error: {}", err),
                         Event::Pause => self.context.ready_flag.store(false, Ordering::SeqCst),
                         Event::Ready => {
-                            self.context.ready.notify_waiters();
                             self.context.ready_flag.store(true, Ordering::SeqCst);
+                            self.context.ready.notify_waiters();
                         }
                         Event::InitFailed(err) => {
                             error!("Receiver init failed: {}", err);
 
-                            self.context.ready.notify_waiters();
                             self.context.ready_flag.store(false, Ordering::SeqCst);
+                            self.context.ready.notify_waiters();
                         }
                         Event::Exited => {
                             self.context.closed.notify_waiters();
@@ -801,6 +801,11 @@ impl Receiver {
     }
 
     #[inline]
+    pub fn is_idling(&self) -> bool {
+        self.inner.is_idling()
+    }
+
+    #[inline]
     pub async fn reserve(&self, tt: &TypeTag) -> Permit {
         loop {
             if let Some(p) = self.inner.try_reserve(tt) {
@@ -825,7 +830,12 @@ impl Receiver {
         req: bool,
         mut permit: Permit,
     ) -> Result<(), Error<M>> {
-        let res = if let Some(any_receiver) = self.inner.typed() {
+        // Set need_flush BEFORE sending to ensure flush_all() sees the flag
+        // even if it checks between flag set and message enqueue
+        self.inner.set_need_flush();
+        permit.fuse = true;
+
+        if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
                 .unwrap()
@@ -835,12 +845,7 @@ impl Receiver {
                 .send_boxed(mid, msg.into_boxed(), req, bus)
                 .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
                 .map(|_| ())
-        };
-
-        permit.fuse = true;
-        self.inner.set_need_flush();
-
-        res
+        }
     }
 
     #[inline]
@@ -851,9 +856,12 @@ impl Receiver {
         msg: M,
         req: bool,
     ) -> Result<(), Error<M>> {
+        // Set need_flush BEFORE sending to ensure flush_all() sees the flag
+        // even if it checks between flag set and message enqueue
+        self.inner.set_need_flush();
         self.inner.increment_processing(&M::type_tag_());
 
-        let res = if let Some(any_receiver) = self.inner.typed() {
+        if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
                 .unwrap()
@@ -863,10 +871,7 @@ impl Receiver {
                 .send_boxed(mid, msg.into_boxed(), req, bus)
                 .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
                 .map(|_| ())
-        };
-        self.inner.set_need_flush();
-
-        res
+        }
     }
 
     #[inline]
@@ -878,10 +883,11 @@ impl Receiver {
         req: bool,
         mut permit: Permit,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        let res = self.inner.send_boxed(mid, msg, req, bus);
-        permit.fuse = true;
+        // Set need_flush BEFORE sending to ensure flush_all() sees the flag
+        // even if it checks between flag set and message enqueue
         self.inner.set_need_flush();
-        res
+        permit.fuse = true;
+        self.inner.send_boxed(mid, msg, req, bus)
     }
 
     #[inline]
@@ -1007,8 +1013,9 @@ impl Receiver {
 
     #[inline]
     pub async fn idle(&self) {
+        let notify = self.inner.idle_notify().notified();
         if !self.inner.is_idling() {
-            self.inner.idle_notify().notified().await;
+            notify.await;
         }
     }
 

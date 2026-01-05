@@ -22,10 +22,7 @@ pub struct MessageTable {
 impl MessageTable {
     #[inline]
     pub fn add_any(&mut self, req: TypeTag, resp_err: Option<(TypeTag, TypeTag)>) {
-        self.table
-            .entry(req)
-            .or_default()
-            .push(resp_err);
+        self.table.entry(req).or_default().push(resp_err);
     }
 
     #[inline]

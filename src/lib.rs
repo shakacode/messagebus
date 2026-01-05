@@ -482,7 +482,10 @@ impl Bus {
             iters += 1;
             let mut flushed = false;
             for r in self.inner.receivers.iter() {
-                if r.need_flush() {
+                // Use !is_idling() instead of need_flush() to avoid race condition
+                // where need_flush flag could be cleared while messages are still
+                // being processed. is_idling() checks the processing counter directly.
+                if !r.is_idling() {
                     flushed = true;
 
                     r.flush(self).await;
@@ -526,7 +529,8 @@ impl Bus {
             iters += 1;
             let mut flushed = false;
             for r in receivers {
-                if r.need_flush() {
+                // Use !is_idling() instead of need_flush() to avoid race condition
+                if !r.is_idling() {
                     flushed = true;
 
                     r.flush(self).await;
@@ -563,7 +567,8 @@ impl Bus {
             iters += 1;
             let mut flushed = false;
             for r in receivers1.chain(receivers2) {
-                if r.need_flush() {
+                // Use !is_idling() instead of need_flush() to avoid race condition
+                if !r.is_idling() {
                     flushed = true;
 
                     r.flush(self).await;

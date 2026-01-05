@@ -579,6 +579,10 @@ impl<'a> AnyReceiver<'a> {
     }
 }
 
+// SAFETY: AnyReceiver contains raw pointers derived from a reference to a type S
+// that implements `SendTypedReceiver<M>`, which requires `Send + Sync`. The pointers
+// are only used to reconstruct trait objects with the same lifetime 'a, and the
+// PhantomData<&'a dyn Any> ensures proper lifetime tracking.
 unsafe impl Send for AnyReceiver<'_> {}
 
 pub struct AnyWrapperRef<'a> {
@@ -666,6 +670,10 @@ impl<'a> AnyWrapperRef<'a> {
     }
 }
 
+// SAFETY: AnyWrapperRef contains raw pointers derived from a reference to a type S
+// that implements `WrapperReturnTypeOnly<R> + WrapperErrorTypeOnly<E> + WrapperReturnTypeAndError<R, E>`,
+// which all require `Send + Sync`. The pointers are only used to reconstruct trait objects
+// with the same lifetime 'a, and the PhantomData<&'a usize> ensures proper lifetime tracking.
 unsafe impl Send for AnyWrapperRef<'_> {}
 
 struct ReceiverContext {

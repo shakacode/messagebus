@@ -92,31 +92,31 @@ macro_rules! synchronized_poller_macro {
             M: Message,
             R: Message,
         {
-            let ut = ut.downcast::<Mutex<T>>().unwrap();
+            let ut = ut
+                .downcast::<Mutex<T>>()
+                .expect("handler type mismatch - this is a bug");
 
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Request::Request(mid, msg, _req) =>
-                    {
+                    Request::Request(mid, msg, _req) => {
                         #[allow(clippy::redundant_closure_call)]
-                        ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone())
-                            .await
-                            .unwrap()
+                        // The inner closure handles errors via events, so we just need to
+                        // ensure the task completes - panics in the task would be a bug
+                        let _ = ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone()).await;
                     }
                     Request::Action(Action::Init(..)) => {
-                        stx.send(Event::Ready).unwrap();
+                        let _ = stx.send(Event::Ready);
                     }
                     Request::Action(Action::Close) => {
                         rx.close();
                     }
                     Request::Action(Action::Flush) => {
-                        stx.send(Event::Flushed).unwrap();
+                        let _ = stx.send(Event::Flushed);
                     }
                     Request::Action(Action::Sync) => {
                         #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
-                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                            .unwrap();
+                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
                     }
 
                     _ => unimplemented!(),

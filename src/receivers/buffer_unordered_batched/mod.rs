@@ -120,7 +120,9 @@ macro_rules! buffer_unordered_batch_poller_macro {
             M: Message,
             R: Message,
         {
-            let ut = ut.downcast::<$t>().unwrap();
+            let ut = ut
+                .downcast::<$t>()
+                .expect("handler type mismatch - this is a bug");
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
@@ -149,7 +151,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         }
                     }
                     Request::Action(Action::Init(..)) => {
-                        stx.send(Event::Ready).unwrap();
+                        let _ = stx.send(Event::Ready);
                     }
                     Request::Action(Action::Close) => {
                         rx.close();
@@ -168,7 +170,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         }
 
                         let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
-                        stx_clone.send(Event::Flushed).unwrap();
+                        let _ = stx_clone.send(Event::Flushed);
                     }
 
                     Request::Action(Action::Sync) => {
@@ -178,8 +180,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         drop(lock);
 
-                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                            .unwrap();
+                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
                     }
 
                     _ => unimplemented!(),

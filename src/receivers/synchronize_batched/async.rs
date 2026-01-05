@@ -117,7 +117,7 @@ where
     type Stream = Pin<Box<dyn Stream<Item = Event<R, E>> + Send>>;
 
     fn event_stream(&self, _: Bus) -> Self::Stream {
-        let mut rx = self.srx.lock().take().unwrap();
+        let mut rx = self.srx.lock().take().expect("event_stream called twice");
 
         Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }

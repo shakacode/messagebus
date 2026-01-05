@@ -28,26 +28,31 @@ async fn producer_poller<T, M>(
     T::Response: Message,
     M: Message,
 {
-    let ut = ut.downcast::<Mutex<T>>().unwrap();
+    let ut = ut.downcast::<Mutex<T>>().expect("handler type mismatch - this is a bug");
     let stream = Option<Pin<Box<dyn Stream<Item = Result<Self::Item, Self::Error>> + Send + '_>>, Self::Error>;
 
     while let Some(msg) = rx.recv().await {
         match msg {
             Request::Request(mid, msg, _req) => {
                 let lock = ut.lock().await;
-                let stream = lock.producer(msg, &bus).await.unwrap();
-                pin_mut!(stream);
-
-                stx.send(Event::BatchComplete(M::type_tag_(), 1)).unwrap();
+                match lock.producer(msg, &bus).await {
+                    Ok(stream) => {
+                        pin_mut!(stream);
+                        let _ = stx.send(Event::BatchComplete(M::type_tag_(), 1));
+                    }
+                    Err(err) => {
+                        let _ = stx.send(Event::Error(Error::Other(err)));
+                    }
+                }
             }
             Request::Action(Action::Init(..)) => {
-                stx.send(Event::Ready).unwrap();
+                let _ = stx.send(Event::Ready);
             }
             Request::Action(Action::Close) => {
                 rx.close();
             }
             Request::Action(Action::Flush) => {
-                stx.send(Event::Flushed).unwrap();
+                let _ = stx.send(Event::Flushed);
             }
             Request::Action(Action::Sync) => {}
 
@@ -140,7 +145,7 @@ where
     type Stream = Pin<Box<dyn Stream<Item = Event<R, E>> + Send>>;
 
     fn event_stream(&self, _: Bus) -> Self::Stream {
-        let mut rx = self.srx.lock().take().unwrap();
+        let mut rx = self.srx.lock().take().expect("event_stream called twice");
 
         Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }

@@ -101,7 +101,9 @@ macro_rules! buffer_unordered_poller_macro {
             R: Message,
             E: StdSyncSendError,
         {
-            let ut = ut.downcast::<$t>().unwrap();
+            let ut = ut
+                .downcast::<$t>()
+                .expect("handler type mismatch - this is a bug");
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
             while let Some(msg) = rx.recv().await {
@@ -118,12 +120,14 @@ macro_rules! buffer_unordered_poller_macro {
                         );
                     }
 
-                    Request::Action(Action::Init(..)) => stx.send(Event::Ready).unwrap(),
+                    Request::Action(Action::Init(..)) => {
+                        let _ = stx.send(Event::Ready);
+                    }
                     Request::Action(Action::Close) => rx.close(),
 
                     Request::Action(Action::Flush) => {
                         let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
-                        stx.send(Event::Flushed).unwrap();
+                        let _ = stx.send(Event::Flushed);
                     }
 
                     Request::Action(Action::Sync) => {
@@ -133,8 +137,7 @@ macro_rules! buffer_unordered_poller_macro {
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         drop(lock);
 
-                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                            .unwrap();
+                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
                     }
 
                     _ => unimplemented!(),

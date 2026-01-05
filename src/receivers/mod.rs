@@ -51,20 +51,19 @@ macro_rules! process_batch_result {
 
                 while let Some((mid, _req)) = mids.next() {
                     if let Some(r) = re.next() {
-                        $stx.send(Event::Response(mid, Ok(r))).unwrap();
+                        // Ignore send errors - receiver may have been dropped during shutdown
+                        let _ = $stx.send(Event::Response(mid, Ok(r)));
                     } else {
-                        $stx.send(Event::Response(mid, Err(Error::NoResponse)))
-                            .unwrap();
+                        let _ = $stx.send(Event::Response(mid, Err(Error::NoResponse)));
                     }
                 }
             }
             Err(er) => {
                 for (mid, _req) in mids {
-                    $stx.send(Event::Response(mid, Err(Error::Other(er.clone()))))
-                        .unwrap();
+                    let _ = $stx.send(Event::Response(mid, Err(Error::Other(er.clone()))));
                 }
 
-                $stx.send(Event::Error(Error::Other(er))).unwrap();
+                let _ = $stx.send(Event::Error(Error::Other(er)));
             }
         }
     };

@@ -26,14 +26,15 @@ synchronized_poller_macro! {
                 log::error!("SynchronizedHandler error: {err}");
             }
 
-            stx.send(Event::Response(mid, resp.map_err(Error::Other)))
-                .unwrap();
+            if stx.send(Event::Response(mid, resp.map_err(Error::Other))).is_err() {
+                log::trace!("failed to send response - channel closed during shutdown");
+            }
         })
     },
     |bus, ut: Arc<Mutex<T>>| async move {
         tokio::task::spawn_blocking(move || block_on(ut.lock()).sync(&bus))
             .await
-            .unwrap()
+            .expect("sync task panicked")
     }
 }
 
@@ -118,7 +119,7 @@ where
     type Stream = Pin<Box<dyn Stream<Item = Event<R, E>> + Send>>;
 
     fn event_stream(&self, _: Bus) -> Self::Stream {
-        let mut rx = self.srx.lock().take().unwrap();
+        let mut rx = self.srx.lock().take().expect("event_stream called twice");
 
         Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }

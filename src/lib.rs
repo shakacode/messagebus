@@ -355,7 +355,7 @@ impl Bus {
 
     pub(crate) fn init(&self) {
         for r in self.inner.receivers.iter() {
-            r.init(self).unwrap();
+            r.init(self).expect("failed to initialize receiver");
         }
     }
 
@@ -765,7 +765,9 @@ impl Bus {
             let total = rs.len();
 
             while counter < total {
-                let (p, r) = iter.next().unwrap();
+                let (p, r) = iter
+                    .next()
+                    .expect("iterator should have more elements based on counter");
                 let _ = r.send(self, mid, msg.clone(), false, p);
 
                 counter += 1;
@@ -1150,7 +1152,8 @@ impl Bus {
             let _ = r.send_boxed(
                 self,
                 mid,
-                msg.try_clone_boxed().unwrap(),
+                msg.try_clone_boxed()
+                    .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
             );
@@ -1160,7 +1163,8 @@ impl Bus {
             let _ = r.send_boxed(
                 self,
                 mid,
-                msg.try_clone_boxed().unwrap(),
+                msg.try_clone_boxed()
+                    .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
             );
@@ -1297,7 +1301,9 @@ impl Bus {
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
-            let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
+            let (mid, rx) = rc
+                .add_response_waiter_boxed()
+                .expect("failed to add response waiter");
             let msg = deserialize_shared_message(tt.clone(), de)?;
 
             rc.send_boxed(

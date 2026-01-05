@@ -128,7 +128,9 @@ macro_rules! batch_synchronized_poller_macro {
             M: Message,
             R: Message,
         {
-            let ut = ut.downcast::<Mutex<T>>().unwrap();
+            let ut = ut
+                .downcast::<Mutex<T>>()
+                .expect("handler type mismatch - this is a bug");
 
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
             let mut buffer = Vec::with_capacity(cfg.batch_size);
@@ -155,7 +157,7 @@ macro_rules! batch_synchronized_poller_macro {
                         }
                     }
                     Request::Action(Action::Init(..)) => {
-                        stx.send(Event::Ready).unwrap();
+                        let _ = stx.send(Event::Ready);
                     }
                     Request::Action(Action::Close) => {
                         // Wait for all pending tasks before closing
@@ -181,7 +183,7 @@ macro_rules! batch_synchronized_poller_macro {
                             let _ = handle.await;
                         }
 
-                        stx_clone.send(Event::Flushed).unwrap();
+                        let _ = stx_clone.send(Event::Flushed);
                     }
 
                     Request::Action(Action::Sync) => {
@@ -192,8 +194,7 @@ macro_rules! batch_synchronized_poller_macro {
 
                         #[allow(clippy::redundant_closure_call)]
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
-                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                            .unwrap();
+                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
                     }
 
                     _ => unimplemented!(),

@@ -296,16 +296,18 @@ where
     fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<Option<R>, Error> {
         Ok(if let Some(waiter) = self.waiters.take(mid as _) {
             match waiter {
-                Waiter::WithErrorType(sender) => sender.send(resp).unwrap(),
-                Waiter::WithoutErrorType(sender) => {
-                    sender.send(resp.map_err(|e| e.into_dyn())).unwrap()
+                // Ignore send errors - receiver may have been dropped if caller timed out
+                Waiter::WithErrorType(sender) => {
+                    let _ = sender.send(resp);
                 }
-                Waiter::Boxed(sender) => sender
-                    .send(resp.map_err(|e| e.into_dyn()).map(|x| x.into_boxed()))
-                    .unwrap(),
-
+                Waiter::WithoutErrorType(sender) => {
+                    let _ = sender.send(resp.map_err(|e| e.into_dyn()));
+                }
+                Waiter::Boxed(sender) => {
+                    let _ = sender.send(resp.map_err(|e| e.into_dyn()).map(|x| x.into_boxed()));
+                }
                 Waiter::BoxedWithError(sender) => {
-                    sender.send(resp.map(|x| x.into_boxed())).unwrap()
+                    let _ = sender.send(resp.map(|x| x.into_boxed()));
                 }
             }
             None
@@ -846,12 +848,18 @@ impl Receiver {
         if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
-                .unwrap()
+                .expect("message type mismatch - this is a bug")
                 .send(mid, msg, req, bus)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
-                .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
+                .map_err(|err| {
+                    err.map_msg(|b| {
+                        *b.as_any_boxed()
+                            .downcast::<M>()
+                            .expect("message type mismatch - this is a bug")
+                    })
+                })
                 .map(|_| ())
         }
     }
@@ -872,12 +880,18 @@ impl Receiver {
         if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
-                .unwrap()
+                .expect("message type mismatch - this is a bug")
                 .send(mid, msg, req, bus)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
-                .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
+                .map_err(|err| {
+                    err.map_msg(|b| {
+                        *b.as_any_boxed()
+                            .downcast::<M>()
+                            .expect("message type mismatch - this is a bug")
+                    })
+                })
                 .map(|_| ())
         }
     }
@@ -934,7 +948,7 @@ impl Receiver {
             let (tx, rx) = oneshot::channel();
             let mid = any_wrapper
                 .cast_error_only::<E>()
-                .unwrap()
+                .expect("error type mismatch - this is a bug")
                 .add_response_listener(tx)?;
 
             Ok((mid, async move {
@@ -956,7 +970,7 @@ impl Receiver {
             let (tx, rx) = oneshot::channel();
             let mid = any_receiver
                 .cast_ret_only::<R>()
-                .unwrap()
+                .expect("response type mismatch - this is a bug")
                 .add_response_listener(tx)?;
 
             Ok((
@@ -977,7 +991,10 @@ impl Receiver {
                 mid,
                 async move {
                     match rx.await {
-                        Ok(Ok(x)) => Ok(*x.as_any_boxed().downcast::<R>().unwrap()),
+                        Ok(Ok(x)) => Ok(*x
+                            .as_any_boxed()
+                            .downcast::<R>()
+                            .expect("response type mismatch - this is a bug")),
                         Ok(Err(x)) => Err(x),
                         Err(err) => Err(Error::from(err)),
                     }
@@ -996,7 +1013,7 @@ impl Receiver {
             let (tx, rx) = oneshot::channel();
             let mid = any_wrapper
                 .cast_ret_and_error::<R, E>()
-                .unwrap()
+                .expect("response/error type mismatch - this is a bug")
                 .add_response_listener(tx)?;
 
             Ok((mid, async move {

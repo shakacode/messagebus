@@ -101,6 +101,7 @@ mod stats;
 mod trait_object;
 pub mod type_tag;
 
+#[doc(hidden)]
 pub mod __reexport {
     pub use ctor;
     pub use serde;
@@ -131,7 +132,6 @@ use receiver::{Permit, Receiver};
 
 // public
 pub use builder::{BusBuilder, Module, RegisterEntry, SyncEntry, UnsyncEntry};
-pub use ctor;
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 pub use handler::*;
 pub use receiver::{

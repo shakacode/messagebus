@@ -15,7 +15,7 @@ rust-version = "1.79"
 members = ["crates/remote", "crates/derive"]
 
 [dependencies]
-messagebus_derive = "0.2.5"
+messagebus_derive = { path = "crates/derive" }
 
 tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time"] }
 parking_lot = "0.11"

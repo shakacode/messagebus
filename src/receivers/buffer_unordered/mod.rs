@@ -4,7 +4,7 @@ mod sync;
 use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedAsync;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 pub use sync::BufferUnorderedSync;
 
 #[allow(dead_code)]

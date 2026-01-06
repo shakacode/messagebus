@@ -496,7 +496,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, serde_derive::Serialize, serde_derive::Deserialize)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     struct Msg2 {
         inner: [i32; 2],
     }

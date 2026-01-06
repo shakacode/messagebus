@@ -21,8 +21,7 @@ tokio = { workspace = true, features = ["parking_lot", "rt-multi-thread", "sync"
 parking_lot = { workspace = true }
 quinn = { workspace = true }
 erased-serde = { workspace = true }
-serde_derive = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
 pin-project-lite = { workspace = true }
 serde_cbor = { workspace = true }

@@ -3,7 +3,7 @@ use messagebus::{
     derive::{Error as MbError, Message},
     error, AsyncHandler, Bus, Message, TypeTag,
 };
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error, MbError)]

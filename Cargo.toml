@@ -26,8 +26,7 @@ log = { workspace = true }
 sharded-slab = { workspace = true }
 thiserror = { workspace = true }
 erased-serde = { workspace = true }
-serde = { workspace = true }
-serde_derive = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 dashmap = { workspace = true }
 ctor = { workspace = true }
 
@@ -60,7 +59,6 @@ redis = "0.27"
 rustls = "0.19"
 serde = "1"
 serde_cbor = "0.11"
-serde_derive = "1"
 serde_json = "1"
 sharded-slab = "0.1"
 smallvec = "1"

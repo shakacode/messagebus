@@ -1,5 +1,5 @@
 use messagebus::{Action, Bus, Event, SharedMessage, TypeTag};
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -443,7 +443,7 @@ mod tests {
     };
     use messagebus::Event;
     use messagebus::{derive::Message, Bus, TypeTagged};
-    use serde_derive::{Deserialize, Serialize};
+    use serde::{Deserialize, Serialize};
     use std::borrow::Cow;
 
     #[derive(Serialize, Deserialize, Debug, Clone, Message)]

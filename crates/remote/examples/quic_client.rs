@@ -2,7 +2,7 @@ use messagebus::derive::Message;
 use messagebus::error::GenericError;
 use messagebus::{Bus, TypeTagged};
 use messagebus_remote::relays::QuicClientRelay;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Message)]
 #[namespace("example")]

@@ -2,7 +2,7 @@
 name = "messagebus_remote"
 version = "0.1.0"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
-repository = "https://github.com/andreytkachenko/messagebus.git"
+repository = "https://github.com/shakacode/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus", "quic", "remote", "rpc", "parallel", "computing"]
 categories = ["network-programming", "asynchronous"]
 description = "MessageBus remote allows intercommunicate by messages between instances"

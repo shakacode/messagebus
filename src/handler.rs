@@ -15,43 +15,9 @@
 //! | [`AsyncBatchSynchronizedHandler`] | No (Send only) | Yes | Yes |
 
 use core::iter::FromIterator;
-use std::pin::Pin;
 
 use crate::{error::StdSyncSendError, Bus, Message};
 use async_trait::async_trait;
-use futures::Stream;
-
-/// Statistics from an async producer.
-#[derive(Debug, Clone, Copy)]
-pub struct ProducerStats {
-    /// Number of items successfully produced.
-    pub completed: usize,
-    /// Number of items that failed to produce.
-    pub failed: usize,
-}
-
-/// Async producer trait for streaming message generation.
-///
-/// Producers can generate multiple messages from a single input message.
-#[async_trait]
-pub trait AsyncProducer<M: Message>: Send + Sync {
-    /// The type of items produced.
-    type Item: Message;
-    /// The response type returned after production completes.
-    type Response: Message;
-    /// The error type.
-    type Error: StdSyncSendError;
-
-    /// Produces a stream of items from an input message.
-    async fn producer(
-        &self,
-        msg: M,
-        bus: &Bus,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Self::Item, Self::Error>> + Send + '_>>, Self::Error>;
-
-    /// Called when production is complete.
-    async fn finish(&self, stats: ProducerStats, bus: &Bus) -> Result<Self::Response, Self::Error>;
-}
 
 /// Synchronous, thread-safe handler trait.
 ///

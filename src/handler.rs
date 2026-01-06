@@ -1,18 +1,38 @@
 //! Handler traits for processing messages.
 //!
 //! This module defines the core handler traits that receivers implement to process messages.
-//! There are 8 handler variants to cover different use cases:
+//! There are 12 handler variants to cover different use cases:
 //!
-//! | Trait | Thread-Safe | Batched | Async |
-//! |-------|-------------|---------|-------|
-//! | [`Handler`] | Yes (Send+Sync) | No | No |
-//! | [`AsyncHandler`] | Yes (Send+Sync) | No | Yes |
-//! | [`SynchronizedHandler`] | No (Send only) | No | No |
-//! | [`AsyncSynchronizedHandler`] | No (Send only) | No | Yes |
-//! | [`BatchHandler`] | Yes (Send+Sync) | Yes | No |
-//! | [`AsyncBatchHandler`] | Yes (Send+Sync) | Yes | Yes |
-//! | [`BatchSynchronizedHandler`] | No (Send only) | Yes | No |
-//! | [`AsyncBatchSynchronizedHandler`] | No (Send only) | Yes | Yes |
+//! ## Thread-Safe Handlers
+//!
+//! | Trait | Batched | Async |
+//! |-------|---------|-------|
+//! | [`Handler`] | No | No |
+//! | [`AsyncHandler`] | No | Yes |
+//! | [`BatchHandler`] | Yes | No |
+//! | [`AsyncBatchHandler`] | Yes | Yes |
+//!
+//! ## Synchronized Handlers (Send only)
+//!
+//! These handlers allow mutable access and process messages sequentially.
+//!
+//! | Trait | Batched | Async |
+//! |-------|---------|-------|
+//! | [`SynchronizedHandler`] | No | No |
+//! | [`AsyncSynchronizedHandler`] | No | Yes |
+//! | [`BatchSynchronizedHandler`] | Yes | No |
+//! | [`AsyncBatchSynchronizedHandler`] | Yes | Yes |
+//!
+//! ## Local Handlers (no Send/Sync)
+//!
+//! For single-threaded or thread-local contexts.
+//!
+//! | Trait | Batched | Async |
+//! |-------|---------|-------|
+//! | [`LocalHandler`] | No | No |
+//! | [`LocalAsyncHandler`] | No | Yes |
+//! | [`LocalBatchHandler`] | Yes | No |
+//! | [`LocalAsyncBatchHandler`] | Yes | Yes |
 
 use core::iter::FromIterator;
 

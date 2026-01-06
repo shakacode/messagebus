@@ -54,16 +54,32 @@
 //!
 //! ## Handler Types
 //!
-//! | Handler | Thread-Safe | Batched | Async | Use Case |
-//! |---------|-------------|---------|-------|----------|
-//! | [`Handler`] | Yes | No | No | Simple sync processing |
-//! | [`AsyncHandler`] | Yes | No | Yes | Async I/O operations |
-//! | [`SynchronizedHandler`] | No | No | No | Mutable state (sync) |
-//! | [`AsyncSynchronizedHandler`] | No | No | Yes | Mutable state (async) |
-//! | [`BatchHandler`] | Yes | Yes | No | Bulk sync processing |
-//! | [`AsyncBatchHandler`] | Yes | Yes | Yes | Bulk async processing |
-//! | [`BatchSynchronizedHandler`] | No | Yes | No | Batched mutable state |
-//! | [`AsyncBatchSynchronizedHandler`] | No | Yes | Yes | Batched async mutable state |
+//! ### Thread-Safe Handlers (Send+Sync)
+//!
+//! | Handler | Batched | Async | Use Case |
+//! |---------|---------|-------|----------|
+//! | [`Handler`] | No | No | Simple sync processing |
+//! | [`AsyncHandler`] | No | Yes | Async I/O operations |
+//! | [`BatchHandler`] | Yes | No | Bulk sync processing |
+//! | [`AsyncBatchHandler`] | Yes | Yes | Bulk async processing |
+//!
+//! ### Synchronized Handlers (Send only)
+//!
+//! | Handler | Batched | Async | Use Case |
+//! |---------|---------|-------|----------|
+//! | [`SynchronizedHandler`] | No | No | Mutable state (sync) |
+//! | [`AsyncSynchronizedHandler`] | No | Yes | Mutable state (async) |
+//! | [`BatchSynchronizedHandler`] | Yes | No | Batched mutable state |
+//! | [`AsyncBatchSynchronizedHandler`] | Yes | Yes | Batched async mutable state |
+//!
+//! ### Local Handlers (no Send/Sync)
+//!
+//! | Handler | Batched | Async | Use Case |
+//! |---------|---------|-------|----------|
+//! | [`LocalHandler`] | No | No | Thread-local sync |
+//! | [`LocalAsyncHandler`] | No | Yes | Thread-local async |
+//! | [`LocalBatchHandler`] | Yes | No | Thread-local batched sync |
+//! | [`LocalAsyncBatchHandler`] | Yes | Yes | Thread-local batched async |
 //!
 //! ## Message Derive Macro
 //!
@@ -77,7 +93,7 @@
 mod builder;
 mod envelop;
 pub mod error;
-mod handler;
+pub mod handler;
 mod receiver;
 pub mod receivers;
 mod relay;

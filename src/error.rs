@@ -137,7 +137,7 @@ impl<M: Message> SendError<M> {
     pub fn into_boxed(self) -> SendError<Box<dyn Message>> {
         match self {
             SendError::Closed(m) => SendError::Closed(m.into_boxed()),
-            SendError::Full(m) => SendError::Closed(m.into_boxed()),
+            SendError::Full(m) => SendError::Full(m.into_boxed()),
         }
     }
 }
@@ -356,3 +356,84 @@ impl Error<Box<dyn Message>> {
 //         }
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::Any;
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    use crate::envelop::SharedMessage;
+
+    #[allow(dead_code)]
+    #[derive(Debug, Clone)]
+    struct TestMsg(i32);
+
+    impl TypeTagged for TestMsg {
+        fn type_tag_() -> TypeTag {
+            "TestMsg".into()
+        }
+        fn type_tag(&self) -> TypeTag {
+            "TestMsg".into()
+        }
+        fn type_name(&self) -> Cow<'_, str> {
+            "TestMsg".into()
+        }
+        fn type_layout(&self) -> std::alloc::Layout {
+            std::alloc::Layout::for_value(self)
+        }
+    }
+
+    impl Message for TestMsg {
+        fn as_any_ref(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn as_any_boxed(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any> {
+            self
+        }
+        fn as_shared_ref(&self) -> Option<&dyn SharedMessage> {
+            None
+        }
+        fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
+            None
+        }
+        fn as_shared_boxed(
+            self: Box<Self>,
+        ) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
+            Err(self)
+        }
+        fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {
+            None
+        }
+        fn try_clone_into(&self, _into: &mut dyn Any) -> bool {
+            false
+        }
+        fn try_clone_boxed(&self) -> Option<Box<dyn Message>> {
+            None
+        }
+        fn try_clone(&self) -> Option<Self> {
+            Some(self.clone())
+        }
+    }
+
+    #[test]
+    fn test_send_error_into_boxed_preserves_closed_variant() {
+        let err = SendError::Closed(TestMsg(42));
+        let boxed = err.into_boxed();
+        assert!(matches!(boxed, SendError::Closed(_)));
+    }
+
+    #[test]
+    fn test_send_error_into_boxed_preserves_full_variant() {
+        let err = SendError::Full(TestMsg(42));
+        let boxed = err.into_boxed();
+        assert!(matches!(boxed, SendError::Full(_)));
+    }
+}

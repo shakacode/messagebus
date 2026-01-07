@@ -9,7 +9,7 @@ description = "MessageBus allows intercommunicate with messages between modules"
 license = "MIT OR Apache-2.0"
 exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.79"
 
 [lib]
 proc-macro = true

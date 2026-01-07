@@ -49,7 +49,7 @@ impl AsyncHandler<Req> for TmpReceiver {
     async fn handle(&self, msg: Req, bus: &Bus) -> Result<Self::Response, Self::Error> {
         tokio::time::sleep(Duration::from_millis((msg.0 % 20) as _)).await;
 
-        if msg.0.is_multiple_of(128) {
+        if msg.0 % 128 == 0 {
             return Err(Error::MyError);
         } else {
             bus.send(Resp(msg.0)).await?;

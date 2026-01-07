@@ -9,7 +9,7 @@ description = "MessageBus remote allows intercommunicate by messages between ins
 license = "MIT OR Apache-2.0"
 exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.83"
 
 # [features]
 # quic = ["quinn"]

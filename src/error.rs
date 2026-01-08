@@ -404,9 +404,7 @@ mod tests {
         fn as_shared_mut(&mut self) -> Option<&mut dyn SharedMessage> {
             None
         }
-        fn as_shared_boxed(
-            self: Box<Self>,
-        ) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
+        fn as_shared_boxed(self: Box<Self>) -> Result<Box<dyn SharedMessage>, Box<dyn Message>> {
             Err(self)
         }
         fn as_shared_arc(self: Arc<Self>) -> Option<Arc<dyn SharedMessage>> {

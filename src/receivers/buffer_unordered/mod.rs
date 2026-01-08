@@ -1,11 +1,10 @@
-mod r#async;
-mod sync;
+mod execution;
+mod receiver;
 
 use std::sync::atomic::AtomicU64;
 
-pub use r#async::BufferUnorderedAsync;
+pub use receiver::{BufferUnorderedAsync, BufferUnorderedSync};
 use serde::{Deserialize, Serialize};
-pub use sync::BufferUnorderedSync;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -83,66 +82,4 @@ impl Default for BufferUnorderedConfig {
             max_parallel: 8,
         }
     }
-}
-
-#[macro_export]
-macro_rules! buffer_unordered_poller_macro {
-    ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        async fn buffer_unordered_poller<$t, M, R, E>(
-            mut rx: mpsc::UnboundedReceiver<Request<M>>,
-            bus: Bus,
-            ut: Untyped,
-            _stats: Arc<BufferUnorderedStats>,
-            cfg: BufferUnorderedConfig,
-            stx: mpsc::UnboundedSender<Event<R, E>>,
-        ) where
-            $t: $h<M, Response = R, Error = E> + 'static,
-            M: Message,
-            R: Message,
-            E: StdSyncSendError,
-        {
-            let ut = ut
-                .downcast::<$t>()
-                .expect("handler type mismatch - this is a bug");
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
-
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Request::Request(mid, msg, _req) => {
-                        #[allow(clippy::redundant_closure_call, clippy::let_underscore_future)]
-                        let _ = ($st1)(
-                            mid,
-                            msg,
-                            bus.clone(),
-                            ut.clone(),
-                            stx.clone(),
-                            semaphore.clone().acquire_owned().await,
-                        );
-                    }
-
-                    Request::Action(Action::Init(..)) => {
-                        let _ = stx.send(Event::Ready);
-                    }
-                    Request::Action(Action::Close) => rx.close(),
-
-                    Request::Action(Action::Flush) => {
-                        let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
-                        let _ = stx.send(Event::Flushed);
-                    }
-
-                    Request::Action(Action::Sync) => {
-                        let lock = semaphore.acquire_many(cfg.max_parallel as _).await;
-
-                        #[allow(clippy::redundant_closure_call)]
-                        let resp = ($st2)(bus.clone(), ut.clone()).await;
-                        drop(lock);
-
-                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
-                    }
-
-                    _ => unimplemented!(),
-                }
-            }
-        }
-    };
 }

@@ -17,9 +17,11 @@ impl<M: Message> From<error::Error<M>> for Error {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 struct MsgF32(pub f32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 struct MsgF64(pub f64);
 

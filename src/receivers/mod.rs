@@ -1,6 +1,26 @@
+//! Receiver implementations and configurations.
+//!
+//! This module provides different receiver types that determine how messages
+//! are processed. Each receiver type has an associated configuration struct.
+//!
+//! # Receiver Types
+//!
+//! | Type | Thread-Safe | Batched | Description |
+//! |------|-------------|---------|-------------|
+//! | [`BufferUnorderedSync`] / [`BufferUnorderedAsync`] | Yes | No | Concurrent processing with thread-safe handlers |
+//! | [`BufferUnorderedBatchedSync`] / [`BufferUnorderedBatchedAsync`] | Yes | Yes | Batched concurrent processing |
+//! | [`SynchronizedSync`] / [`SynchronizedAsync`] | No | No | Sequential processing with mutable state |
+//! | [`SynchronizedBatchedSync`] / [`SynchronizedBatchedAsync`] | No | Yes | Batched sequential processing |
+//!
+//! # Configuration Types
+//!
+//! - [`BufferUnorderedConfig`] - For concurrent handlers (Handler, AsyncHandler)
+//! - [`BufferUnorderedBatchedConfig`] - For concurrent batch handlers
+//! - [`SynchronizedConfig`] - For synchronized handlers with mutable state
+//! - [`SynchronizedBatchedConfig`] - For synchronized batch handlers
+
 mod buffer_unordered;
 mod buffer_unordered_batched;
-// mod producer;
 mod synchronize_batched;
 mod synchronized;
 
@@ -13,8 +33,6 @@ pub use synchronized::{SynchronizedAsync, SynchronizedConfig, SynchronizedSync};
 pub use synchronize_batched::{
     SynchronizedBatchedAsync, SynchronizedBatchedConfig, SynchronizedBatchedSync,
 };
-
-// pub use producer::{AsyncProducer, AsyncProducerConfig};
 
 use crate::receiver::Action;
 
@@ -30,20 +48,19 @@ macro_rules! process_batch_result {
 
                 while let Some((mid, _req)) = mids.next() {
                     if let Some(r) = re.next() {
-                        $stx.send(Event::Response(mid, Ok(r))).unwrap();
+                        // Ignore send errors - receiver may have been dropped during shutdown
+                        let _ = $stx.send(Event::Response(mid, Ok(r)));
                     } else {
-                        $stx.send(Event::Response(mid, Err(Error::NoResponse)))
-                            .unwrap();
+                        let _ = $stx.send(Event::Response(mid, Err(Error::NoResponse)));
                     }
                 }
             }
             Err(er) => {
                 for (mid, _req) in mids {
-                    $stx.send(Event::Response(mid, Err(Error::Other(er.clone()))))
-                        .unwrap();
+                    let _ = $stx.send(Event::Response(mid, Err(Error::Other(er.clone()))));
                 }
 
-                $stx.send(Event::Error(Error::Other(er))).unwrap();
+                let _ = $stx.send(Event::Error(Error::Other(er)));
             }
         }
     };

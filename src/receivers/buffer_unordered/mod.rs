@@ -4,7 +4,7 @@ mod sync;
 use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedAsync;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 pub use sync::BufferUnorderedSync;
 
 #[allow(dead_code)]
@@ -16,9 +16,63 @@ pub struct BufferUnorderedStats {
     pub parallel_total: AtomicU64,
 }
 
+/// Configuration for concurrent (buffer unordered) receivers.
+///
+/// Used with [`Handler`](crate::Handler) and [`AsyncHandler`](crate::AsyncHandler)
+/// when subscribing with `subscribe_sync` or `subscribe_async`.
+///
+/// # Important: Avoiding Deadlocks
+///
+/// Do not call [`Bus::flush_all()`](crate::Bus::flush_all) or
+/// [`Bus::flush::<M>()`](crate::Bus::flush) from within a handler where `M` is
+/// the same message type being handled. This creates a circular dependency that
+/// will deadlock.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use messagebus::receivers::BufferUnorderedConfig;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage(String);
+///
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<MyMessage> for MyHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyHandler)
+///         .subscribe_async::<MyMessage>(8, BufferUnorderedConfig {
+///             buffer_size: 16,
+///             max_parallel: 4,
+///         })
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+/// }
+/// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedConfig {
+    /// Size of the internal message buffer.
+    ///
+    /// Higher values allow more messages to be queued before backpressure.
+    /// Default: 8
     pub buffer_size: usize,
+
+    /// Maximum number of messages to process concurrently.
+    ///
+    /// Controls parallelism for async handlers. Default: 8
     pub max_parallel: usize,
 }
 
@@ -47,7 +101,9 @@ macro_rules! buffer_unordered_poller_macro {
             R: Message,
             E: StdSyncSendError,
         {
-            let ut = ut.downcast::<$t>().unwrap();
+            let ut = ut
+                .downcast::<$t>()
+                .expect("handler type mismatch - this is a bug");
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
             while let Some(msg) = rx.recv().await {
@@ -64,12 +120,14 @@ macro_rules! buffer_unordered_poller_macro {
                         );
                     }
 
-                    Request::Action(Action::Init(..)) => stx.send(Event::Ready).unwrap(),
+                    Request::Action(Action::Init(..)) => {
+                        let _ = stx.send(Event::Ready);
+                    }
                     Request::Action(Action::Close) => rx.close(),
 
                     Request::Action(Action::Flush) => {
                         let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
-                        stx.send(Event::Flushed).unwrap();
+                        let _ = stx.send(Event::Flushed);
                     }
 
                     Request::Action(Action::Sync) => {
@@ -79,8 +137,7 @@ macro_rules! buffer_unordered_poller_macro {
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         drop(lock);
 
-                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                            .unwrap();
+                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
                     }
 
                     _ => unimplemented!(),

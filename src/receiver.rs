@@ -11,7 +11,6 @@ use core::{
     any::{Any, TypeId},
     fmt,
     marker::PhantomData,
-    mem,
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicI64, Ordering},
 };
@@ -228,14 +227,14 @@ where
                         Event::Error(err) => error!("Batch Error: {}", err),
                         Event::Pause => self.context.ready_flag.store(false, Ordering::SeqCst),
                         Event::Ready => {
-                            self.context.ready.notify_waiters();
                             self.context.ready_flag.store(true, Ordering::SeqCst);
+                            self.context.ready.notify_waiters();
                         }
                         Event::InitFailed(err) => {
                             error!("Receiver init failed: {}", err);
 
-                            self.context.ready.notify_waiters();
                             self.context.ready_flag.store(false, Ordering::SeqCst);
+                            self.context.ready.notify_waiters();
                         }
                         Event::Exited => {
                             self.context.closed.notify_waiters();
@@ -297,16 +296,18 @@ where
     fn response(&self, mid: u64, resp: Result<R, Error<(), E>>) -> Result<Option<R>, Error> {
         Ok(if let Some(waiter) = self.waiters.take(mid as _) {
             match waiter {
-                Waiter::WithErrorType(sender) => sender.send(resp).unwrap(),
-                Waiter::WithoutErrorType(sender) => {
-                    sender.send(resp.map_err(|e| e.into_dyn())).unwrap()
+                // Ignore send errors - receiver may have been dropped if caller timed out
+                Waiter::WithErrorType(sender) => {
+                    let _ = sender.send(resp);
                 }
-                Waiter::Boxed(sender) => sender
-                    .send(resp.map_err(|e| e.into_dyn()).map(|x| x.into_boxed()))
-                    .unwrap(),
-
+                Waiter::WithoutErrorType(sender) => {
+                    let _ = sender.send(resp.map_err(|e| e.into_dyn()));
+                }
+                Waiter::Boxed(sender) => {
+                    let _ = sender.send(resp.map_err(|e| e.into_dyn()).map(|x| x.into_boxed()));
+                }
                 Waiter::BoxedWithError(sender) => {
-                    sender.send(resp.map(|x| x.into_boxed())).unwrap()
+                    let _ = sender.send(resp.map(|x| x.into_boxed()));
                 }
             }
             None
@@ -557,15 +558,12 @@ impl<'a> AnyReceiver<'a> {
         M: Message,
         S: SendTypedReceiver<M> + 'static,
     {
-        let send_typed_receiver = rcvr as &dyn SendTypedReceiver<M>;
-        let send_typed_receiver: TraitObject = unsafe { mem::transmute(send_typed_receiver) };
+        let dyn_ref: &dyn SendTypedReceiver<M> = rcvr;
+        let raw = TraitObject::from_dyn(dyn_ref);
 
         Self {
-            data: send_typed_receiver.data,
-            typed: (
-                TypeId::of::<dyn SendTypedReceiver<M>>(),
-                send_typed_receiver.vtable,
-            ),
+            data: raw.data,
+            typed: (TypeId::of::<dyn SendTypedReceiver<M>>(), raw.vtable),
             _m: Default::default(),
         }
     }
@@ -576,15 +574,17 @@ impl<'a> AnyReceiver<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn SendTypedReceiver<M>>(TraitObject {
-                data: self.data,
-                vtable: self.typed.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.typed.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 }
 
+// SAFETY: AnyReceiver contains raw pointers derived from a reference to a type S
+// that implements `SendTypedReceiver<M>`, which requires `Send + Sync`. The pointers
+// are only used to reconstruct trait objects with the same lifetime 'a, and the
+// PhantomData<&'a dyn Any> ensures proper lifetime tracking.
 unsafe impl Send for AnyReceiver<'_> {}
 
 pub struct AnyWrapperRef<'a> {
@@ -605,13 +605,13 @@ impl<'a> AnyWrapperRef<'a> {
             + WrapperReturnTypeAndError<R, E>
             + 'static,
     {
-        let wrapper_r = rcvr as &dyn WrapperReturnTypeOnly<R>;
-        let wrapper_e = rcvr as &dyn WrapperErrorTypeOnly<E>;
-        let wrapper_re = rcvr as &dyn WrapperReturnTypeAndError<R, E>;
+        let dyn_r: &dyn WrapperReturnTypeOnly<R> = rcvr;
+        let dyn_e: &dyn WrapperErrorTypeOnly<E> = rcvr;
+        let dyn_re: &dyn WrapperReturnTypeAndError<R, E> = rcvr;
 
-        let wrapper_r: TraitObject = unsafe { mem::transmute(wrapper_r) };
-        let wrapper_e: TraitObject = unsafe { mem::transmute(wrapper_e) };
-        let wrapper_re: TraitObject = unsafe { mem::transmute(wrapper_re) };
+        let wrapper_r = TraitObject::from_dyn(dyn_r);
+        let wrapper_e = TraitObject::from_dyn(dyn_e);
+        let wrapper_re = TraitObject::from_dyn(dyn_re);
 
         Self {
             data: wrapper_r.data,
@@ -637,12 +637,10 @@ impl<'a> AnyWrapperRef<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn WrapperReturnTypeOnly<R>>(TraitObject {
-                data: self.data,
-                vtable: self.wrapper_r.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.wrapper_r.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 
     #[inline]
@@ -653,12 +651,10 @@ impl<'a> AnyWrapperRef<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn WrapperErrorTypeOnly<E>>(TraitObject {
-                data: self.data,
-                vtable: self.wrapper_e.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.wrapper_e.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 
     #[inline]
@@ -669,15 +665,17 @@ impl<'a> AnyWrapperRef<'a> {
             return None;
         }
 
-        Some(unsafe {
-            mem::transmute::<TraitObject, &dyn WrapperReturnTypeAndError<R, E>>(TraitObject {
-                data: self.data,
-                vtable: self.wrapper_re.1,
-            })
-        })
+        // SAFETY: TypeId check above guarantees this is the correct trait type.
+        // Lifetime 'a is preserved from the original reference stored in new().
+        let raw = unsafe { TraitObject::from_raw_parts(self.data, self.wrapper_re.1) };
+        Some(unsafe { raw.as_dyn_ref() })
     }
 }
 
+// SAFETY: AnyWrapperRef contains raw pointers derived from a reference to a type S
+// that implements `WrapperReturnTypeOnly<R> + WrapperErrorTypeOnly<E> + WrapperReturnTypeAndError<R, E>`,
+// which all require `Send + Sync`. The pointers are only used to reconstruct trait objects
+// with the same lifetime 'a, and the PhantomData<&'a usize> ensures proper lifetime tracking.
 unsafe impl Send for AnyWrapperRef<'_> {}
 
 struct ReceiverContext {
@@ -813,6 +811,11 @@ impl Receiver {
     }
 
     #[inline]
+    pub fn is_idling(&self) -> bool {
+        self.inner.is_idling()
+    }
+
+    #[inline]
     pub async fn reserve(&self, tt: &TypeTag) -> Permit {
         loop {
             if let Some(p) = self.inner.try_reserve(tt) {
@@ -837,22 +840,28 @@ impl Receiver {
         req: bool,
         mut permit: Permit,
     ) -> Result<(), Error<M>> {
-        let res = if let Some(any_receiver) = self.inner.typed() {
+        // Set need_flush BEFORE sending to ensure flush_all() sees the flag
+        // even if it checks between flag set and message enqueue
+        self.inner.set_need_flush();
+        permit.fuse = true;
+
+        if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
-                .unwrap()
+                .expect("message type mismatch - this is a bug")
                 .send(mid, msg, req, bus)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
-                .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
+                .map_err(|err| {
+                    err.map_msg(|b| {
+                        *b.as_any_boxed()
+                            .downcast::<M>()
+                            .expect("message type mismatch - this is a bug")
+                    })
+                })
                 .map(|_| ())
-        };
-
-        permit.fuse = true;
-        self.inner.set_need_flush();
-
-        res
+        }
     }
 
     #[inline]
@@ -863,22 +872,28 @@ impl Receiver {
         msg: M,
         req: bool,
     ) -> Result<(), Error<M>> {
+        // Set need_flush BEFORE sending to ensure flush_all() sees the flag
+        // even if it checks between flag set and message enqueue
+        self.inner.set_need_flush();
         self.inner.increment_processing(&M::type_tag_());
 
-        let res = if let Some(any_receiver) = self.inner.typed() {
+        if let Some(any_receiver) = self.inner.typed() {
             any_receiver
                 .cast_send_typed::<M>()
-                .unwrap()
+                .expect("message type mismatch - this is a bug")
                 .send(mid, msg, req, bus)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
-                .map_err(|err| err.map_msg(|b| *b.as_any_boxed().downcast::<M>().unwrap()))
+                .map_err(|err| {
+                    err.map_msg(|b| {
+                        *b.as_any_boxed()
+                            .downcast::<M>()
+                            .expect("message type mismatch - this is a bug")
+                    })
+                })
                 .map(|_| ())
-        };
-        self.inner.set_need_flush();
-
-        res
+        }
     }
 
     #[inline]
@@ -890,10 +905,11 @@ impl Receiver {
         req: bool,
         mut permit: Permit,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        let res = self.inner.send_boxed(mid, msg, req, bus);
-        permit.fuse = true;
+        // Set need_flush BEFORE sending to ensure flush_all() sees the flag
+        // even if it checks between flag set and message enqueue
         self.inner.set_need_flush();
-        res
+        permit.fuse = true;
+        self.inner.send_boxed(mid, msg, req, bus)
     }
 
     #[inline]
@@ -932,7 +948,7 @@ impl Receiver {
             let (tx, rx) = oneshot::channel();
             let mid = any_wrapper
                 .cast_error_only::<E>()
-                .unwrap()
+                .expect("error type mismatch - this is a bug")
                 .add_response_listener(tx)?;
 
             Ok((mid, async move {
@@ -954,7 +970,7 @@ impl Receiver {
             let (tx, rx) = oneshot::channel();
             let mid = any_receiver
                 .cast_ret_only::<R>()
-                .unwrap()
+                .expect("response type mismatch - this is a bug")
                 .add_response_listener(tx)?;
 
             Ok((
@@ -975,7 +991,10 @@ impl Receiver {
                 mid,
                 async move {
                     match rx.await {
-                        Ok(Ok(x)) => Ok(*x.as_any_boxed().downcast::<R>().unwrap()),
+                        Ok(Ok(x)) => Ok(*x
+                            .as_any_boxed()
+                            .downcast::<R>()
+                            .expect("response type mismatch - this is a bug")),
                         Ok(Err(x)) => Err(x),
                         Err(err) => Err(Error::from(err)),
                     }
@@ -994,7 +1013,7 @@ impl Receiver {
             let (tx, rx) = oneshot::channel();
             let mid = any_wrapper
                 .cast_ret_and_error::<R, E>()
-                .unwrap()
+                .expect("response/error type mismatch - this is a bug")
                 .add_response_listener(tx)?;
 
             Ok((mid, async move {
@@ -1019,8 +1038,9 @@ impl Receiver {
 
     #[inline]
     pub async fn idle(&self) {
+        let notify = self.inner.idle_notify().notified();
         if !self.inner.is_idling() {
-            self.inner.idle_notify().notified().await;
+            notify.await;
         }
     }
 

@@ -2,43 +2,40 @@
 name = "messagebus_remote"
 version = "0.1.0"
 authors = ["Andrey Tkachenko <andrey@aidev.ru>"]
-repository = "https://github.com/andreytkachenko/messagebus.git"
+repository = "https://github.com/shakacode/messagebus.git"
 keywords = ["futures", "async", "tokio", "message", "bus", "quic", "remote", "rpc", "parallel", "computing"]
 categories = ["network-programming", "asynchronous"]
 description = "MessageBus remote allows intercommunicate by messages between instances"
 license = "MIT OR Apache-2.0"
 exclude = [".gitignore", ".cargo/config", ".github/**", "codecov.yml"]
-edition = "2018"
+edition = "2021"
+rust-version = "1.83"
 
 # [features]
 # quic = ["quinn"]
 
 [dependencies]
-thiserror = "1.0"
-messagebus = { path = "../../" }
-tokio = { version = "1", features = ["parking_lot", "rt-multi-thread", "sync", "time", "io-util"] }
-parking_lot = "0.11"
-quinn = "0.7"
-rmp = "0.8.10"
-rmp-serde = "0.15.5"
-erased-serde = "0.3.16"
-serde_derive = "1.0.130"
-serde = "1.0.130"
-futures = "0.3.17"
-cbor = "0.4.1"
-serde_cbor = "0.11.2"
-bytes = "1.1.0"
-quinn-proto = "0.7.3"
-rustls = "0.19.1"
-redis = {version = "0.21.2", features = ["aio", "tokio-comp"]}
-bitflags = "1.2.1"
-serde_json = "1.0.68"
-log = "0.4.14"
+thiserror = { workspace = true }
+messagebus = { workspace = true }
+tokio = { workspace = true, features = ["parking_lot", "rt-multi-thread", "sync", "time", "io-util"] }
+parking_lot = { workspace = true }
+quinn = { workspace = true }
+erased-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+futures = { workspace = true }
+pin-project-lite = { workspace = true }
+serde_cbor = { workspace = true }
+bytes = { workspace = true }
+quinn-proto = { workspace = true }
+rustls = { workspace = true }
+redis = { workspace = true, features = ["aio", "tokio-comp"] }
+bitflags = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-anyhow = "1.0.44"
-async-trait = "0.1.51"
-thiserror = "1.0.29"
-tokio = { version = "1.11.0", features = ["full"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 # quinn = { version = "0.7", optional = true }
 

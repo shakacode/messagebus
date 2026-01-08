@@ -275,7 +275,7 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     let init_impl = if tags.has_shared && impl_generics.params.is_empty() {
         quote! {
             #[allow(non_upper_case_globals)]
-            #[messagebus::ctor::ctor]
+            #[messagebus::__reexport::ctor::ctor]
             fn #init() {
                 messagebus::register_shared_message::<#name>();
             }

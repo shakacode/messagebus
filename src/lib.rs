@@ -1,7 +1,99 @@
+//! # MessageBus
+//!
+//! An async message bus library for Rust, inspired by Actix. It enables actor-style
+//! communication between components using typed messages routed through receivers.
+//!
+//! ## Overview
+//!
+//! MessageBus provides a flexible, type-safe message passing system that supports:
+//!
+//! - **Multiple handler types**: synchronous, asynchronous, batched, and synchronized handlers
+//! - **Broadcast messaging**: send messages to all registered receivers
+//! - **Request/Response patterns**: send a message and await a typed response
+//! - **Serialization support**: messages can be serialized for remote transport
+//! - **Backpressure handling**: built-in support for handling full queues
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use messagebus::{Bus, AsyncHandler, Message, derive::Message, error};
+//! use async_trait::async_trait;
+//!
+//! // Define a message type
+//! #[derive(Debug, Clone, Message)]
+//! struct MyMessage(String);
+//!
+//! // Define a handler
+//! struct MyHandler;
+//!
+//! #[async_trait]
+//! impl AsyncHandler<MyMessage> for MyHandler {
+//!     type Error = error::GenericError;
+//!     type Response = ();
+//!
+//!     async fn handle(&self, msg: MyMessage, _bus: &Bus) -> Result<(), Self::Error> {
+//!         println!("Received: {}", msg.0);
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let (bus, poller) = Bus::build()
+//!         .register(MyHandler)
+//!         .subscribe_async::<MyMessage>(8, Default::default())
+//!         .done()
+//!         .build();
+//!
+//!     bus.send(MyMessage("Hello!".to_string())).await.unwrap();
+//!     bus.flush_all().await;
+//!     bus.close().await;
+//!     poller.await;
+//! }
+//! ```
+//!
+//! ## Handler Types
+//!
+//! ### Thread-Safe Handlers (Send+Sync)
+//!
+//! | Handler | Batched | Async | Use Case |
+//! |---------|---------|-------|----------|
+//! | [`Handler`] | No | No | Simple sync processing |
+//! | [`AsyncHandler`] | No | Yes | Async I/O operations |
+//! | [`BatchHandler`] | Yes | No | Bulk sync processing |
+//! | [`AsyncBatchHandler`] | Yes | Yes | Bulk async processing |
+//!
+//! ### Synchronized Handlers (Send only)
+//!
+//! | Handler | Batched | Async | Use Case |
+//! |---------|---------|-------|----------|
+//! | [`SynchronizedHandler`] | No | No | Mutable state (sync) |
+//! | [`AsyncSynchronizedHandler`] | No | Yes | Mutable state (async) |
+//! | [`BatchSynchronizedHandler`] | Yes | No | Batched mutable state |
+//! | [`AsyncBatchSynchronizedHandler`] | Yes | Yes | Batched async mutable state |
+//!
+//! ### Local Handlers (no Send/Sync)
+//!
+//! | Handler | Batched | Async | Use Case |
+//! |---------|---------|-------|----------|
+//! | [`LocalHandler`] | No | No | Thread-local sync |
+//! | [`LocalAsyncHandler`] | No | Yes | Thread-local async |
+//! | [`LocalBatchHandler`] | Yes | No | Thread-local batched sync |
+//! | [`LocalAsyncBatchHandler`] | Yes | Yes | Thread-local batched async |
+//!
+//! ## Message Derive Macro
+//!
+//! Use `#[derive(Message)]` with optional attributes:
+//!
+//! - `#[message(clone)]` - Enable message cloning for broadcast
+//! - `#[message(shared)]` - Enable serialization for remote transport
+//! - `#[type_tag("custom::name")]` - Custom type identifier
+//! - `#[namespace("my_namespace")]` - Type tag namespace prefix
+
 mod builder;
 mod envelop;
 pub mod error;
-mod handler;
+pub mod handler;
 mod receiver;
 pub mod receivers;
 mod relay;
@@ -9,6 +101,7 @@ mod stats;
 mod trait_object;
 pub mod type_tag;
 
+#[doc(hidden)]
 pub mod __reexport {
     pub use ctor;
     pub use serde;
@@ -34,14 +127,11 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use builder::BusBuilder;
 use error::{Error, SendError, StdSyncSendError};
 use receiver::{Permit, Receiver};
-use stats::Stats;
 
 // public
-pub use builder::Module;
-pub use ctor;
+pub use builder::{BusBuilder, Module, RegisterEntry, SyncEntry, UnsyncEntry};
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
 pub use handler::*;
 pub use receiver::{
@@ -49,6 +139,7 @@ pub use receiver::{
     SendUntypedReceiver, TypeTagAccept, TypeTagAcceptItem,
 };
 pub use relay::Relay;
+pub use stats::Stats;
 pub use type_tag::{deserialize_shared_message, register_shared_message};
 pub type Untyped = Arc<dyn Any + Send + Sync>;
 
@@ -56,16 +147,76 @@ type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Options for controlling how messages are routed to receivers.
+///
+/// By default, messages are broadcast to all receivers that handle the message type.
+/// Use these options to customize routing behavior.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, SendOptions, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct Msg(String);
+///
+/// struct Handler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<Msg> for Handler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let (bus, poller) = Bus::build()
+///         .register(Handler)
+///         .subscribe_async::<Msg>(8, Default::default())
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+///     bus.ready().await;
+///
+///     let msg = Msg("hello".into());
+///     // Send to all receivers (default)
+///     bus.send(msg.clone()).await?;
+///     // Send with explicit options
+///     bus.send_ext(msg, SendOptions::Broadcast).await?;
+///
+///     bus.close().await;
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SendOptions {
+    /// Send the message to all registered receivers for this message type.
+    /// This is the default behavior.
     #[default]
     Broadcast,
+
+    /// Send to all receivers except the one with the specified ID.
+    /// Useful for avoiding message loops when forwarding.
     Except(u64),
+
+    /// Send only to the receiver with the specified ID.
+    /// The message will not be delivered if no receiver matches.
     Direct(u64),
+
+    /// Select a random receiver from the available receivers.
+    /// Useful for load distribution.
     Random,
+
+    /// Select the receiver with the least load.
+    /// Useful for load balancing across multiple receivers.
     Balanced,
 }
 
+/// Internal state of the message bus. Not intended for direct use.
 pub struct BusInner {
     receivers: HashSet<Receiver>,
     lookup: HashMap<LookupQuery, SmallVec<[Receiver; 4]>>,
@@ -116,36 +267,166 @@ impl BusInner {
     }
 }
 
+/// The central message dispatcher that routes messages to receivers.
+///
+/// `Bus` is the main entry point for sending messages in the messagebus system.
+/// It maintains a registry of receivers and routes messages to them based on
+/// their type.
+///
+/// # Creating a Bus
+///
+/// Use [`Bus::build()`] to create a new bus with the builder pattern:
+///
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncHandler, error};
+/// use messagebus::derive::Message;
+/// use async_trait::async_trait;
+///
+/// #[derive(Debug, Clone, Message)]
+/// struct MyMessage(String);
+///
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl AsyncHandler<MyMessage> for MyHandler {
+///     type Error = error::GenericError;
+///     type Response = ();
+///     async fn handle(&self, _: MyMessage, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyHandler)
+///         .subscribe_async::<MyMessage>(8, Default::default())
+///         .done()
+///         .build();
+///
+///     // The poller future must be awaited to process messages
+///     tokio::spawn(poller);
+/// }
+/// ```
+///
+/// # Sending Messages
+///
+/// Messages can be sent in several ways:
+///
+/// - [`send()`](Bus::send) - Async send to all receivers (broadcast)
+/// - [`send_one()`](Bus::send_one) - Async send to one receiver
+/// - [`try_send()`](Bus::try_send) - Non-blocking send, fails if buffer full
+/// - [`force_send()`](Bus::force_send) - Send without waiting for buffer space
+/// - [`request()`](Bus::request) - Send and await a response
+///
+/// # Lifecycle
+///
+/// 1. Build the bus with receivers
+/// 2. Spawn the poller future
+/// 3. Send messages
+/// 4. Call [`flush_all()`](Bus::flush_all) to ensure all messages are processed
+/// 5. Call [`close()`](Bus::close) to shut down
+/// 6. Await the poller to complete
 #[derive(Clone)]
 pub struct Bus {
     inner: Arc<BusInner>,
 }
 
 impl Bus {
+    /// Creates a new [`BusBuilder`] for constructing a bus.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// struct Msg;
+    ///
+    /// struct MyHandler;
+    /// #[async_trait]
+    /// impl AsyncHandler<Msg> for MyHandler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// let (bus, poller) = Bus::build()
+    ///     .register(MyHandler)
+    ///     .subscribe_async::<Msg>(8, Default::default())
+    ///     .done()
+    ///     .build();
+    /// ```
     #[inline]
     pub fn build() -> BusBuilder {
         BusBuilder::new()
     }
 
+    /// Returns `true` if the bus is in the process of closing.
+    ///
+    /// Once closing begins, new messages will be rejected with a `Closed` error.
     pub fn is_closing(&self) -> bool {
-        self.inner.closed.load(Ordering::SeqCst)
+        self.inner.closed.load(Ordering::Acquire)
     }
 
     pub(crate) fn init(&self) {
         for r in self.inner.receivers.iter() {
-            r.init(self).unwrap();
+            r.init(self).expect("failed to initialize receiver");
         }
     }
 
+    /// Waits for all receivers to be ready to accept messages.
+    ///
+    /// This is typically called automatically during bus initialization.
     pub async fn ready(&self) {
         for r in self.inner.receivers.iter() {
             r.ready().await;
         }
     }
 
+    /// Closes the bus, stopping all receivers.
+    ///
+    /// After calling close:
+    /// - No new messages will be accepted
+    /// - Existing messages in queues will be processed
+    /// - All receivers will be shut down
+    ///
+    /// You should await the poller future after closing to ensure clean shutdown.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// struct Msg;
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<Msg> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(Handler)
+    ///         .subscribe_async::<Msg>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     let handle = tokio::spawn(poller);
+    ///
+    ///     bus.flush_all().await;  // Ensure all messages are processed
+    ///     bus.close().await;       // Shut down the bus
+    ///     handle.await.unwrap();   // Wait for complete shutdown
+    /// }
+    /// ```
     pub async fn close(&self) {
         let _handle = self.inner.maintain.lock().await;
-        self.inner.closed.store(true, Ordering::SeqCst);
+        self.inner.closed.store(true, Ordering::Release);
 
         for r in self.inner.receivers.iter() {
             let err = tokio::time::timeout(Duration::from_secs(20), r.close(self)).await;
@@ -156,6 +437,58 @@ impl Bus {
         }
     }
 
+    /// Flushes all pending messages across all receivers.
+    ///
+    /// This method ensures that all messages currently in receiver queues are processed.
+    /// It repeatedly flushes until no more messages need flushing, with a maximum of
+    /// 32 iterations to prevent infinite loops.
+    ///
+    /// Call this before [`close()`](Bus::close) to ensure all messages are processed.
+    ///
+    /// # Important: Avoiding Deadlocks
+    ///
+    /// Do not call this method from within a message handler. Flushing waits for
+    /// in-flight handlers to complete, so calling flush from inside a handler creates
+    /// a circular dependency that will deadlock.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct Msg(i32);
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<Msg> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: Msg, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(Handler)
+    ///         .subscribe_async::<Msg>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     tokio::spawn(poller);
+    ///     bus.ready().await;
+    ///
+    ///     // Send some messages
+    ///     bus.send(Msg(1)).await?;
+    ///     bus.send(Msg(2)).await?;
+    ///
+    ///     // Wait for all messages to be processed
+    ///     bus.flush_all().await;
+    ///     bus.close().await;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn flush_all(&self) {
         let fuse_count = 32i32;
         let mut breaked = false;
@@ -165,7 +498,10 @@ impl Bus {
             iters += 1;
             let mut flushed = false;
             for r in self.inner.receivers.iter() {
-                if r.need_flush() {
+                // Use !is_idling() instead of need_flush() to avoid race condition
+                // where need_flush flag could be cleared while messages are still
+                // being processed. is_idling() checks the processing counter directly.
+                if !r.is_idling() {
                     flushed = true;
 
                     r.flush(self).await;
@@ -188,6 +524,16 @@ impl Bus {
         }
     }
 
+    /// Flushes pending messages for a specific message type.
+    ///
+    /// Only receivers handling message type `M` will be flushed.
+    ///
+    /// # Important: Avoiding Deadlocks
+    ///
+    /// Do not call this method from within a handler that processes the same message
+    /// type `M`. Flushing waits for in-flight handlers to complete, so calling
+    /// `flush::<M>()` from inside a handler for `M` creates a circular dependency
+    /// that will deadlock. Flushing a *different* message type is safe.
     pub async fn flush<M: Message>(&self) {
         let fuse_count = 32i32;
         let mut breaked = false;
@@ -199,7 +545,8 @@ impl Bus {
             iters += 1;
             let mut flushed = false;
             for r in receivers {
-                if r.need_flush() {
+                // Use !is_idling() instead of need_flush() to avoid race condition
+                if !r.is_idling() {
                     flushed = true;
 
                     r.flush(self).await;
@@ -236,7 +583,8 @@ impl Bus {
             iters += 1;
             let mut flushed = false;
             for r in receivers1.chain(receivers2) {
-                if r.need_flush() {
+                // Use !is_idling() instead of need_flush() to avoid race condition
+                if !r.is_idling() {
                     flushed = true;
 
                     r.flush(self).await;
@@ -362,17 +710,59 @@ impl Bus {
         Some(permits)
     }
 
+    /// Attempts to send a message without blocking.
+    ///
+    /// Returns immediately with an error if the receiver's buffer is full.
+    /// The message is broadcast to all receivers handling type `M`.
+    ///
+    /// # Errors
+    ///
+    /// - [`SendError::Full`] - Buffer is full, message not sent
+    /// - [`SendError::Closed`] - Bus is closed
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct MyMessage(String);
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<MyMessage> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: MyMessage, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// let (bus, _poller) = Bus::build()
+    ///     .register(Handler)
+    ///     .subscribe_async::<MyMessage>(8, Default::default())
+    ///     .done()
+    ///     .build();
+    ///
+    /// match bus.try_send(MyMessage("test".into())) {
+    ///     Ok(()) => println!("Sent!"),
+    ///     Err(e) => println!("Failed: {:?}", e),
+    /// }
+    /// ```
     #[inline]
     pub fn try_send<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.try_send_ext(msg, SendOptions::Broadcast)
     }
 
+    /// Attempts to send a message with routing options without blocking.
+    ///
+    /// Like [`try_send()`](Bus::try_send) but with explicit [`SendOptions`].
     pub fn try_send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -391,7 +781,9 @@ impl Bus {
             let total = rs.len();
 
             while counter < total {
-                let (p, r) = iter.next().unwrap();
+                let (p, r) = iter
+                    .next()
+                    .expect("iterator should have more elements based on counter");
                 let _ = r.send(self, mid, msg.clone(), false, p);
 
                 counter += 1;
@@ -411,11 +803,22 @@ impl Bus {
         Ok(())
     }
 
+    /// Sends a message synchronously, blocking the current thread.
+    ///
+    /// This is useful when you need to send from a non-async context.
+    /// The message is broadcast to all receivers handling type `M`.
+    ///
+    /// # Warning
+    ///
+    /// This blocks the current thread. Avoid using in async contexts.
     #[inline]
     pub fn send_blocking<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.send_blocking_ext(msg, SendOptions::Broadcast)
     }
 
+    /// Sends a message synchronously with routing options.
+    ///
+    /// Like [`send_blocking()`](Bus::send_blocking) but with explicit [`SendOptions`].
     #[inline]
     pub fn send_blocking_ext<M: Message + Clone>(
         &self,
@@ -425,17 +828,63 @@ impl Bus {
         futures::executor::block_on(self.send_ext(msg, options))
     }
 
+    /// Sends a message asynchronously to all receivers.
+    ///
+    /// This is the primary method for sending messages. It broadcasts the message
+    /// to all receivers that handle message type `M`. The method waits for buffer
+    /// space if needed.
+    ///
+    /// # Errors
+    ///
+    /// - [`SendError::Closed`] - Bus is closed
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// #[message(clone)]
+    /// struct MyMessage(String);
+    /// struct Handler;
+    /// #[async_trait]
+    /// impl AsyncHandler<MyMessage> for Handler {
+    ///     type Error = error::GenericError;
+    ///     type Response = ();
+    ///     async fn handle(&self, _: MyMessage, _: &Bus) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(Handler)
+    ///         .subscribe_async::<MyMessage>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     tokio::spawn(poller);
+    ///     bus.ready().await;
+    ///
+    ///     bus.send(MyMessage("hello".into())).await?;
+    ///     bus.close().await;
+    ///     Ok(())
+    /// }
+    /// ```
     #[inline]
     pub async fn send<M: Message + Clone>(&self, msg: M) -> core::result::Result<(), Error<M>> {
         self.send_ext(msg, SendOptions::Broadcast).await
     }
 
+    /// Sends a message asynchronously with routing options.
+    ///
+    /// Like [`send()`](Bus::send) but with explicit [`SendOptions`].
     pub async fn send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -462,17 +911,28 @@ impl Bus {
         Ok(())
     }
 
+    /// Forces a message to be sent, bypassing backpressure.
+    ///
+    /// Unlike [`try_send()`](Bus::try_send), this will send the message even if
+    /// buffers are full. Use with caution as it can cause memory growth.
+    ///
+    /// # Errors
+    ///
+    /// - [`SendError::Closed`] - Bus is closed
     #[inline]
     pub fn force_send<M: Message + Clone>(&self, msg: M) -> Result<(), Error<M>> {
         self.force_send_ext(msg, SendOptions::Broadcast)
     }
 
+    /// Forces a message to be sent with routing options, bypassing backpressure.
+    ///
+    /// Like [`force_send()`](Bus::force_send) but with explicit [`SendOptions`].
     pub fn force_send_ext<M: Message + Clone>(
         &self,
         msg: M,
         _options: SendOptions,
     ) -> core::result::Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -498,9 +958,19 @@ impl Bus {
         Ok(())
     }
 
+    /// Attempts to send a message to a single receiver without blocking.
+    ///
+    /// Unlike [`try_send()`](Bus::try_send) which broadcasts, this sends to only
+    /// one receiver. Returns an error if the buffer is full.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`SendError::Full`] - Buffer is full
+    /// - [`SendError::Closed`] - Bus is closed
     #[inline]
     pub fn try_send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -525,8 +995,17 @@ impl Bus {
         }
     }
 
+    /// Sends a message to a single receiver asynchronously.
+    ///
+    /// Unlike [`send()`](Bus::send) which broadcasts, this sends to only one receiver.
+    /// Waits for buffer space if needed.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn send_one<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -545,11 +1024,66 @@ impl Bus {
         }
     }
 
+    /// Sends a message to a single receiver synchronously, blocking the current thread.
     #[inline]
     pub fn send_one_blocking<M: Message>(&self, msg: M) -> Result<(), Error<M>> {
         futures::executor::block_on(self.send_one(msg))
     }
 
+    /// Sends a request message and waits for a typed response.
+    ///
+    /// This implements the request/response pattern. The message is sent to a receiver,
+    /// and the method waits for that receiver to return a response of type `R`.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `M` - The request message type
+    /// - `R` - The expected response type
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Receiver did not respond
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, AsyncHandler, error};
+    /// use messagebus::derive::Message;
+    /// use async_trait::async_trait;
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// struct GetUser(u64);
+    ///
+    /// #[derive(Debug, Clone, Message)]
+    /// struct User { name: String }
+    ///
+    /// struct UserHandler;
+    /// #[async_trait]
+    /// impl AsyncHandler<GetUser> for UserHandler {
+    ///     type Error = error::GenericError;
+    ///     type Response = User;
+    ///     async fn handle(&self, msg: GetUser, _: &Bus) -> Result<User, Self::Error> {
+    ///         Ok(User { name: format!("User{}", msg.0) })
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (bus, poller) = Bus::build()
+    ///         .register(UserHandler)
+    ///         .subscribe_async::<GetUser>(8, Default::default())
+    ///         .done()
+    ///         .build();
+    ///     tokio::spawn(poller);
+    ///     bus.ready().await;
+    ///
+    ///     let user: User = bus.request(GetUser(123), Default::default()).await?;
+    ///     println!("Got user: {}", user.name);
+    ///     bus.close().await;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn request<M: Message, R: Message>(
         &self,
         req: M,
@@ -573,6 +1107,16 @@ impl Bus {
         }
     }
 
+    /// Sends a request message and waits for a typed response with explicit error type.
+    ///
+    /// Like [`request()`](Bus::request) but allows specifying a custom error type `E`
+    /// that the handler may return.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `M` - The request message type
+    /// - `R` - The expected response type
+    /// - `E` - The error type the handler may return
     pub async fn request_we<M, R, E>(&self, req: M, options: SendOptions) -> Result<R, Error<M, E>>
     where
         M: Message,
@@ -610,7 +1154,7 @@ impl Bus {
         msg: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -624,7 +1168,8 @@ impl Bus {
             let _ = r.send_boxed(
                 self,
                 mid,
-                msg.try_clone_boxed().unwrap(),
+                msg.try_clone_boxed()
+                    .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
             );
@@ -634,7 +1179,8 @@ impl Bus {
             let _ = r.send_boxed(
                 self,
                 mid,
-                msg.try_clone_boxed().unwrap(),
+                msg.try_clone_boxed()
+                    .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
             );
@@ -650,7 +1196,7 @@ impl Bus {
         msg: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg).into());
         }
 
@@ -670,7 +1216,7 @@ impl Bus {
         req: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(req).into());
         }
 
@@ -702,7 +1248,7 @@ impl Bus {
         req: Box<dyn Message>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>, E>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(req).into());
         }
 
@@ -737,7 +1283,7 @@ impl Bus {
         de: &'b mut dyn erased_serde::Deserializer<'c>,
         _options: SendOptions,
     ) -> Result<(), Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             warn!("closed message bus");
             return Err(Error::NoResponse);
         }
@@ -764,14 +1310,16 @@ impl Bus {
         de: &'b mut dyn erased_serde::Deserializer<'c>,
         options: SendOptions,
     ) -> Result<Box<dyn Message>, Error<Box<dyn Message>>> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.inner.closed.load(Ordering::Acquire) {
             warn!("closed message bus");
             return Err(Error::NoResponse);
         }
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
-            let (mid, rx) = rc.add_response_waiter_boxed().unwrap();
+            let (mid, rx) = rc
+                .add_response_waiter_boxed()
+                .expect("failed to add response waiter");
             let msg = deserialize_shared_message(tt.clone(), de)?;
 
             rc.send_boxed(
@@ -788,6 +1336,9 @@ impl Bus {
         }
     }
 
+    /// Returns statistics for all receivers in the bus.
+    ///
+    /// Useful for monitoring and debugging message throughput.
     pub fn stats(&self) -> impl Iterator<Item = Stats> + '_ {
         self.inner.receivers.iter().map(|x| x.stats())
     }

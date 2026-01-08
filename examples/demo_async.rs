@@ -17,22 +17,27 @@ impl<M: Message> From<error::Error<M>> for Error {
 struct TmpReceiver;
 struct TmpReceiver2;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgF32(f32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgU16(u16);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgU32(u32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgI32(i32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgI16(i16);

@@ -19,10 +19,12 @@ impl<M: Message> From<error::Error<M>> for Error {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgI32(i32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgI16(i16);

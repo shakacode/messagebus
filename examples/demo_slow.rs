@@ -16,12 +16,15 @@ impl<M: Message> From<error::Error<M>> for Error {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 struct MsgF32(pub f32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 struct MsgU32(pub u32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 struct MsgU16(pub u16);
 

@@ -22,10 +22,7 @@ pub struct MessageTable {
 impl MessageTable {
     #[inline]
     pub fn add_any(&mut self, req: TypeTag, resp_err: Option<(TypeTag, TypeTag)>) {
-        self.table
-            .entry(req)
-            .or_insert_with(Vec::new)
-            .push(resp_err);
+        self.table.entry(req).or_default().push(resp_err);
     }
 
     #[inline]
@@ -51,7 +48,7 @@ impl MessageTable {
     pub fn accept_message(&self, msg: &TypeTag) -> bool {
         self.table
             .get(msg)
-            .map_or(false, |v| v.iter().any(Option::is_none))
+            .is_some_and(|v| v.iter().any(Option::is_none))
     }
 
     pub fn accept_request(
@@ -60,10 +57,10 @@ impl MessageTable {
         resp: Option<&TypeTag>,
         err: Option<&TypeTag>,
     ) -> bool {
-        self.table.get(msg).map_or(false, |v| {
+        self.table.get(msg).is_some_and(|v| {
             v.iter().filter_map(Option::as_ref).any(|(r, e)| {
-                resp.map_or(true, |resp| resp.as_ref() == r.as_ref())
-                    && err.map_or(true, |err| err.as_ref() == e.as_ref())
+                resp.is_none_or(|resp| resp.as_ref() == r.as_ref())
+                    && err.is_none_or(|err| err.as_ref() == e.as_ref())
             })
         })
     }
@@ -73,8 +70,7 @@ impl MessageTable {
     ) -> impl Iterator<Item = (&'_ TypeTag, Option<&'_ (TypeTag, TypeTag)>)> + '_ {
         self.table
             .iter()
-            .map(|(k, v)| v.iter().map(move |resp| (k, resp.as_ref())))
-            .flatten()
+            .flat_map(|(k, v)| v.iter().map(move |resp| (k, resp.as_ref())))
     }
 }
 

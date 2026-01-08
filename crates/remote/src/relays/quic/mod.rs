@@ -430,7 +430,7 @@ where
                                             let sender = sender.clone();
                                             let bus = bus.clone();
 
-                                            let _ = tokio::spawn(async move {
+                                            tokio::spawn(async move {
                                                 if req {
                                                     let res = bus
                                                         .request_boxed(

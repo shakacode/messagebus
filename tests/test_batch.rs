@@ -26,6 +26,7 @@ impl<M: Message> From<error::Error<M>> for Error {
 #[message(clone)]
 struct MsgI32(i32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[message(clone)]
 struct MsgI16(i16);
@@ -100,10 +101,12 @@ async fn test_batch() {
     println!("flush");
     b.flush_all().await;
 
-    let mut lock = batches.lock();
-    lock.sort_by(|a, b| a[0].cmp(&b[0]));
+    {
+        let mut lock = batches.lock();
+        lock.sort_by(|a, b| a[0].cmp(&b[0]));
 
-    assert_eq!(lock.as_slice(), re.as_slice());
+        assert_eq!(lock.as_slice(), re.as_slice());
+    }
 
     println!("close");
     b.close().await;

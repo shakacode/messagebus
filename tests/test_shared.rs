@@ -22,11 +22,11 @@ impl<M: Message> From<error::Error<M>> for Error {
     }
 }
 
-#[derive(Debug, Clone, serde_derive::Serialize, serde_derive::Deserialize, Message)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Message)]
 #[message(clone, shared)]
 struct Msg;
 
-#[derive(Debug, Clone, serde_derive::Serialize, serde_derive::Deserialize, Message)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Message)]
 #[message(clone, shared)]
 struct SharedMsg<T>(T);
 

@@ -4,7 +4,7 @@ mod sync;
 use std::sync::atomic::AtomicU64;
 
 pub use r#async::BufferUnorderedBatchedAsync;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 pub use sync::BufferUnorderedBatchedSync;
 
 #[allow(dead_code)]
@@ -18,11 +18,79 @@ pub struct BufferUnorderedBatchedStats {
     pub batch_size: AtomicU64,
 }
 
+/// Configuration for concurrent batched receivers.
+///
+/// Used with [`BatchHandler`](crate::BatchHandler) and [`AsyncBatchHandler`](crate::AsyncBatchHandler)
+/// when subscribing with `subscribe_batch_sync` or `subscribe_batch_async`.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use messagebus::{Bus, AsyncBatchHandler};
+/// use messagebus::derive::{Message, Error as MbError};
+/// use messagebus::receivers::BufferUnorderedBatchedConfig;
+/// use async_trait::async_trait;
+/// use thiserror::Error;
+///
+/// #[derive(Debug, Clone, Error, MbError)]
+/// enum BatchError {
+///     #[error("Batch processing failed")]
+///     Failed,
+/// }
+///
+/// #[derive(Debug, Clone, Message)]
+/// #[message(clone)]
+/// struct MyMessage(String);
+///
+/// struct MyBatchHandler;
+///
+/// #[async_trait]
+/// impl AsyncBatchHandler<MyMessage> for MyBatchHandler {
+///     type Error = BatchError;
+///     type Response = ();
+///     type InBatch = Vec<MyMessage>;
+///     type OutBatch = Vec<()>;
+///
+///     async fn handle(&self, msgs: Vec<MyMessage>, _bus: &Bus) -> Result<Vec<()>, Self::Error> {
+///         Ok(vec![(); msgs.len()])
+///     }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let (bus, poller) = Bus::build()
+///         .register(MyBatchHandler)
+///         .subscribe_batch_async::<MyMessage>(64, BufferUnorderedBatchedConfig {
+///             batch_size: 100,
+///             max_parallel: 4,
+///             ..Default::default()
+///         })
+///         .done()
+///         .build();
+///     tokio::spawn(poller);
+/// }
+/// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct BufferUnorderedBatchedConfig {
+    /// Size of the internal message buffer.
+    ///
+    /// Higher values allow more messages to be queued. Default: 8
     pub buffer_size: usize,
+
+    /// Maximum number of batches to process concurrently.
+    ///
+    /// Controls parallelism. Default: 2
     pub max_parallel: usize,
+
+    /// Number of messages per batch.
+    ///
+    /// Messages are collected until this count is reached, then processed together.
+    /// Default: 8
     pub batch_size: usize,
+
+    /// If true, process partial batches immediately when available.
+    ///
+    /// Default: false (wait for full batches except on flush)
     pub when_ready: bool,
 }
 
@@ -52,7 +120,9 @@ macro_rules! buffer_unordered_batch_poller_macro {
             M: Message,
             R: Message,
         {
-            let ut = ut.downcast::<$t>().unwrap();
+            let ut = ut
+                .downcast::<$t>()
+                .expect("handler type mismatch - this is a bug");
             let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
             let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
@@ -81,7 +151,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         }
                     }
                     Request::Action(Action::Init(..)) => {
-                        stx.send(Event::Ready).unwrap();
+                        let _ = stx.send(Event::Ready);
                     }
                     Request::Action(Action::Close) => {
                         rx.close();
@@ -100,7 +170,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         }
 
                         let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
-                        stx_clone.send(Event::Flushed).unwrap();
+                        let _ = stx_clone.send(Event::Flushed);
                     }
 
                     Request::Action(Action::Sync) => {
@@ -110,8 +180,7 @@ macro_rules! buffer_unordered_batch_poller_macro {
                         let resp = ($st2)(bus.clone(), ut.clone()).await;
                         drop(lock);
 
-                        stx.send(Event::Synchronized(resp.map_err(Error::Other)))
-                            .unwrap();
+                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
                     }
 
                     _ => unimplemented!(),

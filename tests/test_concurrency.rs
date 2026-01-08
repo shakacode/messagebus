@@ -27,6 +27,7 @@ impl<M: Message> From<error::Error<M>> for Error {
 #[derive(Debug, Clone, Message)]
 struct Req(pub u32);
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 struct Resp(pub u32);
 

@@ -75,7 +75,8 @@ use serde::{Deserialize, Serialize};
 pub struct SynchronizedBatchedConfig {
     /// Size of the internal message buffer.
     ///
-    /// Higher values allow more messages to be queued. Default: 4
+    /// **Note:** Currently not enforced (unbounded channels are used internally).
+    /// Reserved for future implementation of backpressure. Default: 4
     pub buffer_size: usize,
 
     /// Number of messages per batch.
@@ -86,7 +87,8 @@ pub struct SynchronizedBatchedConfig {
 
     /// If true, process partial batches immediately when available.
     ///
-    /// Default: false (wait for full batches except on flush)
+    /// **Note:** Currently not implemented. Batches are only processed when
+    /// `batch_size` is reached or on flush/sync. Default: false
     pub when_ready: bool,
 }
 

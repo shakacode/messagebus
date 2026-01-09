@@ -54,8 +54,8 @@ use serde::{Deserialize, Serialize};
 pub struct BufferUnorderedConfig {
     /// Size of the internal message buffer.
     ///
-    /// Higher values allow more messages to be queued before backpressure.
-    /// Default: 8
+    /// **Note:** Currently not enforced (unbounded channels are used internally).
+    /// Reserved for future implementation of backpressure. Default: 8
     pub buffer_size: usize,
 
     /// Maximum number of messages to process concurrently.

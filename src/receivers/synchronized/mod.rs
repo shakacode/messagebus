@@ -57,8 +57,8 @@ use serde::{Deserialize, Serialize};
 pub struct SynchronizedConfig {
     /// Size of the internal message buffer.
     ///
-    /// Since messages are processed sequentially, this determines how many
-    /// can be queued while waiting. Default: 1
+    /// **Note:** Currently not enforced (unbounded channels are used internally).
+    /// Reserved for future implementation of backpressure. Default: 1
     pub buffer_size: usize,
 }
 

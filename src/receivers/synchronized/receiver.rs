@@ -58,10 +58,14 @@ async fn synchronized_poller<T, M, R, E, Mode>(
         .downcast::<Mutex<T>>()
         .expect("handler type mismatch - this is a bug");
 
+    let mut pending_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     while let Some(msg) = rx.recv().await {
         match msg {
             Request::Request(mid, msg, _req) => {
-                Mode::spawn_handler(handler.clone(), msg, bus.clone(), stx.clone(), mid);
+                let handle =
+                    Mode::spawn_handler(handler.clone(), msg, bus.clone(), stx.clone(), mid);
+                pending_tasks.push(handle);
             }
 
             Request::Action(Action::Init(..)) => {
@@ -69,14 +73,26 @@ async fn synchronized_poller<T, M, R, E, Mode>(
             }
 
             Request::Action(Action::Close) => {
+                // Wait for all pending tasks before closing
+                for handle in pending_tasks.drain(..) {
+                    let _ = handle.await;
+                }
                 rx.close();
             }
 
             Request::Action(Action::Flush) => {
+                // Wait for all pending tasks to complete
+                for handle in pending_tasks.drain(..) {
+                    let _ = handle.await;
+                }
                 let _ = stx.send(Event::Flushed);
             }
 
             Request::Action(Action::Sync) => {
+                // Wait for pending tasks before sync
+                for handle in pending_tasks.drain(..) {
+                    let _ = handle.await;
+                }
                 let resp = Mode::call_sync(handler.clone(), bus.clone()).await;
                 let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
             }

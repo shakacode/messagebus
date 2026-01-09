@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use futures::executor::block_on;
-use tokio::sync::{mpsc::UnboundedSender, Mutex};
+use tokio::{
+    sync::{mpsc::UnboundedSender, Mutex},
+    task::JoinHandle,
+};
 
 use crate::{
     error::{Error, StdSyncSendError},
@@ -19,14 +22,14 @@ where
     R: Message,
     E: StdSyncSendError,
 {
-    /// Spawn a task to handle the message.
+    /// Spawn a task to handle the message. Returns a handle to await completion.
     fn spawn_handler(
         handler: Arc<Mutex<T>>,
         msg: M,
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
-    );
+    ) -> JoinHandle<()>;
 
     /// Call the handler's sync method.
     fn call_sync(
@@ -54,7 +57,7 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
-    ) {
+    ) -> JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
             let resp = block_on(handler.lock()).handle(msg, &bus);
             if let Err(err) = &resp {
@@ -67,7 +70,7 @@ where
             {
                 log::trace!("failed to send response - channel closed during shutdown");
             }
-        });
+        })
     }
 
     async fn call_sync(handler: Arc<Mutex<T>>, bus: Bus) -> Result<(), E> {
@@ -90,7 +93,7 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
-    ) {
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let resp = handler.lock().await.handle(msg, &bus).await;
             if let Err(err) = &resp {
@@ -103,7 +106,7 @@ where
             {
                 log::trace!("failed to send response - channel closed during shutdown");
             }
-        });
+        })
     }
 
     async fn call_sync(handler: Arc<Mutex<T>>, bus: Bus) -> Result<(), E> {

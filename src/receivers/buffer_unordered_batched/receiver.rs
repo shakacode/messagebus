@@ -93,6 +93,29 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
             }
 
             Request::Action(Action::Close) => {
+                // Process remaining buffered messages before shutdown
+                if !buffer_mid.is_empty() {
+                    let permit = semaphore
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .expect("semaphore closed unexpectedly");
+
+                    let batch_mids = mem::take(&mut buffer_mid);
+                    let batch_msgs = mem::take(&mut buffer);
+
+                    Mode::spawn_batch_handler(
+                        handler.clone(),
+                        batch_msgs,
+                        batch_mids,
+                        bus.clone(),
+                        stx.clone(),
+                        permit,
+                    );
+                }
+
+                // Wait for all in-flight tasks to complete
+                let _ = semaphore.acquire_many(cfg.max_parallel as _).await;
                 rx.close();
             }
 

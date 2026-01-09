@@ -51,6 +51,8 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
     E: StdSyncSendError,
     Mode: BatchExecutionMode<T, M, R, E>,
 {
+    assert!(cfg.max_parallel > 0, "max_parallel must be > 0");
+
     let handler = ut
         .downcast::<T>()
         .expect("handler type mismatch - this is a bug");

@@ -65,7 +65,7 @@ pub struct BufferUnorderedBatchedConfig {
 
     /// Maximum number of batches to process concurrently.
     ///
-    /// Controls parallelism. Default: 2
+    /// Controls parallelism. Must be > 0 (panics at runtime if 0). Default: 2
     pub max_parallel: usize,
 
     /// Number of messages per batch.

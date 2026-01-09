@@ -60,7 +60,8 @@ pub struct BufferUnorderedConfig {
 
     /// Maximum number of messages to process concurrently.
     ///
-    /// Controls parallelism for async handlers. Default: 8
+    /// Controls parallelism for async handlers. Must be > 0 (panics at runtime if 0).
+    /// Default: 8
     pub max_parallel: usize,
 }
 

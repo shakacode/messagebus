@@ -22,9 +22,18 @@ use crate::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
     },
-    receivers::Request,
+    receivers::{
+        common::{create_event_stream, send_typed_message, send_untyped_action, MaybeSendStats},
+        Request,
+    },
     AsyncHandler, Bus, Handler, Message, Untyped,
 };
+
+impl MaybeSendStats for Arc<BufferUnorderedStats> {
+    fn on_send_success(&self) {
+        self.buffer.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Generic buffer unordered receiver that works with both sync and async handlers.
 ///
@@ -199,11 +208,7 @@ where
     Mode: Send + Sync + 'static,
 {
     fn send(&self, msg: Action, _bus: &Bus) -> Result<(), Error<Action>> {
-        match self.tx.send(Request::Action(msg)) {
-            Ok(_) => Ok(()),
-            Err(mpsc::error::SendError(Request::Action(msg))) => Err(Error::send_closed(msg)),
-            _ => unimplemented!(),
-        }
+        send_untyped_action(&self.tx, msg)
     }
 }
 
@@ -216,16 +221,7 @@ where
     Mode: Send + Sync + 'static,
 {
     fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        match self.tx.send(Request::Request(mid, m, req)) {
-            Ok(_) => {
-                self.stats.buffer.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            Err(mpsc::error::SendError(Request::Request(_, msg, _))) => {
-                Err(Error::send_closed(msg))
-            }
-            _ => unimplemented!(),
-        }
+        send_typed_message(&self.tx, &self.stats, mid, m, req)
     }
 }
 
@@ -240,7 +236,6 @@ where
     type Stream = Pin<Box<dyn Stream<Item = Event<R, E>> + Send>>;
 
     fn event_stream(&self, _: Bus) -> Self::Stream {
-        let mut rx = self.srx.lock().take().expect("event_stream called twice");
-        Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+        create_event_stream(&self.srx)
     }
 }

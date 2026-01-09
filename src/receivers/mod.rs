@@ -19,6 +19,8 @@
 //! - [`SynchronizedConfig`] - For synchronized handlers with mutable state
 //! - [`SynchronizedBatchedConfig`] - For synchronized batch handlers
 
+mod common;
+
 mod buffer_unordered;
 mod buffer_unordered_batched;
 mod synchronize_batched;

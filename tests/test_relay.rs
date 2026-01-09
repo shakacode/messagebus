@@ -202,3 +202,76 @@ async fn test_relay() {
     b.close().await;
     poller.await;
 }
+
+/// Test concurrent access to relay's try_reserve and reserve_notify.
+/// This validates the fix for the TOCTOU race condition in relay.rs where
+/// the check-then-insert-then-get pattern was replaced with atomic entry().
+///
+/// The test spawns concurrent tasks that simultaneously make requests through
+/// the relay, exercising the DashMap entry() API. If the old TOCTOU pattern
+/// were still present and entries could be removed, this would panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_relay_concurrent_access() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let (stx, srx) = mpsc::unbounded_channel();
+    let relay = TestRelay {
+        stx,
+        srx: Mutex::new(Some(srx)),
+    };
+
+    let (b, poller) = Bus::build().register_relay(relay).build();
+
+    let bus = Arc::new(b);
+    let success_count = Arc::new(AtomicUsize::new(0));
+
+    // Spawn concurrent tasks that all make requests simultaneously.
+    // This exercises the concurrent entry() access in try_reserve/reserve_notify.
+    // We use a small number of requests to keep the test fast.
+    let num_tasks = 16;
+    let mut handles = Vec::with_capacity(num_tasks);
+
+    for task_id in 0..num_tasks {
+        let bus = Arc::clone(&bus);
+        let success_count = Arc::clone(&success_count);
+
+        let handle = tokio::spawn(async move {
+            // Use two different message types to exercise concurrent access
+            // to different DashMap entries
+            let success = if task_id % 2 == 0 {
+                bus.request::<Msg<i32>, Msg<u64>>(Msg(task_id as i32), Default::default())
+                    .await
+                    .is_ok()
+            } else {
+                bus.request::<Msg<i16>, Msg<u8>>(Msg(task_id as i16), Default::default())
+                    .await
+                    .is_ok()
+            };
+
+            if success {
+                success_count.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all tasks - any panic here would indicate a race condition
+    for handle in handles {
+        handle
+            .await
+            .expect("Task panicked - possible race condition in relay!");
+    }
+
+    let total_success = success_count.load(Ordering::Relaxed);
+    assert_eq!(
+        total_success, num_tasks,
+        "Expected all {} requests to succeed, got {}",
+        num_tasks, total_success
+    );
+
+    bus.flush_all().await;
+    bus.close().await;
+    poller.await;
+}

@@ -70,17 +70,6 @@ macro_rules! impl_receiver_subscriber_builder {
     };
 }
 
-/// Trait for optional stats tracking on send.
-pub trait MaybeSendStats {
-    /// Called when a message is successfully sent. Default is no-op.
-    fn on_send_success(&self) {}
-}
-
-/// Marker type for receivers without stats.
-pub struct NoStats;
-
-impl MaybeSendStats for NoStats {}
-
 /// Sends an action through the request channel.
 ///
 /// This is the common implementation for `SendUntypedReceiver::send`.
@@ -98,18 +87,14 @@ pub fn send_untyped_action<M: Message>(
 /// Sends a typed message through the request channel.
 ///
 /// This is the common implementation for `SendTypedReceiver::send`.
-pub fn send_typed_message<M: Message, S: MaybeSendStats>(
+pub fn send_typed_message<M: Message>(
     sender: &mpsc::UnboundedSender<Request<M>>,
-    stats: &S,
     mid: u64,
     m: M,
     req: bool,
 ) -> Result<(), Error<M>> {
     match sender.send(Request::Request(mid, m, req)) {
-        Ok(_) => {
-            stats.on_send_success();
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(Error::send_closed(msg)),
         _ => unimplemented!(),
     }

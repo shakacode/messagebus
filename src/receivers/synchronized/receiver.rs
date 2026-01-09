@@ -15,7 +15,7 @@ use crate::{
         UntypedPollerCallback,
     },
     receivers::{
-        common::{create_event_stream, send_typed_message, send_untyped_action, NoStats},
+        common::{create_event_stream, send_typed_message, send_untyped_action},
         Request,
     },
     Bus, Message, Untyped,
@@ -154,7 +154,7 @@ where
     Mode: Send + Sync + 'static,
 {
     fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, &NoStats, mid, m, req)
+        send_typed_message(&self.tx, mid, m, req)
     }
 }
 

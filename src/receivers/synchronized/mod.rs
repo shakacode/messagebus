@@ -1,17 +1,8 @@
 mod execution;
 mod receiver;
 
-use std::sync::atomic::AtomicU64;
-
 pub use receiver::{SynchronizedAsync, SynchronizedSync};
 use serde::{Deserialize, Serialize};
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct SynchronizedStats {
-    pub buffer: AtomicU64,
-    pub buffer_total: AtomicU64,
-}
 
 /// Configuration for synchronized (sequential) receivers.
 ///

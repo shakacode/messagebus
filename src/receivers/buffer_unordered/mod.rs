@@ -1,19 +1,8 @@
 mod execution;
 mod receiver;
 
-use std::sync::atomic::AtomicU64;
-
 pub use receiver::{BufferUnorderedAsync, BufferUnorderedSync};
 use serde::{Deserialize, Serialize};
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct BufferUnorderedStats {
-    pub buffer: AtomicU64,
-    pub buffer_total: AtomicU64,
-    pub parallel: AtomicU64,
-    pub parallel_total: AtomicU64,
-}
 
 /// Configuration for concurrent (buffer unordered) receivers.
 ///

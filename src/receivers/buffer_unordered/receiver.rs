@@ -1,11 +1,4 @@
-use std::{
-    marker::PhantomData,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{marker::PhantomData, pin::Pin};
 
 use futures::{Future, Stream};
 use parking_lot::Mutex;
@@ -13,7 +6,7 @@ use tokio::sync::mpsc;
 
 use super::{
     execution::{AsyncExecution, ExecutionMode, SyncExecution},
-    BufferUnorderedConfig, BufferUnorderedStats,
+    BufferUnorderedConfig,
 };
 use crate::{
     error::{Error, StdSyncSendError},
@@ -22,17 +15,11 @@ use crate::{
         UntypedPollerCallback,
     },
     receivers::{
-        common::{create_event_stream, send_typed_message, send_untyped_action, MaybeSendStats},
+        common::{create_event_stream, send_typed_message, send_untyped_action},
         Request,
     },
     Bus, Message, Untyped,
 };
-
-impl MaybeSendStats for Arc<BufferUnorderedStats> {
-    fn on_send_success(&self) {
-        self.buffer.fetch_add(1, Ordering::Relaxed);
-    }
-}
 
 /// Generic buffer unordered receiver that works with both sync and async handlers.
 ///
@@ -46,7 +33,6 @@ where
     E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
-    stats: Arc<BufferUnorderedStats>,
     srx: Mutex<Option<mpsc::UnboundedReceiver<Event<R, E>>>>,
     _mode: PhantomData<Mode>,
 }
@@ -63,7 +49,6 @@ async fn buffer_unordered_poller<T, M, R, E, Mode>(
     mut rx: mpsc::UnboundedReceiver<Request<M>>,
     bus: Bus,
     ut: Untyped,
-    stats: Arc<BufferUnorderedStats>,
     cfg: BufferUnorderedConfig,
     stx: mpsc::UnboundedSender<Event<R, E>>,
 ) where
@@ -76,14 +61,11 @@ async fn buffer_unordered_poller<T, M, R, E, Mode>(
     let handler = ut
         .downcast::<T>()
         .expect("handler type mismatch - this is a bug");
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
     while let Some(msg) = rx.recv().await {
         match msg {
             Request::Request(mid, msg, _req) => {
-                stats.buffer.fetch_sub(1, Ordering::Relaxed);
-                stats.parallel.fetch_add(1, Ordering::Relaxed);
-
                 let permit = semaphore
                     .clone()
                     .acquire_owned()
@@ -133,26 +115,13 @@ where
     E: StdSyncSendError,
     Mode: ExecutionMode<T, M, R, E>,
 {
-    let stats = Arc::new(BufferUnorderedStats {
-        buffer: AtomicU64::new(0),
-        buffer_total: AtomicU64::new(cfg.buffer_size as _),
-        parallel: AtomicU64::new(0),
-        parallel_total: AtomicU64::new(cfg.max_parallel as _),
-    });
-
     let (stx, srx) = mpsc::unbounded_channel();
     let (tx, rx) = mpsc::unbounded_channel();
-    let stats_clone = stats.clone();
 
     let poller = Box::new(move |ut| {
         Box::new(move |bus| {
             Box::pin(buffer_unordered_poller::<T, M, R, E, Mode>(
-                rx,
-                bus,
-                ut,
-                stats_clone,
-                cfg,
-                stx,
+                rx, bus, ut, cfg, stx,
             )) as Pin<Box<dyn Future<Output = ()> + Send>>
         }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
     });
@@ -160,7 +129,6 @@ where
     (
         BufferUnordered {
             tx,
-            stats,
             srx: Mutex::new(Some(srx)),
             _mode: PhantomData,
         },
@@ -205,7 +173,7 @@ where
     Mode: Send + Sync + 'static,
 {
     fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, &self.stats, mid, m, req)
+        send_typed_message(&self.tx, mid, m, req)
     }
 }
 

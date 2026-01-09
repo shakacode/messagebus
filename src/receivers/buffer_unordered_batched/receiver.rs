@@ -1,12 +1,4 @@
-use std::{
-    marker::PhantomData,
-    mem,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{marker::PhantomData, mem, pin::Pin, sync::Arc};
 
 use futures::{Future, Stream};
 use parking_lot::Mutex;
@@ -14,7 +6,7 @@ use tokio::sync::mpsc;
 
 use super::{
     execution::{AsyncExecution, BatchExecutionMode, SyncExecution},
-    BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats,
+    BufferUnorderedBatchedConfig,
 };
 use crate::{
     error::{Error, StdSyncSendError},
@@ -23,17 +15,11 @@ use crate::{
         UntypedPollerCallback,
     },
     receivers::{
-        common::{create_event_stream, send_typed_message, send_untyped_action, MaybeSendStats},
+        common::{create_event_stream, send_typed_message, send_untyped_action},
         Request,
     },
     Bus, Message, Untyped,
 };
-
-impl MaybeSendStats for Arc<BufferUnorderedBatchedStats> {
-    fn on_send_success(&self) {
-        self.buffer.fetch_add(1, Ordering::Relaxed);
-    }
-}
 
 /// Generic buffer unordered batched receiver that works with both sync and async handlers.
 pub struct BufferUnorderedBatched<M, R, E, Mode>
@@ -43,7 +29,6 @@ where
     E: StdSyncSendError,
 {
     tx: mpsc::UnboundedSender<Request<M>>,
-    stats: Arc<BufferUnorderedBatchedStats>,
     srx: Mutex<Option<mpsc::UnboundedReceiver<Event<R, E>>>>,
     _mode: PhantomData<Mode>,
 }
@@ -57,7 +42,6 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
     mut rx: mpsc::UnboundedReceiver<Request<M>>,
     bus: Bus,
     ut: Untyped,
-    _stats: Arc<BufferUnorderedBatchedStats>,
     cfg: BufferUnorderedBatchedConfig,
     stx: mpsc::UnboundedSender<Event<R, E>>,
 ) where
@@ -162,28 +146,13 @@ where
     E: StdSyncSendError,
     Mode: BatchExecutionMode<T, M, R, E>,
 {
-    let stats = Arc::new(BufferUnorderedBatchedStats {
-        buffer: AtomicU64::new(0),
-        buffer_total: AtomicU64::new(cfg.buffer_size as _),
-        parallel: AtomicU64::new(0),
-        parallel_total: AtomicU64::new(cfg.max_parallel as _),
-        batch: AtomicU64::new(0),
-        batch_size: AtomicU64::new(cfg.batch_size as _),
-    });
-
     let (stx, srx) = mpsc::unbounded_channel();
     let (tx, rx) = mpsc::unbounded_channel();
-    let stats_clone = stats.clone();
 
     let poller = Box::new(move |ut| {
         Box::new(move |bus| {
             Box::pin(buffer_unordered_batch_poller::<T, M, R, E, Mode>(
-                rx,
-                bus,
-                ut,
-                stats_clone,
-                cfg,
-                stx,
+                rx, bus, ut, cfg, stx,
             )) as Pin<Box<dyn Future<Output = ()> + Send>>
         }) as Box<dyn FnOnce(Bus) -> Pin<Box<dyn Future<Output = ()> + Send>>>
     });
@@ -191,7 +160,6 @@ where
     (
         BufferUnorderedBatched {
             tx,
-            stats,
             srx: Mutex::new(Some(srx)),
             _mode: PhantomData,
         },
@@ -238,7 +206,7 @@ where
     Mode: Send + Sync + 'static,
 {
     fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, &self.stats, mid, m, req)
+        send_typed_message(&self.tx, mid, m, req)
     }
 }
 

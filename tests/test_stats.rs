@@ -100,9 +100,7 @@ impl AsyncBatchHandler<BatchStatsMsg> for BatchHandler {
         msgs: Vec<BatchStatsMsg>,
         _bus: &Bus,
     ) -> Result<Vec<Self::Response>, Self::Error> {
-        self.batches
-            .lock()
-            .push(msgs.iter().map(|m| m.0).collect());
+        self.batches.lock().push(msgs.iter().map(|m| m.0).collect());
 
         if let Some(ref barrier) = self.barrier {
             barrier.wait().await;

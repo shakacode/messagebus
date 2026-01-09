@@ -194,18 +194,14 @@ where
     }
 
     fn try_reserve(&self, tt: &TypeTag) -> Option<Permit> {
-        if !self.context.receivers.contains_key(tt) {
-            self.context
-                .receivers
-                .insert(tt.clone(), Arc::new(RelayReceiverContext::new(16)));
-        }
+        let context = self
+            .context
+            .receivers
+            .entry(tt.clone())
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(16)))
+            .clone();
 
         loop {
-            let context = self
-                .context
-                .receivers
-                .get(tt)
-                .expect("receiver context was just inserted");
             let count = context.processing.load(Ordering::Relaxed);
 
             if count < context.limit {
@@ -230,16 +226,10 @@ where
     }
 
     fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify> {
-        if !self.context.receivers.contains_key(tt) {
-            self.context
-                .receivers
-                .insert(tt.clone(), Arc::new(RelayReceiverContext::new(16)));
-        }
-
         self.context
             .receivers
-            .get(tt)
-            .expect("receiver context was just inserted")
+            .entry(tt.clone())
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(16)))
             .response
             .clone()
     }

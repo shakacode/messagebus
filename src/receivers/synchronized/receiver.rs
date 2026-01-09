@@ -9,7 +9,6 @@ use super::{
     SynchronizedConfig,
 };
 use crate::{
-    builder::ReceiverSubscriberBuilder,
     error::{Error, StdSyncSendError},
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
@@ -19,7 +18,7 @@ use crate::{
         common::{create_event_stream, send_typed_message, send_untyped_action, NoStats},
         Request,
     },
-    AsyncSynchronizedHandler, Bus, Message, SynchronizedHandler, Untyped,
+    Bus, Message, Untyped,
 };
 
 /// Generic synchronized receiver that works with both sync and async handlers.
@@ -118,35 +117,20 @@ where
     )
 }
 
-// ReceiverSubscriberBuilder for sync handlers
-impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for SynchronizedSync<M, R, E>
-where
-    T: SynchronizedHandler<M, Response = R, Error = E> + 'static,
-    M: Message,
-    R: Message,
-    E: StdSyncSendError,
-{
-    type Config = SynchronizedConfig;
+// ReceiverSubscriberBuilder implementations via macro
+crate::impl_receiver_subscriber_builder!(
+    SynchronizedSync<M, R, E>,
+    SynchronizedHandler,
+    SynchronizedConfig,
+    SyncExecution
+);
 
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, E, SyncExecution>(cfg)
-    }
-}
-
-// ReceiverSubscriberBuilder for async handlers
-impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for SynchronizedAsync<M, R, E>
-where
-    T: AsyncSynchronizedHandler<M, Response = R, Error = E> + 'static,
-    M: Message,
-    R: Message,
-    E: StdSyncSendError,
-{
-    type Config = SynchronizedConfig;
-
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, E, AsyncExecution>(cfg)
-    }
-}
+crate::impl_receiver_subscriber_builder!(
+    SynchronizedAsync<M, R, E>,
+    AsyncSynchronizedHandler,
+    SynchronizedConfig,
+    AsyncExecution
+);
 
 // SendUntypedReceiver - generic over Mode, written once
 impl<M, R, E, Mode> SendUntypedReceiver for Synchronized<M, R, E, Mode>

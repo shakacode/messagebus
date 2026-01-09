@@ -9,6 +9,67 @@ use parking_lot::Mutex as ParkingLotMutex;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 
+/// Macro to implement `ReceiverSubscriberBuilder` for receiver types.
+///
+/// This reduces boilerplate for the 8 nearly-identical implementations across
+/// the 4 receiver types (sync and async variants each).
+///
+/// # Variants
+///
+/// - Basic: `impl_receiver_subscriber_builder!(Receiver, Handler, Config, Mode)`
+/// - Batched: `impl_receiver_subscriber_builder!(Receiver, Handler, Config, Mode, batched)`
+/// - Batched with Clone: `impl_receiver_subscriber_builder!(Receiver, Handler, Config, Mode, batched_clone)`
+#[macro_export]
+macro_rules! impl_receiver_subscriber_builder {
+    // Pattern for non-batched handlers (E is explicit generic)
+    ($receiver:ty, $handler:ident, $config:ty, $mode:ty) => {
+        impl<T, M, R, E> $crate::builder::ReceiverSubscriberBuilder<T, M, R, E> for $receiver
+        where
+            T: $crate::$handler<M, Response = R, Error = E> + 'static,
+            M: $crate::Message,
+            R: $crate::Message,
+            E: $crate::error::StdSyncSendError,
+        {
+            type Config = $config;
+            fn build(cfg: Self::Config) -> (Self, $crate::receiver::UntypedPollerCallback) {
+                build_receiver::<T, M, R, E, $mode>(cfg)
+            }
+        }
+    };
+
+    // Pattern for batched handlers (uses T::Error)
+    ($receiver:ty, $handler:ident, $config:ty, $mode:ty, batched) => {
+        impl<T, M, R> $crate::builder::ReceiverSubscriberBuilder<T, M, R, T::Error> for $receiver
+        where
+            T: $crate::$handler<M, Response = R> + 'static,
+            T::Error: $crate::error::StdSyncSendError,
+            M: $crate::Message,
+            R: $crate::Message,
+        {
+            type Config = $config;
+            fn build(cfg: Self::Config) -> (Self, $crate::receiver::UntypedPollerCallback) {
+                build_receiver::<T, M, R, T::Error, $mode>(cfg)
+            }
+        }
+    };
+
+    // Pattern for batched handlers with Clone bound on error
+    ($receiver:ty, $handler:ident, $config:ty, $mode:ty, batched_clone) => {
+        impl<T, M, R> $crate::builder::ReceiverSubscriberBuilder<T, M, R, T::Error> for $receiver
+        where
+            T: $crate::$handler<M, Response = R> + 'static,
+            T::Error: $crate::error::StdSyncSendError + Clone,
+            M: $crate::Message,
+            R: $crate::Message,
+        {
+            type Config = $config;
+            fn build(cfg: Self::Config) -> (Self, $crate::receiver::UntypedPollerCallback) {
+                build_receiver::<T, M, R, T::Error, $mode>(cfg)
+            }
+        }
+    };
+}
+
 /// Trait for optional stats tracking on send.
 pub trait MaybeSendStats {
     /// Called when a message is successfully sent. Default is no-op.

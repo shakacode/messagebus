@@ -17,7 +17,6 @@ use super::{
     BufferUnorderedBatchedConfig, BufferUnorderedBatchedStats,
 };
 use crate::{
-    builder::ReceiverSubscriberBuilder,
     error::{Error, StdSyncSendError},
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
@@ -27,7 +26,7 @@ use crate::{
         common::{create_event_stream, send_typed_message, send_untyped_action, MaybeSendStats},
         Request,
     },
-    AsyncBatchHandler, BatchHandler, Bus, Message, Untyped,
+    Bus, Message, Untyped,
 };
 
 impl MaybeSendStats for Arc<BufferUnorderedBatchedStats> {
@@ -200,37 +199,22 @@ where
     )
 }
 
-// ReceiverSubscriberBuilder for sync batch handlers
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
-    for BufferUnorderedBatchedSync<M, R, T::Error>
-where
-    T: BatchHandler<M, Response = R> + 'static,
-    T::Error: StdSyncSendError,
-    M: Message,
-    R: Message,
-{
-    type Config = BufferUnorderedBatchedConfig;
+// ReceiverSubscriberBuilder implementations via macro
+crate::impl_receiver_subscriber_builder!(
+    BufferUnorderedBatchedSync<M, R, T::Error>,
+    BatchHandler,
+    BufferUnorderedBatchedConfig,
+    SyncExecution,
+    batched
+);
 
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, T::Error, SyncExecution>(cfg)
-    }
-}
-
-// ReceiverSubscriberBuilder for async batch handlers
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
-    for BufferUnorderedBatchedAsync<M, R, T::Error>
-where
-    T: AsyncBatchHandler<M, Response = R> + 'static,
-    T::Error: StdSyncSendError + Clone,
-    M: Message,
-    R: Message,
-{
-    type Config = BufferUnorderedBatchedConfig;
-
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, T::Error, AsyncExecution>(cfg)
-    }
-}
+crate::impl_receiver_subscriber_builder!(
+    BufferUnorderedBatchedAsync<M, R, T::Error>,
+    AsyncBatchHandler,
+    BufferUnorderedBatchedConfig,
+    AsyncExecution,
+    batched_clone
+);
 
 // SendUntypedReceiver - generic over Mode, written once
 impl<M, R, E, Mode> SendUntypedReceiver for BufferUnorderedBatched<M, R, E, Mode>

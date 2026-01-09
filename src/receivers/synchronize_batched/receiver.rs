@@ -9,7 +9,6 @@ use super::{
     SynchronizedBatchedConfig,
 };
 use crate::{
-    builder::ReceiverSubscriberBuilder,
     error::{Error, StdSyncSendError},
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
@@ -19,7 +18,7 @@ use crate::{
         common::{create_event_stream, send_typed_message, send_untyped_action, NoStats},
         Request,
     },
-    AsyncBatchSynchronizedHandler, BatchSynchronizedHandler, Bus, Message, Untyped,
+    Bus, Message, Untyped,
 };
 
 /// Generic synchronized batched receiver that works with both sync and async handlers.
@@ -164,37 +163,22 @@ where
     )
 }
 
-// ReceiverSubscriberBuilder for sync batch handlers
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
-    for SynchronizedBatchedSync<M, R, T::Error>
-where
-    T: BatchSynchronizedHandler<M, Response = R> + 'static,
-    T::Error: StdSyncSendError + Clone,
-    M: Message,
-    R: Message,
-{
-    type Config = SynchronizedBatchedConfig;
+// ReceiverSubscriberBuilder implementations via macro
+crate::impl_receiver_subscriber_builder!(
+    SynchronizedBatchedSync<M, R, T::Error>,
+    BatchSynchronizedHandler,
+    SynchronizedBatchedConfig,
+    SyncExecution,
+    batched_clone
+);
 
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, T::Error, SyncExecution>(cfg)
-    }
-}
-
-// ReceiverSubscriberBuilder for async batch handlers
-impl<T, M, R> ReceiverSubscriberBuilder<T, M, R, T::Error>
-    for SynchronizedBatchedAsync<M, R, T::Error>
-where
-    T: AsyncBatchSynchronizedHandler<M, Response = R> + 'static,
-    T::Error: StdSyncSendError + Clone,
-    M: Message,
-    R: Message,
-{
-    type Config = SynchronizedBatchedConfig;
-
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, T::Error, AsyncExecution>(cfg)
-    }
-}
+crate::impl_receiver_subscriber_builder!(
+    SynchronizedBatchedAsync<M, R, T::Error>,
+    AsyncBatchSynchronizedHandler,
+    SynchronizedBatchedConfig,
+    AsyncExecution,
+    batched_clone
+);
 
 // SendUntypedReceiver - generic over Mode, written once
 impl<M, R, E, Mode> SendUntypedReceiver for SynchronizedBatched<M, R, E, Mode>

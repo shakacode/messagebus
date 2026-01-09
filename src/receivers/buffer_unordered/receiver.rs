@@ -16,7 +16,6 @@ use super::{
     BufferUnorderedConfig, BufferUnorderedStats,
 };
 use crate::{
-    builder::ReceiverSubscriberBuilder,
     error::{Error, StdSyncSendError},
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
@@ -26,7 +25,7 @@ use crate::{
         common::{create_event_stream, send_typed_message, send_untyped_action, MaybeSendStats},
         Request,
     },
-    AsyncHandler, Bus, Handler, Message, Untyped,
+    Bus, Message, Untyped,
 };
 
 impl MaybeSendStats for Arc<BufferUnorderedStats> {
@@ -169,35 +168,20 @@ where
     )
 }
 
-// ReceiverSubscriberBuilder for sync handlers
-impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for BufferUnorderedSync<M, R, E>
-where
-    T: Handler<M, Response = R, Error = E> + 'static,
-    M: Message,
-    R: Message,
-    E: StdSyncSendError,
-{
-    type Config = BufferUnorderedConfig;
+// ReceiverSubscriberBuilder implementations via macro
+crate::impl_receiver_subscriber_builder!(
+    BufferUnorderedSync<M, R, E>,
+    Handler,
+    BufferUnorderedConfig,
+    SyncExecution
+);
 
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, E, SyncExecution>(cfg)
-    }
-}
-
-// ReceiverSubscriberBuilder for async handlers
-impl<T, M, R, E> ReceiverSubscriberBuilder<T, M, R, E> for BufferUnorderedAsync<M, R, E>
-where
-    T: AsyncHandler<M, Response = R, Error = E> + 'static,
-    M: Message,
-    R: Message,
-    E: StdSyncSendError,
-{
-    type Config = BufferUnorderedConfig;
-
-    fn build(cfg: Self::Config) -> (Self, UntypedPollerCallback) {
-        build_receiver::<T, M, R, E, AsyncExecution>(cfg)
-    }
-}
+crate::impl_receiver_subscriber_builder!(
+    BufferUnorderedAsync<M, R, E>,
+    AsyncHandler,
+    BufferUnorderedConfig,
+    AsyncExecution
+);
 
 // SendUntypedReceiver - generic over Mode, written once
 impl<M, R, E, Mode> SendUntypedReceiver for BufferUnordered<M, R, E, Mode>

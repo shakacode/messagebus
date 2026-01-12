@@ -237,8 +237,10 @@ where
     fn increment_processing(&self, tt: &TypeTag) {
         self.context
             .receivers
-            .get(tt)
-            .map(|r| r.processing.fetch_add(1, Ordering::SeqCst));
+            .entry(tt.clone())
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(16)))
+            .processing
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn start_polling(self: Arc<Self>) -> BusPollerCallback {

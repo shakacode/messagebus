@@ -23,6 +23,10 @@ impl sharded_slab::Config for SlabCfg {
 
 type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 
+/// Default maximum number of concurrent in-flight requests per message type for relay receivers.
+/// This limit provides backpressure to prevent overwhelming remote endpoints.
+const DEFAULT_RELAY_CONCURRENCY_LIMIT: u64 = 16;
+
 pub(crate) struct RelayContext {
     receivers: DashMap<TypeTag, Arc<RelayReceiverContext>>,
     need_flush: AtomicBool,
@@ -198,7 +202,7 @@ where
             .context
             .receivers
             .entry(tt.clone())
-            .or_insert_with(|| Arc::new(RelayReceiverContext::new(16)))
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(DEFAULT_RELAY_CONCURRENCY_LIMIT)))
             .clone();
 
         loop {
@@ -229,7 +233,7 @@ where
         self.context
             .receivers
             .entry(tt.clone())
-            .or_insert_with(|| Arc::new(RelayReceiverContext::new(16)))
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(DEFAULT_RELAY_CONCURRENCY_LIMIT)))
             .response
             .clone()
     }
@@ -238,7 +242,7 @@ where
         self.context
             .receivers
             .entry(tt.clone())
-            .or_insert_with(|| Arc::new(RelayReceiverContext::new(16)))
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(DEFAULT_RELAY_CONCURRENCY_LIMIT)))
             .processing
             .fetch_add(1, Ordering::SeqCst);
     }

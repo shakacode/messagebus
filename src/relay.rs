@@ -23,6 +23,10 @@ impl sharded_slab::Config for SlabCfg {
 
 type Slab<T> = sharded_slab::Slab<T, SlabCfg>;
 
+/// Default maximum number of concurrent in-flight requests per message type for relay receivers.
+/// This limit provides backpressure to prevent overwhelming remote endpoints.
+const DEFAULT_RELAY_CONCURRENCY_LIMIT: u64 = 16;
+
 pub(crate) struct RelayContext {
     receivers: DashMap<TypeTag, Arc<RelayReceiverContext>>,
     need_flush: AtomicBool,
@@ -194,18 +198,14 @@ where
     }
 
     fn try_reserve(&self, tt: &TypeTag) -> Option<Permit> {
-        if !self.context.receivers.contains_key(tt) {
-            self.context
-                .receivers
-                .insert(tt.clone(), Arc::new(RelayReceiverContext::new(16)));
-        }
+        let context = self
+            .context
+            .receivers
+            .entry(tt.clone())
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(DEFAULT_RELAY_CONCURRENCY_LIMIT)))
+            .clone();
 
         loop {
-            let context = self
-                .context
-                .receivers
-                .get(tt)
-                .expect("receiver context was just inserted");
             let count = context.processing.load(Ordering::Relaxed);
 
             if count < context.limit {
@@ -230,16 +230,10 @@ where
     }
 
     fn reserve_notify(&self, tt: &TypeTag) -> Arc<Notify> {
-        if !self.context.receivers.contains_key(tt) {
-            self.context
-                .receivers
-                .insert(tt.clone(), Arc::new(RelayReceiverContext::new(16)));
-        }
-
         self.context
             .receivers
-            .get(tt)
-            .expect("receiver context was just inserted")
+            .entry(tt.clone())
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(DEFAULT_RELAY_CONCURRENCY_LIMIT)))
             .response
             .clone()
     }
@@ -247,8 +241,10 @@ where
     fn increment_processing(&self, tt: &TypeTag) {
         self.context
             .receivers
-            .get(tt)
-            .map(|r| r.processing.fetch_add(1, Ordering::SeqCst));
+            .entry(tt.clone())
+            .or_insert_with(|| Arc::new(RelayReceiverContext::new(DEFAULT_RELAY_CONCURRENCY_LIMIT)))
+            .processing
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn start_polling(self: Arc<Self>) -> BusPollerCallback {

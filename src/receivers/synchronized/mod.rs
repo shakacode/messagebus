@@ -1,18 +1,8 @@
-mod r#async;
-mod sync;
+mod execution;
+mod receiver;
 
-use std::sync::atomic::AtomicU64;
-
-pub use r#async::SynchronizedAsync;
+pub use receiver::{SynchronizedAsync, SynchronizedSync};
 use serde::{Deserialize, Serialize};
-pub use sync::SynchronizedSync;
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct SynchronizedStats {
-    pub buffer: AtomicU64,
-    pub buffer_total: AtomicU64,
-}
 
 /// Configuration for synchronized (sequential) receivers.
 ///
@@ -67,8 +57,8 @@ pub struct SynchronizedStats {
 pub struct SynchronizedConfig {
     /// Size of the internal message buffer.
     ///
-    /// Since messages are processed sequentially, this determines how many
-    /// can be queued while waiting. Default: 1
+    /// **Note:** Currently not enforced (unbounded channels are used internally).
+    /// Reserved for future implementation of backpressure. Default: 1
     pub buffer_size: usize,
 }
 
@@ -76,52 +66,4 @@ impl Default for SynchronizedConfig {
     fn default() -> Self {
         Self { buffer_size: 1 }
     }
-}
-
-#[macro_export]
-macro_rules! synchronized_poller_macro {
-    ($t: tt, $h: tt, $st1: expr, $st2: expr) => {
-        async fn synchronized_poller<$t, M, R>(
-            mut rx: mpsc::UnboundedReceiver<Request<M>>,
-            bus: Bus,
-            ut: Untyped,
-            stx: mpsc::UnboundedSender<Event<R, $t::Error>>,
-        ) where
-            $t: $h<M, Response = R> + 'static,
-            $t::Error: StdSyncSendError,
-            M: Message,
-            R: Message,
-        {
-            let ut = ut
-                .downcast::<Mutex<T>>()
-                .expect("handler type mismatch - this is a bug");
-
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Request::Request(mid, msg, _req) => {
-                        #[allow(clippy::redundant_closure_call)]
-                        // The inner closure handles errors via events, so we just need to
-                        // ensure the task completes - panics in the task would be a bug
-                        let _ = ($st1)(mid, msg, bus.clone(), ut.clone(), stx.clone()).await;
-                    }
-                    Request::Action(Action::Init(..)) => {
-                        let _ = stx.send(Event::Ready);
-                    }
-                    Request::Action(Action::Close) => {
-                        rx.close();
-                    }
-                    Request::Action(Action::Flush) => {
-                        let _ = stx.send(Event::Flushed);
-                    }
-                    Request::Action(Action::Sync) => {
-                        #[allow(clippy::redundant_closure_call)]
-                        let resp = ($st2)(bus.clone(), ut.clone()).await;
-                        let _ = stx.send(Event::Synchronized(resp.map_err(Error::Other)));
-                    }
-
-                    _ => unimplemented!(),
-                }
-            }
-        }
-    };
 }

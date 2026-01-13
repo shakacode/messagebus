@@ -101,10 +101,29 @@ impl GroupRegistry {
     /// Called when a task completes. If this was the last task in the group,
     /// waiters are notified.
     pub fn decrement(&self, group_id: GroupId) {
+        self.decrement_by(group_id, 1);
+    }
+
+    /// Decrements the processing count for a group by a specified amount.
+    ///
+    /// Called when a batch of tasks completes. If the count reaches zero,
+    /// waiters are notified.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `count` exceeds the current processing count, which would
+    /// indicate a bug in the caller (mismatched increment/decrement).
+    pub fn decrement_by(&self, group_id: GroupId, count: u64) {
         if let Some(entry) = self.groups.get(&group_id) {
-            let prev = entry.processing.fetch_sub(1, Ordering::SeqCst);
-            if prev == 1 {
-                // This was the last task, notify waiters
+            let prev = entry.processing.fetch_sub(count, Ordering::SeqCst);
+            debug_assert!(
+                prev >= count,
+                "decrement_by underflow: count ({}) > previous value ({})",
+                count,
+                prev
+            );
+            if prev <= count {
+                // Count reached zero, notify waiters
                 entry.idle_notify.notify_waiters();
             }
         }

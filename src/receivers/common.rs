@@ -116,3 +116,50 @@ where
     let mut rx = srx.lock().take().expect("event_stream called twice");
     Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
 }
+
+/// Buffer for messages belonging to a single group.
+///
+/// Used by batched receivers to collect messages per group_id,
+/// ensuring each batch contains only messages from the same group.
+pub struct GroupBuffer<M> {
+    /// The buffered message payloads.
+    msgs: Vec<M>,
+    /// Message metadata: pairs of (message_id, requires_response).
+    /// - `message_id`: Unique identifier for tracking the message through the bus.
+    /// - `requires_response`: Whether the sender is waiting for a response.
+    mids: Vec<(u64, bool)>,
+}
+
+impl<M> GroupBuffer<M> {
+    /// Creates a new buffer with the specified capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            msgs: Vec::with_capacity(capacity),
+            mids: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Adds a message to the buffer.
+    pub fn push(&mut self, mid: u64, msg: M, req: bool) {
+        self.mids.push((mid, req));
+        self.msgs.push(msg);
+    }
+
+    /// Returns the number of messages in the buffer.
+    pub fn len(&self) -> usize {
+        self.msgs.len()
+    }
+
+    /// Returns true if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.msgs.is_empty()
+    }
+
+    /// Takes all messages from the buffer, leaving it empty.
+    pub fn take(&mut self) -> (Vec<M>, Vec<(u64, bool)>) {
+        (
+            std::mem::take(&mut self.msgs),
+            std::mem::take(&mut self.mids),
+        )
+    }
+}

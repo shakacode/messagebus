@@ -11,9 +11,8 @@ use crate::{
 
 /// Trait that abstracts over sync vs async execution modes for batch handlers.
 ///
-/// Note: Batch handlers receive messages that may belong to different groups.
-/// Group propagation is not supported for batch handlers since the batch
-/// may contain messages from multiple groups.
+/// Batches are collected per group_id, so all messages in a batch belong to
+/// the same group. This enables proper group context propagation and tracking.
 pub trait BatchExecutionMode<T, M, R, E>: Send + Sync + 'static
 where
     T: Send + Sync + 'static,
@@ -23,8 +22,9 @@ where
 {
     /// Spawn a task to handle a batch of messages.
     ///
-    /// Note: `_group_ids` is provided for consistency but not used since
-    /// batches may contain messages from different groups.
+    /// All messages in the batch belong to the same group (identified by `group_id`).
+    /// The batch size is passed to properly decrement the group counter after completion.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_batch_handler(
         handler: Arc<T>,
         msgs: Vec<M>,
@@ -32,7 +32,8 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         permit: OwnedSemaphorePermit,
-        _group_ids: Vec<Option<GroupId>>,
+        group_id: Option<GroupId>,
+        batch_size: usize,
     );
 
     /// Call the handler's sync method.
@@ -62,15 +63,26 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, T::Error>>,
         permit: OwnedSemaphorePermit,
-        _group_ids: Vec<Option<GroupId>>,
+        group_id: Option<GroupId>,
+        batch_size: usize,
     ) {
         tokio::task::spawn_blocking(move || {
             let batch: T::InBatch = msgs.into_iter().collect();
-            let resp = handler.handle(batch, &bus);
+            // Propagate group_id via task-local for any nested sends
+            let resp = if let Some(gid) = group_id {
+                Bus::with_group_context(gid, || handler.handle(batch, &bus))
+            } else {
+                handler.handle(batch, &bus)
+            };
             if let Err(err) = &resp {
                 log::error!("BatchHandler error: {err}");
             }
             drop(permit);
+
+            // Decrement group counter for all messages in the batch
+            if let Some(gid) = group_id {
+                bus.group_registry().decrement_by(gid, batch_size as u64);
+            }
 
             crate::process_batch_result!(resp, mids, response_tx);
         });
@@ -97,15 +109,25 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, T::Error>>,
         permit: OwnedSemaphorePermit,
-        _group_ids: Vec<Option<GroupId>>,
+        group_id: Option<GroupId>,
+        batch_size: usize,
     ) {
         tokio::spawn(async move {
             let batch: T::InBatch = msgs.into_iter().collect();
-            let resp = handler.handle(batch, &bus).await;
+            // Propagate group_id via task-local for any nested sends
+            let resp = Bus::with_group_context_async(group_id, async {
+                handler.handle(batch, &bus).await
+            })
+            .await;
             if let Err(err) = &resp {
                 log::error!("AsyncBatchHandler error: {err}");
             }
             drop(permit);
+
+            // Decrement group counter for all messages in the batch
+            if let Some(gid) = group_id {
+                bus.group_registry().decrement_by(gid, batch_size as u64);
+            }
 
             crate::process_batch_result!(resp, mids, response_tx);
         });

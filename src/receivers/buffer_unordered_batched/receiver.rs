@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem, pin::Pin, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, pin::Pin, sync::Arc};
 
 use futures::{Future, Stream};
 use parking_lot::Mutex;
@@ -16,7 +16,7 @@ use crate::{
         UntypedPollerCallback,
     },
     receivers::{
-        common::{create_event_stream, send_typed_message, send_untyped_action},
+        common::{create_event_stream, send_typed_message, send_untyped_action, GroupBuffer},
         Request,
     },
     Bus, Message, Untyped,
@@ -39,6 +39,9 @@ pub type BufferUnorderedBatchedSync<M, R, E> = BufferUnorderedBatched<M, R, E, S
 pub type BufferUnorderedBatchedAsync<M, R, E> = BufferUnorderedBatched<M, R, E, AsyncExecution>;
 
 /// The poller function that processes messages in batches.
+///
+/// Messages are buffered per group_id, ensuring each batch contains only
+/// messages from the same group for proper group context propagation.
 async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
     mut rx: mpsc::UnboundedReceiver<Request<M>>,
     bus: Bus,
@@ -59,27 +62,26 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
         .expect("handler type mismatch - this is a bug");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(cfg.max_parallel));
 
-    let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
-    let mut buffer = Vec::with_capacity(cfg.batch_size);
-    let mut buffer_group_ids: Vec<Option<GroupId>> = Vec::with_capacity(cfg.batch_size);
+    // Buffer messages by group_id so each batch contains only one group
+    let mut buffers: HashMap<Option<GroupId>, GroupBuffer<M>> = HashMap::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
             Request::Request(mid, msg, req, group_id) => {
-                buffer_mid.push((mid, req));
-                buffer.push(msg);
-                buffer_group_ids.push(group_id);
+                let buffer = buffers
+                    .entry(group_id)
+                    .or_insert_with(|| GroupBuffer::new(cfg.batch_size));
+                buffer.push(mid, msg, req);
 
-                if buffer_mid.len() >= cfg.batch_size {
+                if buffer.len() >= cfg.batch_size {
                     let permit = semaphore
                         .clone()
                         .acquire_owned()
                         .await
                         .expect("semaphore closed unexpectedly");
 
-                    let batch_mids = mem::take(&mut buffer_mid);
-                    let batch_msgs = mem::take(&mut buffer);
-                    let batch_group_ids = mem::take(&mut buffer_group_ids);
+                    let (batch_msgs, batch_mids) = buffer.take();
+                    let batch_size = batch_msgs.len();
 
                     Mode::spawn_batch_handler(
                         handler.clone(),
@@ -88,7 +90,8 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
                         bus.clone(),
                         stx.clone(),
                         permit,
-                        batch_group_ids,
+                        group_id,
+                        batch_size,
                     );
                 }
             }
@@ -99,26 +102,28 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
 
             Request::Action(Action::Close) => {
                 // Process remaining buffered messages before shutdown
-                if !buffer_mid.is_empty() {
-                    let permit = semaphore
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .expect("semaphore closed unexpectedly");
+                for (group_id, mut buffer) in buffers.drain() {
+                    if !buffer.is_empty() {
+                        let permit = semaphore
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("semaphore closed unexpectedly");
 
-                    let batch_mids = mem::take(&mut buffer_mid);
-                    let batch_msgs = mem::take(&mut buffer);
-                    let batch_group_ids = mem::take(&mut buffer_group_ids);
+                        let (batch_msgs, batch_mids) = buffer.take();
+                        let batch_size = batch_msgs.len();
 
-                    Mode::spawn_batch_handler(
-                        handler.clone(),
-                        batch_msgs,
-                        batch_mids,
-                        bus.clone(),
-                        stx.clone(),
-                        permit,
-                        batch_group_ids,
-                    );
+                        Mode::spawn_batch_handler(
+                            handler.clone(),
+                            batch_msgs,
+                            batch_mids,
+                            bus.clone(),
+                            stx.clone(),
+                            permit,
+                            group_id,
+                            batch_size,
+                        );
+                    }
                 }
 
                 // Wait for all in-flight tasks to complete
@@ -127,27 +132,29 @@ async fn buffer_unordered_batch_poller<T, M, R, E, Mode>(
             }
 
             Request::Action(Action::Flush) => {
-                // Process remaining messages in buffer
-                if !buffer_mid.is_empty() {
-                    let permit = semaphore
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .expect("semaphore closed unexpectedly");
+                // Process remaining messages in all buffers
+                for (group_id, mut buffer) in buffers.drain() {
+                    if !buffer.is_empty() {
+                        let permit = semaphore
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("semaphore closed unexpectedly");
 
-                    let batch_mids = mem::take(&mut buffer_mid);
-                    let batch_msgs = mem::take(&mut buffer);
-                    let batch_group_ids = mem::take(&mut buffer_group_ids);
+                        let (batch_msgs, batch_mids) = buffer.take();
+                        let batch_size = batch_msgs.len();
 
-                    Mode::spawn_batch_handler(
-                        handler.clone(),
-                        batch_msgs,
-                        batch_mids,
-                        bus.clone(),
-                        stx.clone(),
-                        permit,
-                        batch_group_ids,
-                    );
+                        Mode::spawn_batch_handler(
+                            handler.clone(),
+                            batch_msgs,
+                            batch_mids,
+                            bus.clone(),
+                            stx.clone(),
+                            permit,
+                            group_id,
+                            batch_size,
+                        );
+                    }
                 }
 
                 // Wait for all in-flight tasks to complete

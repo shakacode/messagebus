@@ -1,3 +1,4 @@
+use crate::group::GroupId;
 use crate::relay::RelayWrapper;
 use crate::stats::Stats;
 use crate::Untyped;
@@ -44,7 +45,14 @@ pub trait SendUntypedReceiver: Send + Sync {
 }
 
 pub trait SendTypedReceiver<M: Message>: Sync {
-    fn send(&self, mid: u64, msg: M, req: bool, bus: &Bus) -> Result<(), Error<M>>;
+    fn send(
+        &self,
+        mid: u64,
+        msg: M,
+        req: bool,
+        bus: &Bus,
+        group_id: Option<GroupId>,
+    ) -> Result<(), Error<M>>;
 }
 
 pub trait ReciveTypedReceiver<M, E>: Sync
@@ -423,7 +431,7 @@ where
             .downcast::<M>()
             .map_err(|_| Error::MessageCastError)?;
 
-        SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus)
+        SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus, None)
             .map_err(|err| err.map_msg(|m| m.into_boxed()))
     }
 
@@ -839,6 +847,7 @@ impl Receiver {
         msg: M,
         req: bool,
         mut permit: Permit,
+        group_id: Option<GroupId>,
     ) -> Result<(), Error<M>> {
         // Set need_flush BEFORE sending to ensure flush_all() sees the flag
         // even if it checks between flag set and message enqueue
@@ -849,7 +858,7 @@ impl Receiver {
             any_receiver
                 .cast_send_typed::<M>()
                 .expect("message type mismatch - this is a bug")
-                .send(mid, msg, req, bus)
+                .send(mid, msg, req, bus, group_id)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)
@@ -871,6 +880,7 @@ impl Receiver {
         mid: u64,
         msg: M,
         req: bool,
+        group_id: Option<GroupId>,
     ) -> Result<(), Error<M>> {
         // Set need_flush BEFORE sending to ensure flush_all() sees the flag
         // even if it checks between flag set and message enqueue
@@ -881,7 +891,7 @@ impl Receiver {
             any_receiver
                 .cast_send_typed::<M>()
                 .expect("message type mismatch - this is a bug")
-                .send(mid, msg, req, bus)
+                .send(mid, msg, req, bus, group_id)
         } else {
             self.inner
                 .send_boxed(mid, msg.into_boxed(), req, bus)

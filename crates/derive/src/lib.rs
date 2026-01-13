@@ -62,6 +62,22 @@ fn clone_part(ast: &syn::DeriveInput, has_clone: bool) -> proc_macro2::TokenStre
     }
 }
 
+fn group_id_part(group_id_expr: Option<syn::Expr>) -> proc_macro2::TokenStream {
+    if let Some(expr) = group_id_expr {
+        quote! {
+            fn group_id(&self) -> std::option::Option<messagebus::group::GroupId> {
+                Some(#expr)
+            }
+        }
+    } else {
+        quote! {
+            fn group_id(&self) -> std::option::Option<messagebus::group::GroupId> {
+                None
+            }
+        }
+    }
+}
+
 fn type_tag_part(
     ast: &syn::DeriveInput,
     type_tag: Option<String>,
@@ -162,6 +178,20 @@ impl Parse for TypeTag {
     }
 }
 
+/// Parser for #[group_id(expr)] attribute
+struct GroupIdAttr {
+    pub inner: syn::Expr,
+}
+
+impl Parse for GroupIdAttr {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let content;
+        parenthesized!(content in input);
+        let expr: syn::Expr = content.parse()?;
+        Ok(GroupIdAttr { inner: expr })
+    }
+}
+
 #[derive(Default, Debug)]
 struct Tags {
     has_clone: bool,
@@ -200,11 +230,12 @@ impl Parse for Tags {
     }
 }
 
-#[proc_macro_derive(Message, attributes(type_tag, message, namespace))]
+#[proc_macro_derive(Message, attributes(type_tag, message, namespace, group_id))]
 pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut tags = Tags::default();
     let mut type_tag = None;
     let mut namespace = None;
+    let mut group_id_expr: Option<syn::Expr> = None;
 
     let ast: DeriveInput = syn::parse(input).unwrap();
     let name = &ast.ident;
@@ -225,6 +256,12 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
                 "namespace" => {
                     let tt: TypeTag = syn::parse2(attr.tokens.clone()).unwrap();
                     namespace = Some(tt.inner.value());
+                }
+
+                "group_id" => {
+                    // Parse #[group_id(expr)] where expr is a Rust expression
+                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone()).unwrap();
+                    group_id_expr = Some(expr.inner);
                 }
 
                 _ => (),
@@ -267,6 +304,7 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     let type_tag_part = type_tag_part(&ast, type_tag, namespace);
     let shared_part = shared_part(&ast, tags.has_shared);
     let clone_part = clone_part(&ast, tags.has_clone);
+    let group_id_part = group_id_part(group_id_expr);
 
     let init = Ident::new(
         &format!("__init_{}", hash(ast.clone().into_token_stream())),
@@ -303,6 +341,7 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
 
             #shared_part
             #clone_part
+            #group_id_part
         }
 
         #init_impl

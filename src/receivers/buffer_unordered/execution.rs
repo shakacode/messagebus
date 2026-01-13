@@ -4,6 +4,7 @@ use tokio::sync::{mpsc::UnboundedSender, OwnedSemaphorePermit};
 
 use crate::{
     error::{Error, StdSyncSendError},
+    group::GroupId,
     receiver::Event,
     AsyncHandler, Bus, Handler, Message,
 };
@@ -26,6 +27,7 @@ where
     /// 1. Invoke the handler with the message
     /// 2. Send the response back via `response_tx`
     /// 3. Drop the permit when done to release the semaphore
+    /// 4. Propagate the group_id via task-local for any nested sends
     fn spawn_handler(
         handler: Arc<T>,
         msg: M,
@@ -33,6 +35,7 @@ where
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
         permit: OwnedSemaphorePermit,
+        group_id: Option<GroupId>,
     );
 
     /// Call the handler's sync method.
@@ -64,13 +67,26 @@ where
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
         permit: OwnedSemaphorePermit,
+        group_id: Option<GroupId>,
     ) {
         tokio::task::spawn_blocking(move || {
-            let resp = handler.handle(msg, &bus);
+            // Propagate group_id via task-local for any nested sends
+            // Note: spawn_blocking runs in a blocking thread pool, so we use
+            // Bus::with_group_context for sync handlers
+            let resp = if let Some(gid) = group_id {
+                Bus::with_group_context(gid, || handler.handle(msg, &bus))
+            } else {
+                handler.handle(msg, &bus)
+            };
             if let Err(err) = &resp {
                 log::error!("Handler error: {err}");
             }
             drop(permit);
+
+            // Decrement group counter after task completes
+            if let Some(gid) = group_id {
+                bus.group_registry().decrement(gid);
+            }
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))
@@ -102,13 +118,22 @@ where
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
         permit: OwnedSemaphorePermit,
+        group_id: Option<GroupId>,
     ) {
         tokio::spawn(async move {
-            let resp = handler.handle(msg, &bus).await;
+            // Propagate group_id via task-local for any nested sends
+            let resp =
+                Bus::with_group_context_async(group_id, async { handler.handle(msg, &bus).await })
+                    .await;
             if let Err(err) = &resp {
                 log::error!("AsyncHandler error: {err}");
             }
             drop(permit);
+
+            // Decrement group counter after task completes
+            if let Some(gid) = group_id {
+                bus.group_registry().decrement(gid);
+            }
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))

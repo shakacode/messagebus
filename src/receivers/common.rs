@@ -84,6 +84,8 @@ pub fn send_untyped_action<M: Message>(
     }
 }
 
+use crate::group::GroupId;
+
 /// Sends a typed message through the request channel.
 ///
 /// This is the common implementation for `SendTypedReceiver::send`.
@@ -92,10 +94,11 @@ pub fn send_typed_message<M: Message>(
     mid: u64,
     m: M,
     req: bool,
+    group_id: Option<GroupId>,
 ) -> Result<(), Error<M>> {
-    match sender.send(Request::Request(mid, m, req)) {
+    match sender.send(Request::Request(mid, m, req, group_id)) {
         Ok(_) => Ok(()),
-        Err(mpsc::error::SendError(Request::Request(_, msg, _))) => Err(Error::send_closed(msg)),
+        Err(mpsc::error::SendError(Request::Request(_, msg, _, _))) => Err(Error::send_closed(msg)),
         _ => unimplemented!(),
     }
 }

@@ -10,6 +10,7 @@ use super::{
 };
 use crate::{
     error::{Error, StdSyncSendError},
+    group::GroupId,
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
@@ -57,17 +58,20 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
 
     let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
     let mut buffer = Vec::with_capacity(cfg.batch_size);
+    let mut buffer_group_ids: Vec<Option<GroupId>> = Vec::with_capacity(cfg.batch_size);
     let mut pending_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            Request::Request(mid, msg, req) => {
+            Request::Request(mid, msg, req, group_id) => {
                 buffer_mid.push((mid, req));
                 buffer.push(msg);
+                buffer_group_ids.push(group_id);
 
                 if buffer_mid.len() >= cfg.batch_size {
                     let batch_mids = mem::take(&mut buffer_mid);
                     let batch_msgs = mem::take(&mut buffer);
+                    let batch_group_ids = mem::take(&mut buffer_group_ids);
 
                     let handle = Mode::spawn_batch_handler(
                         handler.clone(),
@@ -75,6 +79,7 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
                         batch_mids,
                         bus.clone(),
                         stx.clone(),
+                        batch_group_ids,
                     );
                     pending_tasks.push(handle);
                 }
@@ -97,6 +102,7 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
                 if !buffer_mid.is_empty() {
                     let batch_mids = mem::take(&mut buffer_mid);
                     let batch_msgs = mem::take(&mut buffer);
+                    let batch_group_ids = mem::take(&mut buffer_group_ids);
 
                     let handle = Mode::spawn_batch_handler(
                         handler.clone(),
@@ -104,6 +110,7 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
                         batch_mids,
                         bus.clone(),
                         stx.clone(),
+                        batch_group_ids,
                     );
                     pending_tasks.push(handle);
                 }
@@ -201,8 +208,15 @@ where
     E: StdSyncSendError,
     Mode: Send + Sync + 'static,
 {
-    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, mid, m, req)
+    fn send(
+        &self,
+        mid: u64,
+        m: M,
+        req: bool,
+        _bus: &Bus,
+        group_id: Option<crate::group::GroupId>,
+    ) -> Result<(), Error<M>> {
+        send_typed_message(&self.tx, mid, m, req, group_id)
     }
 }
 

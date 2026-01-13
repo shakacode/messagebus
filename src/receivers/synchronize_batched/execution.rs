@@ -5,11 +5,16 @@ use tokio::sync::{mpsc::UnboundedSender, Mutex};
 
 use crate::{
     error::{Error, StdSyncSendError},
+    group::GroupId,
     receiver::Event,
     AsyncBatchSynchronizedHandler, BatchSynchronizedHandler, Bus, Message,
 };
 
 /// Trait that abstracts over sync vs async execution modes for synchronized batch handlers.
+///
+/// Note: Batch handlers receive messages that may belong to different groups.
+/// Group propagation is not supported for batch handlers since the batch
+/// may contain messages from multiple groups.
 pub trait BatchSynchronizedExecutionMode<T, M, R, E>: Send + Sync + 'static
 where
     T: Send + 'static,
@@ -18,12 +23,16 @@ where
     E: StdSyncSendError + Clone,
 {
     /// Spawn a task to handle a batch of messages.
+    ///
+    /// Note: `_group_ids` is provided for consistency but not used since
+    /// batches may contain messages from different groups.
     fn spawn_batch_handler(
         handler: Arc<Mutex<T>>,
         msgs: Vec<M>,
         mids: Vec<(u64, bool)>,
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
+        _group_ids: Vec<Option<GroupId>>,
     ) -> tokio::task::JoinHandle<()>;
 
     /// Call the handler's sync method.
@@ -52,6 +61,7 @@ where
         mids: Vec<(u64, bool)>,
         bus: Bus,
         response_tx: UnboundedSender<Event<R, T::Error>>,
+        _group_ids: Vec<Option<GroupId>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
             let batch: T::InBatch = msgs.into_iter().collect();
@@ -84,6 +94,7 @@ where
         mids: Vec<(u64, bool)>,
         bus: Bus,
         response_tx: UnboundedSender<Event<R, T::Error>>,
+        _group_ids: Vec<Option<GroupId>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let batch: T::InBatch = msgs.into_iter().collect();

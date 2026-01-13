@@ -4,11 +4,16 @@ use tokio::sync::{mpsc::UnboundedSender, OwnedSemaphorePermit};
 
 use crate::{
     error::{Error, StdSyncSendError},
+    group::GroupId,
     receiver::Event,
     AsyncBatchHandler, BatchHandler, Bus, Message,
 };
 
 /// Trait that abstracts over sync vs async execution modes for batch handlers.
+///
+/// Note: Batch handlers receive messages that may belong to different groups.
+/// Group propagation is not supported for batch handlers since the batch
+/// may contain messages from multiple groups.
 pub trait BatchExecutionMode<T, M, R, E>: Send + Sync + 'static
 where
     T: Send + Sync + 'static,
@@ -17,6 +22,9 @@ where
     E: StdSyncSendError,
 {
     /// Spawn a task to handle a batch of messages.
+    ///
+    /// Note: `_group_ids` is provided for consistency but not used since
+    /// batches may contain messages from different groups.
     fn spawn_batch_handler(
         handler: Arc<T>,
         msgs: Vec<M>,
@@ -24,6 +32,7 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         permit: OwnedSemaphorePermit,
+        _group_ids: Vec<Option<GroupId>>,
     );
 
     /// Call the handler's sync method.
@@ -53,6 +62,7 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, T::Error>>,
         permit: OwnedSemaphorePermit,
+        _group_ids: Vec<Option<GroupId>>,
     ) {
         tokio::task::spawn_blocking(move || {
             let batch: T::InBatch = msgs.into_iter().collect();
@@ -87,6 +97,7 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, T::Error>>,
         permit: OwnedSemaphorePermit,
+        _group_ids: Vec<Option<GroupId>>,
     ) {
         tokio::spawn(async move {
             let batch: T::InBatch = msgs.into_iter().collect();

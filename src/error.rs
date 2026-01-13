@@ -419,6 +419,9 @@ mod tests {
         fn try_clone(&self) -> Option<Self> {
             Some(self.clone())
         }
+        fn group_id(&self) -> Option<crate::group::GroupId> {
+            None
+        }
     }
 
     #[test]

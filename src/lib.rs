@@ -93,6 +93,7 @@
 mod builder;
 mod envelop;
 pub mod error;
+pub mod group;
 pub mod handler;
 mod receiver;
 pub mod receivers;
@@ -133,6 +134,7 @@ use receiver::{Permit, Receiver};
 // public
 pub use builder::{BusBuilder, Module, RegisterEntry, SyncEntry, UnsyncEntry};
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
+pub use group::GroupId;
 pub use handler::*;
 pub use receiver::{
     Action, Event, EventBoxed, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
@@ -141,7 +143,15 @@ pub use receiver::{
 pub use relay::Relay;
 pub use stats::Stats;
 pub use type_tag::{deserialize_shared_message, register_shared_message};
+
+use group::GroupRegistry;
 pub type Untyped = Arc<dyn Any + Send + Sync>;
+
+tokio::task_local! {
+    /// Task-local storage for the current group ID.
+    /// Used for propagating group context to child messages.
+    static CURRENT_GROUP: Option<GroupId>;
+}
 
 type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
@@ -222,6 +232,8 @@ pub struct BusInner {
     lookup: HashMap<LookupQuery, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
     maintain: Mutex<()>,
+    /// Registry for tracking task groups.
+    group_registry: GroupRegistry,
 }
 
 impl BusInner {
@@ -263,6 +275,7 @@ impl BusInner {
             lookup,
             closed: AtomicBool::new(false),
             maintain: Mutex::new(()),
+            group_registry: GroupRegistry::new(),
         }
     }
 }
@@ -696,6 +709,126 @@ impl Bus {
         self.sync2::<M1, M2>().await;
     }
 
+    // ==================== Group-based Operations ====================
+
+    /// Waits for all tasks belonging to a specific group to complete.
+    ///
+    /// This is useful for tracking progress of related tasks, such as all
+    /// chunks of a file processing job.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, GroupId};
+    ///
+    /// async fn process_job(bus: &Bus, job_id: GroupId) {
+    ///     // Send multiple messages with the same group_id...
+    ///
+    ///     // Wait for all tasks in this group to complete
+    ///     bus.flush_group(job_id).await;
+    /// }
+    /// ```
+    pub async fn flush_group(&self, group_id: GroupId) {
+        self.inner.group_registry.wait_idle(group_id).await;
+    }
+
+    /// Syncs only the receivers that have processed messages for a specific group.
+    ///
+    /// Unlike `sync_all()` which syncs every receiver, this method only syncs
+    /// receivers that have handled messages belonging to the specified group.
+    /// This prevents blocking between independent groups.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The group ID whose receivers should be synced
+    pub async fn sync_group(&self, group_id: GroupId) {
+        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+        for r in self.inner.receivers.iter() {
+            if receiver_ids.contains(&r.id()) {
+                r.sync(self).await;
+            }
+        }
+    }
+
+    /// Flushes and syncs all tasks belonging to a specific group.
+    ///
+    /// This combines waiting for group completion with targeted receiver sync operations.
+    /// Only receivers that processed messages from this group will be synced,
+    /// preventing blocking between independent groups.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The group ID to flush and sync
+    /// * `force` - If true, skips waiting for idle and proceeds directly to sync
+    pub async fn flush_and_sync_group(&self, group_id: GroupId, force: bool) {
+        if !force {
+            self.flush_group(group_id).await;
+        }
+        // Sync only receivers that handled messages from this group
+        self.sync_group(group_id).await;
+    }
+
+    /// Returns `true` if the group has no in-flight tasks.
+    ///
+    /// Unknown groups are considered idle (they have no tasks by definition).
+    #[inline]
+    pub fn is_group_idle(&self, group_id: GroupId) -> bool {
+        self.inner.group_registry.is_idle(group_id)
+    }
+
+    /// Returns the current number of in-flight tasks for a group.
+    ///
+    /// Returns 0 for unknown groups.
+    #[inline]
+    pub fn group_processing_count(&self, group_id: GroupId) -> u64 {
+        self.inner.group_registry.processing_count(group_id)
+    }
+
+    /// Returns the current task's group ID, if any.
+    ///
+    /// This reads from task-local storage and returns the group ID
+    /// that was set when the current handler was invoked.
+    #[inline]
+    pub fn current_group_id() -> Option<GroupId> {
+        CURRENT_GROUP.try_with(|g| *g).unwrap_or(None)
+    }
+
+    /// Executes a closure with a group ID set in task-local storage.
+    ///
+    /// This is used to propagate group context to sync handlers running
+    /// in a blocking thread pool.
+    #[inline]
+    pub(crate) fn with_group_context<F, R>(group_id: GroupId, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        CURRENT_GROUP.sync_scope(Some(group_id), f)
+    }
+
+    /// Executes an async block with a group ID set in task-local storage.
+    ///
+    /// This is used to propagate group context to async handlers.
+    #[inline]
+    pub(crate) async fn with_group_context_async<F>(group_id: Option<GroupId>, f: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        if let Some(gid) = group_id {
+            CURRENT_GROUP.scope(Some(gid), f).await
+        } else {
+            f.await
+        }
+    }
+
+    /// Provides access to the group registry for increment/decrement operations.
+    ///
+    /// This is primarily for internal use by receivers when spawning tasks.
+    pub(crate) fn group_registry(&self) -> &GroupRegistry {
+        &self.inner.group_registry
+    }
+
+    // ==================== End Group-based Operations ====================
+
     fn try_reserve(&self, tt: &TypeTag, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
 
@@ -768,6 +901,8 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             let permits = if let Some(x) = self.try_reserve(&tt, rs) {
@@ -775,6 +910,13 @@ impl Bus {
             } else {
                 return Err(SendError::Full(msg).into());
             };
+
+            // Increment group counter for each receiver and track receiver IDs
+            if let Some(gid) = group_id {
+                for r in rs.iter() {
+                    self.inner.group_registry.increment(gid, r.id());
+                }
+            }
 
             let mut iter = permits.into_iter().zip(rs.iter());
             let mut counter = 1;
@@ -784,13 +926,13 @@ impl Bus {
                 let (p, r) = iter
                     .next()
                     .expect("iterator should have more elements based on counter");
-                let _ = r.send(self, mid, msg.clone(), false, p);
+                let _ = r.send(self, mid, msg.clone(), false, p, group_id);
 
                 counter += 1;
             }
 
             if let Some((p, r)) = iter.next() {
-                let _ = r.send(self, mid, msg, false, p);
+                let _ = r.send(self, mid, msg, false, p, group_id);
                 return Ok(());
             }
         }
@@ -890,14 +1032,31 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             if let Some((last, head)) = rs.split_last() {
-                for r in head {
-                    let _ = r.send(self, mid, msg.clone(), false, r.reserve(&tt).await);
+                // Increment group counter for each receiver and track receiver IDs
+                if let Some(gid) = group_id {
+                    for r in head {
+                        self.inner.group_registry.increment(gid, r.id());
+                    }
+                    self.inner.group_registry.increment(gid, last.id());
                 }
 
-                let _ = last.send(self, mid, msg, false, last.reserve(&tt).await);
+                for r in head {
+                    let _ = r.send(
+                        self,
+                        mid,
+                        msg.clone(),
+                        false,
+                        r.reserve(&tt).await,
+                        group_id,
+                    );
+                }
+
+                let _ = last.send(self, mid, msg, false, last.reserve(&tt).await, group_id);
 
                 return Ok(());
             }
@@ -937,14 +1096,24 @@ impl Bus {
         }
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             if let Some((last, head)) = rs.split_last() {
-                for r in head {
-                    let _ = r.force_send(self, mid, msg.clone(), false);
+                // Increment group counter for each receiver and track receiver IDs
+                if let Some(gid) = group_id {
+                    for r in head {
+                        self.inner.group_registry.increment(gid, r.id());
+                    }
+                    self.inner.group_registry.increment(gid, last.id());
                 }
 
-                let _ = last.force_send(self, mid, msg, false);
+                for r in head {
+                    let _ = r.force_send(self, mid, msg.clone(), false, group_id);
+                }
+
+                let _ = last.force_send(self, mid, msg, false, group_id);
 
                 return Ok(());
             }
@@ -976,6 +1145,8 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self
             .inner
@@ -989,7 +1160,12 @@ impl Bus {
                 return Err(SendError::Full(msg).into());
             };
 
-            Ok(rs.send(self, mid, msg, false, permits)?)
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rs.id());
+            }
+
+            Ok(rs.send(self, mid, msg, false, permits, group_id)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -1011,6 +1187,8 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self
             .inner
@@ -1018,7 +1196,12 @@ impl Bus {
             .get(&(msg.type_tag(), None, None))
             .and_then(|rs| rs.first())
         {
-            Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await)?)
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rs.id());
+            }
+
+            Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await, group_id)?)
         } else {
             Err(Error::NoReceivers)
         }
@@ -1091,6 +1274,8 @@ impl Bus {
     ) -> Result<R, Error<M>> {
         let tid = M::type_tag_();
         let rid = R::type_tag_();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tid.clone(), options, Some(rid), None, true);
         if let Some(rc) = iter.next() {
@@ -1100,7 +1285,12 @@ impl Bus {
 
             let mid = mid | 1 << (u64::BITS - 1);
 
-            rc.send(self, mid, req, true, rc.reserve(&tid).await)?;
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            rc.send(self, mid, req, true, rc.reserve(&tid).await, group_id)?;
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -1126,6 +1316,8 @@ impl Bus {
         let tid = M::type_tag_();
         let rid = R::type_tag_();
         let eid = E::type_tag_();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tid.clone(), options, Some(rid), Some(eid), true);
         if let Some(rc) = iter.next() {
@@ -1134,12 +1326,18 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
             rc.send(
                 self,
                 mid | 1 << (u64::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tid).await,
+                group_id,
             )
             .map_err(|x| x.map_err(|_| unimplemented!()))?;
 

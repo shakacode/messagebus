@@ -173,19 +173,28 @@ impl GroupRegistry {
     /// Called when a batch of tasks completes. If the count reaches zero,
     /// waiters are notified.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if `count` exceeds the current processing count, which would
-    /// indicate a bug in the caller (mismatched increment/decrement).
+    /// Uses `saturating_sub` to prevent counter underflow in release builds.
+    /// In debug builds, an assertion will fire if underflow would occur.
     pub fn decrement_by(&self, group_id: GroupId, count: u64) {
         if let Some(entry) = self.groups.get(&group_id) {
-            let prev = entry.processing.fetch_sub(count, Ordering::SeqCst);
+            // Use fetch_update with saturating_sub to prevent underflow
+            let result =
+                entry
+                    .processing
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
+                        Some(prev.saturating_sub(count))
+                    });
+
+            // fetch_update always succeeds when closure returns Some
+            let prev = result.expect("fetch_update should always succeed");
+
             debug_assert!(
                 prev >= count,
                 "decrement_by underflow: count ({}) > previous value ({})",
                 count,
                 prev
             );
+
             if prev <= count {
                 // Count reached zero, notify waiters
                 entry.idle_notify.notify_waiters();

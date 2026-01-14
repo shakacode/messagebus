@@ -233,7 +233,7 @@ pub struct BusInner {
     closed: AtomicBool,
     maintain: Mutex<()>,
     /// Registry for tracking task groups.
-    group_registry: GroupRegistry,
+    group_registry: Arc<GroupRegistry>,
 }
 
 impl BusInner {
@@ -275,7 +275,7 @@ impl BusInner {
             lookup,
             closed: AtomicBool::new(false),
             maintain: Mutex::new(()),
-            group_registry: GroupRegistry::new(),
+            group_registry: Arc::new(GroupRegistry::new()),
         }
     }
 }
@@ -820,11 +820,12 @@ impl Bus {
         }
     }
 
-    /// Provides access to the group registry for increment/decrement operations.
+    /// Returns a clone of the Arc-wrapped group registry.
     ///
-    /// This is primarily for internal use by receivers when spawning tasks.
-    pub(crate) fn group_registry(&self) -> &GroupRegistry {
-        &self.inner.group_registry
+    /// This is used by [`GroupGuard`](crate::group::GroupGuard) to ensure
+    /// group counters are decremented even if a handler panics.
+    pub(crate) fn group_registry(&self) -> Arc<GroupRegistry> {
+        Arc::clone(&self.inner.group_registry)
     }
 
     // ==================== End Group-based Operations ====================

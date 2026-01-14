@@ -4,7 +4,7 @@ use tokio::sync::{mpsc::UnboundedSender, OwnedSemaphorePermit};
 
 use crate::{
     error::{Error, StdSyncSendError},
-    group::GroupId,
+    group::{GroupGuard, GroupId},
     receiver::Event,
     AsyncHandler, Bus, Handler, Message,
 };
@@ -70,6 +70,9 @@ where
         group_id: Option<GroupId>,
     ) {
         tokio::task::spawn_blocking(move || {
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::new(group_id, bus.group_registry());
+
             // Propagate group_id via task-local for any nested sends
             // Note: spawn_blocking runs in a blocking thread pool, so we use
             // Bus::with_group_context for sync handlers
@@ -83,10 +86,7 @@ where
             }
             drop(permit);
 
-            // Decrement group counter after task completes
-            if let Some(gid) = group_id {
-                bus.group_registry().decrement(gid);
-            }
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))
@@ -121,6 +121,9 @@ where
         group_id: Option<GroupId>,
     ) {
         tokio::spawn(async move {
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::new(group_id, bus.group_registry());
+
             // Propagate group_id via task-local for any nested sends
             let resp =
                 Bus::with_group_context_async(group_id, async { handler.handle(msg, &bus).await })
@@ -130,10 +133,7 @@ where
             }
             drop(permit);
 
-            // Decrement group counter after task completes
-            if let Some(gid) = group_id {
-                bus.group_registry().decrement(gid);
-            }
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))

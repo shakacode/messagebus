@@ -71,6 +71,70 @@ pub struct GroupRegistry {
     groups: DashMap<GroupId, GroupEntry>,
 }
 
+/// A guard that decrements the group counter when dropped.
+///
+/// This ensures that the group counter is decremented even if a handler panics,
+/// preventing `flush_group` from hanging indefinitely.
+///
+/// The guard holds a reference to the `GroupRegistry` through the `Arc<GroupRegistry>`
+/// stored in `BusInner`. Since spawned tasks require `'static` bounds, we must
+/// store the Arc rather than a reference.
+///
+/// # Example
+///
+/// ```ignore
+/// // For single message handlers:
+/// let guard = GroupGuard::new(group_id, bus.group_registry());
+///
+/// // For batch handlers:
+/// let guard = GroupGuard::with_count(group_id, bus.group_registry(), batch_size);
+///
+/// // ... handler code that might panic ...
+/// // guard automatically decrements counter when dropped
+/// ```
+pub struct GroupGuard {
+    group_id: Option<GroupId>,
+    registry: Arc<GroupRegistry>,
+    count: u64,
+}
+
+impl GroupGuard {
+    /// Creates a new guard that will decrement the counter by 1 when dropped.
+    ///
+    /// If `group_id` is `None`, the guard does nothing.
+    pub fn new(group_id: Option<GroupId>, registry: Arc<GroupRegistry>) -> Self {
+        Self {
+            group_id,
+            registry,
+            count: 1,
+        }
+    }
+
+    /// Creates a new guard that will decrement the counter by `count` when dropped.
+    ///
+    /// Useful for batch handlers where multiple messages are processed together.
+    /// If `group_id` is `None`, the guard does nothing.
+    pub fn with_count(
+        group_id: Option<GroupId>,
+        registry: Arc<GroupRegistry>,
+        count: usize,
+    ) -> Self {
+        Self {
+            group_id,
+            registry,
+            count: count as u64,
+        }
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(gid) = self.group_id {
+            self.registry.decrement_by(gid, self.count);
+        }
+    }
+}
+
 impl Default for GroupRegistry {
     fn default() -> Self {
         Self::new()

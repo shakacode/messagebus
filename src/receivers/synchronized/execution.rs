@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     error::{Error, StdSyncSendError},
-    group::GroupId,
+    group::{GroupGuard, GroupId},
     receiver::Event,
     AsyncSynchronizedHandler, Bus, Message, SynchronizedHandler,
 };
@@ -63,6 +63,9 @@ where
         group_id: Option<GroupId>,
     ) -> JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::new(group_id, bus.group_registry());
+
             // Propagate group_id via task-local for any nested sends
             let resp = if let Some(gid) = group_id {
                 Bus::with_group_context(gid, || block_on(handler.lock()).handle(msg, &bus))
@@ -73,10 +76,7 @@ where
                 log::error!("SynchronizedHandler error: {err}");
             }
 
-            // Decrement group counter after task completes
-            if let Some(gid) = group_id {
-                bus.group_registry().decrement(gid);
-            }
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))
@@ -110,6 +110,9 @@ where
         group_id: Option<GroupId>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::new(group_id, bus.group_registry());
+
             // Propagate group_id via task-local for any nested sends
             let resp = Bus::with_group_context_async(group_id, async {
                 handler.lock().await.handle(msg, &bus).await
@@ -119,10 +122,7 @@ where
                 log::error!("AsyncSynchronizedHandler error: {err}");
             }
 
-            // Decrement group counter after task completes
-            if let Some(gid) = group_id {
-                bus.group_registry().decrement(gid);
-            }
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))

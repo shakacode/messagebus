@@ -4,7 +4,7 @@ use tokio::sync::{mpsc::UnboundedSender, OwnedSemaphorePermit};
 
 use crate::{
     error::{Error, StdSyncSendError},
-    group::GroupId,
+    group::{GroupGuard, GroupId},
     receiver::Event,
     AsyncBatchHandler, BatchHandler, Bus, Message,
 };
@@ -67,6 +67,9 @@ where
         batch_size: usize,
     ) {
         tokio::task::spawn_blocking(move || {
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::with_count(group_id, bus.group_registry(), batch_size);
+
             let batch: T::InBatch = msgs.into_iter().collect();
             // Propagate group_id via task-local for any nested sends
             let resp = if let Some(gid) = group_id {
@@ -79,10 +82,7 @@ where
             }
             drop(permit);
 
-            // Decrement group counter for all messages in the batch
-            if let Some(gid) = group_id {
-                bus.group_registry().decrement_by(gid, batch_size as u64);
-            }
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             crate::process_batch_result!(resp, mids, response_tx);
         });
@@ -113,6 +113,9 @@ where
         batch_size: usize,
     ) {
         tokio::spawn(async move {
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::with_count(group_id, bus.group_registry(), batch_size);
+
             let batch: T::InBatch = msgs.into_iter().collect();
             // Propagate group_id via task-local for any nested sends
             let resp = Bus::with_group_context_async(group_id, async {
@@ -124,10 +127,7 @@ where
             }
             drop(permit);
 
-            // Decrement group counter for all messages in the batch
-            if let Some(gid) = group_id {
-                bus.group_registry().decrement_by(gid, batch_size as u64);
-            }
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             crate::process_batch_result!(resp, mids, response_tx);
         });

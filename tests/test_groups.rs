@@ -2263,3 +2263,563 @@ async fn test_send_boxed_one_group_tracking() {
 
     bus.close().await;
 }
+
+// ============================================================================
+// #[group_id_opt] attribute tests
+// ============================================================================
+
+/// A message using #[group_id_opt] where the expression returns Option<GroupId> directly.
+/// This is useful when group membership is conditional.
+#[derive(Debug, Clone, Message)]
+#[group_id_opt(self.optional_group_id)]
+struct OptionalGroupMessage {
+    optional_group_id: Option<i64>,
+    #[allow(dead_code)]
+    data: String,
+}
+
+/// A message using #[group_id_opt] with a method call that returns Option<GroupId>.
+#[derive(Debug, Clone, Message)]
+#[group_id_opt(self.compute_group_id())]
+struct ComputedOptionalGroupMessage {
+    value: i32,
+}
+
+impl ComputedOptionalGroupMessage {
+    fn compute_group_id(&self) -> Option<i64> {
+        if self.value > 0 {
+            Some(self.value as i64)
+        } else {
+            None
+        }
+    }
+}
+
+/// Test that #[group_id_opt] works when returning Some(group_id).
+#[tokio::test]
+async fn test_group_id_opt_with_some_value() {
+    let observed_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_group_ids_clone = observed_group_ids.clone();
+
+    struct OptionalGroupHandler {
+        observed_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<OptionalGroupMessage> for OptionalGroupHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: OptionalGroupMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.observed_group_ids.lock().push(Bus::current_group_id());
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(OptionalGroupHandler {
+            observed_group_ids: observed_group_ids_clone,
+        })
+        .subscribe_async::<OptionalGroupMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 123;
+
+    // Send message with Some(group_id)
+    bus.send(OptionalGroupMessage {
+        optional_group_id: Some(job_id),
+        data: "with group".into(),
+    })
+    .await
+    .unwrap();
+
+    bus.flush_all().await;
+
+    // Verify handler saw the group_id
+    {
+        let observed = observed_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0],
+            Some(job_id),
+            "#[group_id_opt] with Some value should propagate group_id"
+        );
+    }
+
+    // Group should be tracked and idle
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}
+
+/// Test that #[group_id_opt] works when returning None.
+#[tokio::test]
+async fn test_group_id_opt_with_none_value() {
+    let observed_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_group_ids_clone = observed_group_ids.clone();
+
+    struct OptionalGroupHandler {
+        observed_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<OptionalGroupMessage> for OptionalGroupHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: OptionalGroupMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.observed_group_ids.lock().push(Bus::current_group_id());
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(OptionalGroupHandler {
+            observed_group_ids: observed_group_ids_clone,
+        })
+        .subscribe_async::<OptionalGroupMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Send message with None group_id
+    bus.send(OptionalGroupMessage {
+        optional_group_id: None,
+        data: "no group".into(),
+    })
+    .await
+    .unwrap();
+
+    bus.flush_all().await;
+
+    // Verify handler saw None for group_id
+    {
+        let observed = observed_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0], None,
+            "#[group_id_opt] with None should result in no group_id"
+        );
+    }
+
+    // No groups should be tracked when group_id is None
+    assert_eq!(
+        bus.tracked_group_count(),
+        0,
+        "No groups should be tracked for None group_id"
+    );
+
+    bus.close().await;
+}
+
+/// Test that #[group_id_opt] works with computed expressions.
+#[tokio::test]
+async fn test_group_id_opt_with_computed_expression() {
+    let observed_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_group_ids_clone = observed_group_ids.clone();
+
+    struct ComputedGroupHandler {
+        observed_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ComputedOptionalGroupMessage> for ComputedGroupHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: ComputedOptionalGroupMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.observed_group_ids.lock().push(Bus::current_group_id());
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(ComputedGroupHandler {
+            observed_group_ids: observed_group_ids_clone,
+        })
+        .subscribe_async::<ComputedOptionalGroupMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Send message where compute_group_id() returns Some(42)
+    bus.send(ComputedOptionalGroupMessage { value: 42 })
+        .await
+        .unwrap();
+
+    // Send message where compute_group_id() returns None (value <= 0)
+    bus.send(ComputedOptionalGroupMessage { value: -5 })
+        .await
+        .unwrap();
+
+    bus.flush_all().await;
+
+    // Verify observed group_ids
+    {
+        let observed = observed_group_ids.lock();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(
+            observed[0],
+            Some(42),
+            "Positive value should compute to Some(42)"
+        );
+        assert_eq!(
+            observed[1], None,
+            "Non-positive value should compute to None"
+        );
+    }
+
+    bus.close().await;
+}
+
+/// Test that #[group_id_opt] correctly tracks groups when Some, and doesn't track when None.
+#[tokio::test]
+async fn test_group_id_opt_group_tracking() {
+    struct TrackingHandler;
+
+    #[async_trait]
+    impl AsyncHandler<OptionalGroupMessage> for TrackingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: OptionalGroupMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Simulate some work
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(TrackingHandler)
+        .subscribe_async::<OptionalGroupMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 999;
+
+    // Initially no groups tracked
+    assert_eq!(bus.tracked_group_count(), 0);
+
+    // Send message with Some(group_id)
+    bus.send(OptionalGroupMessage {
+        optional_group_id: Some(job_id),
+        data: "tracked".into(),
+    })
+    .await
+    .unwrap();
+
+    // Send message with None group_id
+    bus.send(OptionalGroupMessage {
+        optional_group_id: None,
+        data: "not tracked".into(),
+    })
+    .await
+    .unwrap();
+
+    // Wait for specific group to complete
+    bus.flush_group(job_id).await;
+    assert!(bus.is_group_idle(job_id));
+
+    // Flush all to ensure None message is also processed
+    bus.flush_all().await;
+
+    // Only the Some(group_id) message should have created a tracked group
+    assert_eq!(
+        bus.tracked_group_count(),
+        1,
+        "Only messages with Some group_id should be tracked"
+    );
+
+    // Cleanup
+    bus.remove_group(job_id);
+    assert_eq!(bus.tracked_group_count(), 0);
+
+    bus.close().await;
+}
+
+/// Test that #[group_id_opt] messages with Some participate in nested group propagation.
+#[tokio::test]
+async fn test_group_id_opt_nested_propagation() {
+    let child_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let child_group_ids_clone = child_group_ids.clone();
+
+    struct NestedOptHandler {
+        child_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<OptionalGroupMessage> for NestedOptHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: OptionalGroupMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Send child message without explicit group_id - should inherit
+            bus.send(ChildMessage {
+                parent_job_id: msg.optional_group_id.unwrap_or(0),
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for NestedOptHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: ChildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.child_group_ids.lock().push(Bus::current_group_id());
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(NestedOptHandler {
+            child_group_ids: child_group_ids_clone,
+        })
+        .subscribe_async::<OptionalGroupMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 555;
+
+    // Send parent with Some(group_id)
+    bus.send(OptionalGroupMessage {
+        optional_group_id: Some(job_id),
+        data: "parent".into(),
+    })
+    .await
+    .unwrap();
+
+    bus.flush_all().await;
+
+    // Child should have inherited the group_id
+    {
+        let observed = child_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0],
+            Some(job_id),
+            "Child should inherit group_id from #[group_id_opt] parent with Some"
+        );
+    }
+
+    bus.close().await;
+}
+
+/// Test that #[group_id_opt] messages with None don't create group context for children.
+#[tokio::test]
+async fn test_group_id_opt_none_no_propagation() {
+    let child_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let child_group_ids_clone = child_group_ids.clone();
+
+    struct NestedOptHandler {
+        child_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<OptionalGroupMessage> for NestedOptHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: OptionalGroupMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Send child message - should have no group context to inherit
+            bus.send(ChildMessage { parent_job_id: 0 }).await.unwrap();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for NestedOptHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: ChildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.child_group_ids.lock().push(Bus::current_group_id());
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(NestedOptHandler {
+            child_group_ids: child_group_ids_clone,
+        })
+        .subscribe_async::<OptionalGroupMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Send parent with None group_id
+    bus.send(OptionalGroupMessage {
+        optional_group_id: None,
+        data: "parent without group".into(),
+    })
+    .await
+    .unwrap();
+
+    bus.flush_all().await;
+
+    // Child should have no group_id (None)
+    {
+        let observed = child_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0], None,
+            "Child should have no group_id when parent used #[group_id_opt] with None"
+        );
+    }
+
+    bus.close().await;
+}
+
+/// Test mixed usage: some messages with #[group_id], some with #[group_id_opt].
+#[tokio::test]
+async fn test_group_id_opt_mixed_with_group_id() {
+    use std::sync::atomic::AtomicU64;
+
+    let job_message_count = Arc::new(AtomicU64::new(0));
+    let opt_message_count = Arc::new(AtomicU64::new(0));
+    let job_message_count_clone = job_message_count.clone();
+    let opt_message_count_clone = opt_message_count.clone();
+
+    struct MixedHandler {
+        job_count: Arc<AtomicU64>,
+        opt_count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<JobMessage> for MixedHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(&self, msg: JobMessage, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+            // #[group_id] always wraps in Some
+            assert_eq!(
+                Bus::current_group_id(),
+                Some(msg.job_id),
+                "#[group_id] should always provide Some"
+            );
+            self.job_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<OptionalGroupMessage> for MixedHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: OptionalGroupMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // #[group_id_opt] uses value directly
+            assert_eq!(
+                Bus::current_group_id(),
+                msg.optional_group_id,
+                "#[group_id_opt] should use Option value directly"
+            );
+            self.opt_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(MixedHandler {
+            job_count: job_message_count_clone,
+            opt_count: opt_message_count_clone,
+        })
+        .subscribe_async::<JobMessage>(8, Default::default())
+        .subscribe_async::<OptionalGroupMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Send JobMessage (uses #[group_id])
+    bus.send(JobMessage {
+        job_id: 100,
+        data: "job".into(),
+    })
+    .await
+    .unwrap();
+
+    // Send OptionalGroupMessage with Some (uses #[group_id_opt])
+    bus.send(OptionalGroupMessage {
+        optional_group_id: Some(200),
+        data: "opt with some".into(),
+    })
+    .await
+    .unwrap();
+
+    // Send OptionalGroupMessage with None (uses #[group_id_opt])
+    bus.send(OptionalGroupMessage {
+        optional_group_id: None,
+        data: "opt with none".into(),
+    })
+    .await
+    .unwrap();
+
+    bus.flush_all().await;
+
+    assert_eq!(job_message_count.load(Ordering::SeqCst), 1);
+    assert_eq!(opt_message_count.load(Ordering::SeqCst), 2);
+
+    // Two groups should be tracked (100 and 200), None doesn't create a group
+    assert_eq!(bus.tracked_group_count(), 2);
+
+    bus.close().await;
+}

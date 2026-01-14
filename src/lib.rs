@@ -10,6 +10,7 @@
 //! - **Multiple handler types**: synchronous, asynchronous, batched, and synchronized handlers
 //! - **Broadcast messaging**: send messages to all registered receivers
 //! - **Request/Response patterns**: send a message and await a typed response
+//! - **Task grouping**: assign group IDs to messages and wait for group completion
 //! - **Serialization support**: messages can be serialized for remote transport
 //! - **Backpressure handling**: built-in support for handling full queues
 //!
@@ -89,6 +90,61 @@
 //! - `#[message(shared)]` - Enable serialization for remote transport
 //! - `#[type_tag("custom::name")]` - Custom type identifier
 //! - `#[namespace("my_namespace")]` - Type tag namespace prefix
+//! - `#[group_id(expr)]` - Associate messages with a group for tracking
+//!
+//! ## Task Grouping
+//!
+//! Task grouping allows you to track related messages and wait for all tasks in a group
+//! to complete. This is useful for job processing, batch operations, or any scenario
+//! where you need to know when a set of related tasks has finished.
+//!
+//! ### Defining Grouped Messages
+//!
+//! Use the `#[group_id(expr)]` attribute to specify which field contains the group ID:
+//!
+//! ```rust,no_run
+//! use messagebus::derive::Message;
+//!
+//! #[derive(Debug, Clone, Message)]
+//! #[group_id(self.job_id)]
+//! struct ProcessJob {
+//!     job_id: i64,
+//!     task_name: String,
+//! }
+//! ```
+//!
+//! ### Waiting for Group Completion
+//!
+//! ```rust,no_run
+//! use messagebus::{Bus, GroupId};
+//!
+//! async fn process_job(bus: &Bus) {
+//!     let job_id: GroupId = 1001;
+//!
+//!     // Send multiple messages with the same group_id
+//!     // bus.send(ProcessJob { job_id, task_name: "Task A".into() }).await.unwrap();
+//!     // bus.send(ProcessJob { job_id, task_name: "Task B".into() }).await.unwrap();
+//!
+//!     // Wait for all tasks in the group to complete
+//!     bus.flush_group(job_id).await;
+//!
+//!     // Check if group is idle
+//!     assert!(bus.is_group_idle(job_id));
+//! }
+//! ```
+//!
+//! ### Group Propagation
+//!
+//! When a handler sends new messages, they automatically inherit the parent task's
+//! group ID (unless the child message has its own `#[group_id]` attribute).
+//!
+//! ### Group Management
+//!
+//! - [`Bus::flush_group`] - Wait for all tasks in a group to complete
+//! - [`Bus::is_group_idle`] - Check if a group has no in-flight tasks
+//! - [`Bus::current_group_id`] - Get the current task's group ID from within a handler
+//! - [`Bus::remove_group`] - Remove an idle group from the registry
+//! - [`Bus::tracked_group_count`] - Get the number of tracked groups
 
 mod builder;
 mod envelop;
@@ -582,6 +638,10 @@ impl Bus {
         }
     }
 
+    /// Flushes pending messages for two message types.
+    ///
+    /// Convenience method that flushes receivers handling either `M1` or `M2`.
+    /// See [`flush()`](Bus::flush) for details on flushing behavior.
     pub async fn flush2<M1: Message, M2: Message>(&self) {
         let fuse_count = 32i32;
         let mut breaked = false;
@@ -620,12 +680,20 @@ impl Bus {
         }
     }
 
+    /// Calls the `sync` method on all receivers.
+    ///
+    /// The `sync` method allows handlers to perform cleanup or persistence operations
+    /// after processing messages. This is useful for batched handlers that need to
+    /// flush internal buffers.
     pub async fn sync_all(&self) {
         for r in self.inner.receivers.iter() {
             r.sync(self).await;
         }
     }
 
+    /// Calls the `sync` method on receivers handling a specific message type.
+    ///
+    /// Only receivers that handle message type `M` will have their `sync` called.
     pub async fn sync<M: Message>(&self) {
         let receivers =
             self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
@@ -635,6 +703,9 @@ impl Bus {
         }
     }
 
+    /// Calls the `sync` method on receivers handling two message types.
+    ///
+    /// Convenience method that syncs receivers handling either `M1` or `M2`.
     pub async fn sync2<M1: Message, M2: Message>(&self) {
         let receivers1 =
             self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
@@ -647,6 +718,11 @@ impl Bus {
         }
     }
 
+    /// Waits for all receivers to become idle.
+    ///
+    /// A receiver is idle when it has no messages being processed and no pending
+    /// messages in its queue. This flushes each receiver and then waits for it
+    /// to complete all work.
     pub async fn idle_all(&self) {
         for r in self.inner.receivers.iter() {
             r.flush(self).await;
@@ -654,6 +730,9 @@ impl Bus {
         }
     }
 
+    /// Waits for receivers handling a specific message type to become idle.
+    ///
+    /// Only receivers that handle message type `M` will be waited on.
     pub async fn idle<M: Message>(&self) {
         let receivers =
             self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
@@ -664,6 +743,9 @@ impl Bus {
         }
     }
 
+    /// Waits for receivers handling two message types to become idle.
+    ///
+    /// Convenience method that waits for receivers handling either `M1` or `M2`.
     pub async fn idle2<M1: Message, M2: Message>(&self) {
         let receivers1 =
             self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
@@ -677,6 +759,15 @@ impl Bus {
         }
     }
 
+    /// Flushes all receivers and then calls sync on each.
+    ///
+    /// This combines [`flush_all()`](Bus::flush_all) and [`sync_all()`](Bus::sync_all)
+    /// for convenience.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `false`, waits for all receivers to be idle before flushing.
+    ///   If `true`, proceeds immediately to flush and sync.
     #[inline]
     pub async fn flush_and_sync_all(&self, force: bool) {
         if !force {
@@ -688,6 +779,15 @@ impl Bus {
         self.sync_all().await;
     }
 
+    /// Flushes and syncs receivers handling a specific message type.
+    ///
+    /// This combines [`flush()`](Bus::flush) and [`sync()`](Bus::sync) for a single
+    /// message type.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `false`, waits for receivers to be idle before flushing.
+    ///   If `true`, proceeds immediately.
     #[inline]
     pub async fn flush_and_sync<M: Message>(&self, force: bool) {
         if !force {
@@ -699,6 +799,14 @@ impl Bus {
         self.sync::<M>().await;
     }
 
+    /// Flushes and syncs receivers handling two message types.
+    ///
+    /// Convenience method combining flush and sync for types `M1` and `M2`.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `false`, waits for receivers to be idle before flushing.
+    ///   If `true`, proceeds immediately.
     #[inline]
     pub async fn flush_and_sync2<M1: Message, M2: Message>(&self, force: bool) {
         if !force {
@@ -1453,6 +1561,17 @@ impl Bus {
         }
     }
 
+    /// Sends a type-erased boxed message asynchronously.
+    ///
+    /// This is useful when you need to send messages without knowing their concrete
+    /// type at compile time, such as in relay or forwarding scenarios.
+    ///
+    /// The message must implement `Clone` (via `#[message(clone)]`) for broadcast
+    /// to multiple receivers.
+    ///
+    /// # Errors
+    ///
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn send_boxed(
         &self,
         msg: Box<dyn Message>,
@@ -1522,6 +1641,15 @@ impl Bus {
         Ok(())
     }
 
+    /// Sends a type-erased boxed message to a single receiver.
+    ///
+    /// Like [`send_boxed()`](Bus::send_boxed) but sends to only one receiver
+    /// instead of broadcasting.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn send_boxed_one(
         &self,
         msg: Box<dyn Message>,
@@ -1555,6 +1683,17 @@ impl Bus {
         }
     }
 
+    /// Sends a type-erased boxed request and waits for a boxed response.
+    ///
+    /// This is the type-erased version of [`request()`](Bus::request), useful
+    /// for relay or forwarding scenarios where message types aren't known at
+    /// compile time.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Receiver did not respond
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn request_boxed(
         &self,
         req: Box<dyn Message>,
@@ -1599,6 +1738,14 @@ impl Bus {
         }
     }
 
+    /// Sends a type-erased boxed request with explicit error type.
+    ///
+    /// Like [`request_boxed()`](Bus::request_boxed) but allows specifying a custom
+    /// error type `E` that the handler may return.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `E` - The error type the handler may return
     pub async fn request_boxed_we<E: StdSyncSendError>(
         &self,
         req: Box<dyn Message>,
@@ -1644,6 +1791,25 @@ impl Bus {
         }
     }
 
+    /// Deserializes and sends a message to a single receiver.
+    ///
+    /// This method is used for remote message transport. It deserializes the message
+    /// from a type-erased deserializer using the registered message type for the
+    /// given type tag.
+    ///
+    /// The message type must be registered with [`register_shared_message`] and
+    /// marked with `#[message(shared)]`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tt` - The type tag identifying the message type
+    /// * `de` - The deserializer to read the message from
+    /// * `options` - Send routing options
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Bus is closed
     pub async fn send_deserialize_one<'a, 'b: 'a, 'c: 'a>(
         &'a self,
         tt: TypeTag,
@@ -1671,6 +1837,25 @@ impl Bus {
         }
     }
 
+    /// Deserializes a request message and waits for a boxed response.
+    ///
+    /// This method is used for remote request/response transport. It deserializes
+    /// the request from a type-erased deserializer and returns the response as a
+    /// boxed message.
+    ///
+    /// The message type must be registered with [`register_shared_message`] and
+    /// marked with `#[message(shared)]`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tt` - The type tag identifying the request message type
+    /// * `de` - The deserializer to read the request from
+    /// * `options` - Send routing options
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Receiver did not respond or bus is closed
     pub async fn request_deserialize<'a, 'b: 'a, 'c: 'a>(
         &'a self,
         tt: TypeTag,

@@ -282,7 +282,8 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
                         );
                     }
                     // Parse #[group_id(expr)] where expr is a Rust expression
-                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone()).unwrap();
+                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone())
+                        .expect("invalid #[group_id(...)] attribute: expected #[group_id(expr)] where expr returns GroupId");
                     group_id_expr = Some(expr.inner);
                 }
 
@@ -295,7 +296,8 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
                         );
                     }
                     // Parse #[group_id_opt(expr)] where expr returns Option<GroupId>
-                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone()).unwrap();
+                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone())
+                        .expect("invalid #[group_id_opt(...)] attribute: expected #[group_id_opt(expr)] where expr returns Option<GroupId>");
                     group_id_expr = Some(expr.inner);
                     group_id_is_optional = true;
                 }

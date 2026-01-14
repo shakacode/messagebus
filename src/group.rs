@@ -232,17 +232,27 @@ impl GroupRegistry {
                 return;
             };
 
+            // Clone the Arc<Notify> so we can work with it after dropping the DashMap reference
+            let notify = Arc::clone(&entry.idle_notify);
+
+            // Create the Notified future and enable it BEFORE checking the condition.
+            // This registers our interest in the notification, preventing a race where
+            // the counter reaches zero between our check and the await.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Now check the condition - if idle, we're done
             if entry.processing.load(Ordering::SeqCst) == 0 {
                 return;
             }
 
-            // Clone the Arc<Notify> so we can await after dropping the DashMap reference
-            let notify = Arc::clone(&entry.idle_notify);
-            // Explicitly drop the entry to release the DashMap lock
+            // Drop the entry to release the DashMap lock before awaiting
             drop(entry);
 
-            // Now we can safely await without holding the DashMap reference
-            notify.notified().await;
+            // Wait for notification - we won't miss it because we registered
+            // interest before checking the condition
+            notified.await;
         }
     }
 

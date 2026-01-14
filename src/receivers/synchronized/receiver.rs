@@ -62,9 +62,15 @@ async fn synchronized_poller<T, M, R, E, Mode>(
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            Request::Request(mid, msg, _req) => {
-                let handle =
-                    Mode::spawn_handler(handler.clone(), msg, bus.clone(), stx.clone(), mid);
+            Request::Request(mid, msg, _req, group_id) => {
+                let handle = Mode::spawn_handler(
+                    handler.clone(),
+                    msg,
+                    bus.clone(),
+                    stx.clone(),
+                    mid,
+                    group_id,
+                );
                 pending_tasks.push(handle);
             }
 
@@ -169,8 +175,15 @@ where
     E: StdSyncSendError,
     Mode: Send + Sync + 'static,
 {
-    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, mid, m, req)
+    fn send(
+        &self,
+        mid: u64,
+        m: M,
+        req: bool,
+        _bus: &Bus,
+        group_id: Option<crate::group::GroupId>,
+    ) -> Result<(), Error<M>> {
+        send_typed_message(&self.tx, mid, m, req, group_id)
     }
 }
 

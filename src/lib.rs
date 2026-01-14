@@ -10,6 +10,7 @@
 //! - **Multiple handler types**: synchronous, asynchronous, batched, and synchronized handlers
 //! - **Broadcast messaging**: send messages to all registered receivers
 //! - **Request/Response patterns**: send a message and await a typed response
+//! - **Task grouping**: assign group IDs to messages and wait for group completion
 //! - **Serialization support**: messages can be serialized for remote transport
 //! - **Backpressure handling**: built-in support for handling full queues
 //!
@@ -89,10 +90,66 @@
 //! - `#[message(shared)]` - Enable serialization for remote transport
 //! - `#[type_tag("custom::name")]` - Custom type identifier
 //! - `#[namespace("my_namespace")]` - Type tag namespace prefix
+//! - `#[group_id(expr)]` - Associate messages with a group for tracking
+//!
+//! ## Task Grouping
+//!
+//! Task grouping allows you to track related messages and wait for all tasks in a group
+//! to complete. This is useful for job processing, batch operations, or any scenario
+//! where you need to know when a set of related tasks has finished.
+//!
+//! ### Defining Grouped Messages
+//!
+//! Use the `#[group_id(expr)]` attribute to specify which field contains the group ID:
+//!
+//! ```rust,no_run
+//! use messagebus::derive::Message;
+//!
+//! #[derive(Debug, Clone, Message)]
+//! #[group_id(self.job_id)]
+//! struct ProcessJob {
+//!     job_id: i64,
+//!     task_name: String,
+//! }
+//! ```
+//!
+//! ### Waiting for Group Completion
+//!
+//! ```rust,no_run
+//! use messagebus::{Bus, GroupId};
+//!
+//! async fn process_job(bus: &Bus) {
+//!     let job_id: GroupId = 1001;
+//!
+//!     // Send multiple messages with the same group_id
+//!     // bus.send(ProcessJob { job_id, task_name: "Task A".into() }).await.unwrap();
+//!     // bus.send(ProcessJob { job_id, task_name: "Task B".into() }).await.unwrap();
+//!
+//!     // Wait for all tasks in the group to complete
+//!     bus.flush_group(job_id).await;
+//!
+//!     // Check if group is idle
+//!     assert!(bus.is_group_idle(job_id));
+//! }
+//! ```
+//!
+//! ### Group Propagation
+//!
+//! When a handler sends new messages, they automatically inherit the parent task's
+//! group ID (unless the child message has its own `#[group_id]` attribute).
+//!
+//! ### Group Management
+//!
+//! - [`Bus::flush_group`] - Wait for all tasks in a group to complete
+//! - [`Bus::is_group_idle`] - Check if a group has no in-flight tasks
+//! - [`Bus::current_group_id`] - Get the current task's group ID from within a handler
+//! - [`Bus::remove_group`] - Remove an idle group from the registry
+//! - [`Bus::tracked_group_count`] - Get the number of tracked groups
 
 mod builder;
 mod envelop;
 pub mod error;
+pub mod group;
 pub mod handler;
 mod receiver;
 pub mod receivers;
@@ -133,6 +190,7 @@ use receiver::{Permit, Receiver};
 // public
 pub use builder::{BusBuilder, Module, RegisterEntry, SyncEntry, UnsyncEntry};
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
+pub use group::{GroupId, GroupRemovalResult};
 pub use handler::*;
 pub use receiver::{
     Action, Event, EventBoxed, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
@@ -141,7 +199,15 @@ pub use receiver::{
 pub use relay::Relay;
 pub use stats::Stats;
 pub use type_tag::{deserialize_shared_message, register_shared_message};
+
+use group::GroupRegistry;
 pub type Untyped = Arc<dyn Any + Send + Sync>;
+
+tokio::task_local! {
+    /// Task-local storage for the current group ID.
+    /// Used for propagating group context to child messages.
+    static CURRENT_GROUP: Option<GroupId>;
+}
 
 type LookupQuery = (TypeTag, Option<TypeTag>, Option<TypeTag>);
 
@@ -222,6 +288,8 @@ pub struct BusInner {
     lookup: HashMap<LookupQuery, SmallVec<[Receiver; 4]>>,
     closed: AtomicBool,
     maintain: Mutex<()>,
+    /// Registry for tracking task groups.
+    group_registry: Arc<GroupRegistry>,
 }
 
 impl BusInner {
@@ -263,6 +331,7 @@ impl BusInner {
             lookup,
             closed: AtomicBool::new(false),
             maintain: Mutex::new(()),
+            group_registry: Arc::new(GroupRegistry::new()),
         }
     }
 }
@@ -569,6 +638,10 @@ impl Bus {
         }
     }
 
+    /// Flushes pending messages for two message types.
+    ///
+    /// Convenience method that flushes receivers handling either `M1` or `M2`.
+    /// See [`flush()`](Bus::flush) for details on flushing behavior.
     pub async fn flush2<M1: Message, M2: Message>(&self) {
         let fuse_count = 32i32;
         let mut breaked = false;
@@ -607,12 +680,20 @@ impl Bus {
         }
     }
 
+    /// Calls the `sync` method on all receivers.
+    ///
+    /// The `sync` method allows handlers to perform cleanup or persistence operations
+    /// after processing messages. This is useful for batched handlers that need to
+    /// flush internal buffers.
     pub async fn sync_all(&self) {
         for r in self.inner.receivers.iter() {
             r.sync(self).await;
         }
     }
 
+    /// Calls the `sync` method on receivers handling a specific message type.
+    ///
+    /// Only receivers that handle message type `M` will have their `sync` called.
     pub async fn sync<M: Message>(&self) {
         let receivers =
             self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
@@ -622,6 +703,9 @@ impl Bus {
         }
     }
 
+    /// Calls the `sync` method on receivers handling two message types.
+    ///
+    /// Convenience method that syncs receivers handling either `M1` or `M2`.
     pub async fn sync2<M1: Message, M2: Message>(&self) {
         let receivers1 =
             self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
@@ -634,6 +718,11 @@ impl Bus {
         }
     }
 
+    /// Waits for all receivers to become idle.
+    ///
+    /// A receiver is idle when it has no messages being processed and no pending
+    /// messages in its queue. This flushes each receiver and then waits for it
+    /// to complete all work.
     pub async fn idle_all(&self) {
         for r in self.inner.receivers.iter() {
             r.flush(self).await;
@@ -641,6 +730,9 @@ impl Bus {
         }
     }
 
+    /// Waits for receivers handling a specific message type to become idle.
+    ///
+    /// Only receivers that handle message type `M` will be waited on.
     pub async fn idle<M: Message>(&self) {
         let receivers =
             self.select_receivers(M::type_tag_(), Default::default(), None, None, false);
@@ -651,6 +743,9 @@ impl Bus {
         }
     }
 
+    /// Waits for receivers handling two message types to become idle.
+    ///
+    /// Convenience method that waits for receivers handling either `M1` or `M2`.
     pub async fn idle2<M1: Message, M2: Message>(&self) {
         let receivers1 =
             self.select_receivers(M1::type_tag_(), Default::default(), None, None, false);
@@ -664,6 +759,15 @@ impl Bus {
         }
     }
 
+    /// Flushes all receivers and then calls sync on each.
+    ///
+    /// This combines [`flush_all()`](Bus::flush_all) and [`sync_all()`](Bus::sync_all)
+    /// for convenience.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `false`, waits for all receivers to be idle before flushing.
+    ///   If `true`, proceeds immediately to flush and sync.
     #[inline]
     pub async fn flush_and_sync_all(&self, force: bool) {
         if !force {
@@ -675,6 +779,15 @@ impl Bus {
         self.sync_all().await;
     }
 
+    /// Flushes and syncs receivers handling a specific message type.
+    ///
+    /// This combines [`flush()`](Bus::flush) and [`sync()`](Bus::sync) for a single
+    /// message type.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `false`, waits for receivers to be idle before flushing.
+    ///   If `true`, proceeds immediately.
     #[inline]
     pub async fn flush_and_sync<M: Message>(&self, force: bool) {
         if !force {
@@ -686,6 +799,14 @@ impl Bus {
         self.sync::<M>().await;
     }
 
+    /// Flushes and syncs receivers handling two message types.
+    ///
+    /// Convenience method combining flush and sync for types `M1` and `M2`.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `false`, waits for receivers to be idle before flushing.
+    ///   If `true`, proceeds immediately.
     #[inline]
     pub async fn flush_and_sync2<M1: Message, M2: Message>(&self, force: bool) {
         if !force {
@@ -695,6 +816,175 @@ impl Bus {
         self.flush2::<M1, M2>().await;
         self.sync2::<M1, M2>().await;
     }
+
+    // ==================== Group-based Operations ====================
+
+    /// Waits for all tasks belonging to a specific group to complete.
+    ///
+    /// This is useful for tracking progress of related tasks, such as all
+    /// chunks of a file processing job.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use messagebus::{Bus, GroupId};
+    ///
+    /// async fn process_job(bus: &Bus, job_id: GroupId) {
+    ///     // Send multiple messages with the same group_id...
+    ///
+    ///     // Wait for all tasks in this group to complete
+    ///     bus.flush_group(job_id).await;
+    /// }
+    /// ```
+    pub async fn flush_group(&self, group_id: GroupId) {
+        self.inner.group_registry.wait_idle(group_id).await;
+    }
+
+    /// Syncs only the receivers that have processed messages for a specific group.
+    ///
+    /// Unlike `sync_all()` which syncs every receiver, this method only syncs
+    /// receivers that have handled messages belonging to the specified group.
+    /// This prevents blocking between independent groups.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The group ID whose receivers should be synced
+    pub async fn sync_group(&self, group_id: GroupId) {
+        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+        for r in self.inner.receivers.iter() {
+            if receiver_ids.contains(&r.id()) {
+                r.sync(self).await;
+            }
+        }
+    }
+
+    /// Flushes and syncs all tasks belonging to a specific group.
+    ///
+    /// This combines waiting for group completion with targeted receiver sync operations.
+    /// Only receivers that processed messages from this group will be synced,
+    /// preventing blocking between independent groups.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The group ID to flush and sync
+    /// * `force` - If true, skips waiting for idle and proceeds directly to sync
+    pub async fn flush_and_sync_group(&self, group_id: GroupId, force: bool) {
+        if !force {
+            self.flush_group(group_id).await;
+        }
+        // Sync only receivers that handled messages from this group
+        self.sync_group(group_id).await;
+    }
+
+    /// Returns `true` if the group has no in-flight tasks.
+    ///
+    /// Unknown groups are considered idle (they have no tasks by definition).
+    #[inline]
+    pub fn is_group_idle(&self, group_id: GroupId) -> bool {
+        self.inner.group_registry.is_idle(group_id)
+    }
+
+    /// Returns the current number of in-flight tasks for a group.
+    ///
+    /// Returns 0 for unknown groups.
+    #[inline]
+    pub fn group_processing_count(&self, group_id: GroupId) -> u64 {
+        self.inner.group_registry.processing_count(group_id)
+    }
+
+    /// Removes a group from the registry only if it's idle.
+    ///
+    /// Use this to safely clean up groups that are no longer needed.
+    /// The check and removal are atomic, preventing race conditions.
+    ///
+    /// Returns a [`GroupRemovalResult`] indicating what happened:
+    /// - `Removed` if the group was successfully removed (it was idle)
+    /// - `NotIdle` if the group exists but has in-flight tasks
+    /// - `NotFound` if the group doesn't exist
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use messagebus::GroupRemovalResult;
+    ///
+    /// match bus.remove_group(job_id) {
+    ///     GroupRemovalResult::Removed => println!("Group cleaned up"),
+    ///     GroupRemovalResult::NotIdle => println!("Group still has in-flight tasks"),
+    ///     GroupRemovalResult::NotFound => println!("Group doesn't exist"),
+    /// }
+    /// ```
+    #[inline]
+    pub fn remove_group(&self, group_id: GroupId) -> GroupRemovalResult {
+        self.inner.group_registry.remove_if_idle(group_id)
+    }
+
+    /// Removes a group from the registry unconditionally.
+    ///
+    /// # Warning
+    ///
+    /// This does not check if the group is idle. Removing a group with
+    /// in-flight tasks will cause those tasks to not be tracked.
+    /// Prefer [`remove_group`](Self::remove_group) for safe cleanup.
+    ///
+    /// Returns `true` if the group was removed, `false` if it didn't exist.
+    #[inline]
+    pub fn force_remove_group(&self, group_id: GroupId) -> bool {
+        self.inner.group_registry.remove(group_id)
+    }
+
+    /// Returns the number of groups currently being tracked.
+    ///
+    /// Useful for monitoring memory usage in long-running applications.
+    #[inline]
+    pub fn tracked_group_count(&self) -> usize {
+        self.inner.group_registry.group_count()
+    }
+
+    /// Returns the current task's group ID, if any.
+    ///
+    /// This reads from task-local storage and returns the group ID
+    /// that was set when the current handler was invoked.
+    #[inline]
+    pub fn current_group_id() -> Option<GroupId> {
+        CURRENT_GROUP.try_with(|g| *g).unwrap_or(None)
+    }
+
+    /// Executes a closure with a group ID set in task-local storage.
+    ///
+    /// This is used to propagate group context to sync handlers running
+    /// in a blocking thread pool.
+    #[inline]
+    pub(crate) fn with_group_context<F, R>(group_id: GroupId, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        CURRENT_GROUP.sync_scope(Some(group_id), f)
+    }
+
+    /// Executes an async block with a group ID set in task-local storage.
+    ///
+    /// This is used to propagate group context to async handlers.
+    #[inline]
+    pub(crate) async fn with_group_context_async<F>(group_id: Option<GroupId>, f: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        if let Some(gid) = group_id {
+            CURRENT_GROUP.scope(Some(gid), f).await
+        } else {
+            f.await
+        }
+    }
+
+    /// Returns a clone of the Arc-wrapped group registry.
+    ///
+    /// This is used by [`GroupGuard`](crate::group::GroupGuard) to ensure
+    /// group counters are decremented even if a handler panics.
+    pub(crate) fn group_registry(&self) -> Arc<GroupRegistry> {
+        Arc::clone(&self.inner.group_registry)
+    }
+
+    // ==================== End Group-based Operations ====================
 
     fn try_reserve(&self, tt: &TypeTag, rs: &[Receiver]) -> Option<SmallVec<[Permit; 32]>> {
         let mut permits = SmallVec::<[Permit; 32]>::new();
@@ -768,6 +1058,8 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             let permits = if let Some(x) = self.try_reserve(&tt, rs) {
@@ -775,6 +1067,13 @@ impl Bus {
             } else {
                 return Err(SendError::Full(msg).into());
             };
+
+            // Increment group counter for each receiver and track receiver IDs
+            if let Some(gid) = group_id {
+                for r in rs.iter() {
+                    self.inner.group_registry.increment(gid, r.id());
+                }
+            }
 
             let mut iter = permits.into_iter().zip(rs.iter());
             let mut counter = 1;
@@ -784,13 +1083,22 @@ impl Bus {
                 let (p, r) = iter
                     .next()
                     .expect("iterator should have more elements based on counter");
-                let _ = r.send(self, mid, msg.clone(), false, p);
+                if r.send(self, mid, msg.clone(), false, p, group_id).is_err() {
+                    // Decrement counter on send failure since no handler will run
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
 
                 counter += 1;
             }
 
             if let Some((p, r)) = iter.next() {
-                let _ = r.send(self, mid, msg, false, p);
+                if r.send(self, mid, msg, false, p, group_id).is_err() {
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
                 return Ok(());
             }
         }
@@ -890,14 +1198,45 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             if let Some((last, head)) = rs.split_last() {
-                for r in head {
-                    let _ = r.send(self, mid, msg.clone(), false, r.reserve(&tt).await);
+                // Increment group counter for each receiver and track receiver IDs
+                if let Some(gid) = group_id {
+                    for r in head {
+                        self.inner.group_registry.increment(gid, r.id());
+                    }
+                    self.inner.group_registry.increment(gid, last.id());
                 }
 
-                let _ = last.send(self, mid, msg, false, last.reserve(&tt).await);
+                for r in head {
+                    if r.send(
+                        self,
+                        mid,
+                        msg.clone(),
+                        false,
+                        r.reserve(&tt).await,
+                        group_id,
+                    )
+                    .is_err()
+                    {
+                        // Decrement counter on send failure since no handler will run
+                        if let Some(gid) = group_id {
+                            self.inner.group_registry.decrement(gid);
+                        }
+                    }
+                }
+
+                if last
+                    .send(self, mid, msg, false, last.reserve(&tt).await, group_id)
+                    .is_err()
+                {
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
 
                 return Ok(());
             }
@@ -937,14 +1276,35 @@ impl Bus {
         }
 
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self.inner.lookup.get(&(msg.type_tag(), None, None)) {
             if let Some((last, head)) = rs.split_last() {
-                for r in head {
-                    let _ = r.force_send(self, mid, msg.clone(), false);
+                // Increment group counter for each receiver and track receiver IDs
+                if let Some(gid) = group_id {
+                    for r in head {
+                        self.inner.group_registry.increment(gid, r.id());
+                    }
+                    self.inner.group_registry.increment(gid, last.id());
                 }
 
-                let _ = last.force_send(self, mid, msg, false);
+                for r in head {
+                    if r.force_send(self, mid, msg.clone(), false, group_id)
+                        .is_err()
+                    {
+                        // Decrement counter on send failure since no handler will run
+                        if let Some(gid) = group_id {
+                            self.inner.group_registry.decrement(gid);
+                        }
+                    }
+                }
+
+                if last.force_send(self, mid, msg, false, group_id).is_err() {
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
 
                 return Ok(());
             }
@@ -976,6 +1336,8 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self
             .inner
@@ -989,7 +1351,19 @@ impl Bus {
                 return Err(SendError::Full(msg).into());
             };
 
-            Ok(rs.send(self, mid, msg, false, permits)?)
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rs.id());
+            }
+
+            if let Err(e) = rs.send(self, mid, msg, false, permits, group_id) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
+            Ok(())
         } else {
             Err(Error::NoReceivers)
         }
@@ -1011,6 +1385,8 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         if let Some(rs) = self
             .inner
@@ -1018,7 +1394,19 @@ impl Bus {
             .get(&(msg.type_tag(), None, None))
             .and_then(|rs| rs.first())
         {
-            Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await)?)
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rs.id());
+            }
+
+            if let Err(e) = rs.send(self, mid, msg, false, rs.reserve(&tt).await, group_id) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
+            Ok(())
         } else {
             Err(Error::NoReceivers)
         }
@@ -1091,6 +1479,8 @@ impl Bus {
     ) -> Result<R, Error<M>> {
         let tid = M::type_tag_();
         let rid = R::type_tag_();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tid.clone(), options, Some(rid), None, true);
         if let Some(rc) = iter.next() {
@@ -1100,7 +1490,18 @@ impl Bus {
 
             let mid = mid | 1 << (u64::BITS - 1);
 
-            rc.send(self, mid, req, true, rc.reserve(&tid).await)?;
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            if let Err(e) = rc.send(self, mid, req, true, rc.reserve(&tid).await, group_id) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -1126,6 +1527,8 @@ impl Bus {
         let tid = M::type_tag_();
         let rid = R::type_tag_();
         let eid = E::type_tag_();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tid.clone(), options, Some(rid), Some(eid), true);
         if let Some(rc) = iter.next() {
@@ -1134,14 +1537,25 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send(
+            // Increment group counter for single receiver and track receiver ID
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            if let Err(e) = rc.send(
                 self,
                 mid | 1 << (u64::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tid).await,
-            )
-            .map_err(|x| x.map_err(|_| unimplemented!()))?;
+                group_id,
+            ) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e.map_err(|_| unimplemented!()));
+            }
 
             rx.await.map_err(|x| x.specify::<M>())
         } else {
@@ -1149,6 +1563,17 @@ impl Bus {
         }
     }
 
+    /// Sends a type-erased boxed message asynchronously.
+    ///
+    /// This is useful when you need to send messages without knowing their concrete
+    /// type at compile time, such as in relay or forwarding scenarios.
+    ///
+    /// The message must implement `Clone` (via `#[message(clone)]`) for broadcast
+    /// to multiple receivers.
+    ///
+    /// # Errors
+    ///
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn send_boxed(
         &self,
         msg: Box<dyn Message>,
@@ -1160,30 +1585,57 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, false);
         let first = iter.next();
 
-        for r in iter {
-            let _ = r.send_boxed(
+        // Collect receivers to count them for group tracking
+        let rest: Vec<_> = iter.collect();
+
+        // Increment group counter for all receivers
+        if let Some(gid) = group_id {
+            if let Some(r) = &first {
+                self.inner.group_registry.increment(gid, r.id());
+            }
+            for r in &rest {
+                self.inner.group_registry.increment(gid, r.id());
+            }
+        }
+
+        for r in rest {
+            if r.send_boxed(
                 self,
                 mid,
                 msg.try_clone_boxed()
                     .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
-            );
+            )
+            .is_err()
+            {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+            }
         }
 
         if let Some(r) = first {
-            let _ = r.send_boxed(
+            if r.send_boxed(
                 self,
                 mid,
                 msg.try_clone_boxed()
                     .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
-            );
+            )
+            .is_err()
+            {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+            }
         } else {
             warn!("Unhandled message: no receivers");
         }
@@ -1191,6 +1643,15 @@ impl Bus {
         Ok(())
     }
 
+    /// Sends a type-erased boxed message to a single receiver.
+    ///
+    /// Like [`send_boxed()`](Bus::send_boxed) but sends to only one receiver
+    /// instead of broadcasting.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn send_boxed_one(
         &self,
         msg: Box<dyn Message>,
@@ -1202,15 +1663,39 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, false);
         if let Some(rs) = iter.next() {
-            Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
+            // Increment group counter for single receiver
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rs.id());
+            }
+
+            if let Err(e) = rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await) {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
+            Ok(())
         } else {
             Err(Error::NoReceivers)
         }
     }
 
+    /// Sends a type-erased boxed request and waits for a boxed response.
+    ///
+    /// This is the type-erased version of [`request()`](Bus::request), useful
+    /// for relay or forwarding scenarios where message types aren't known at
+    /// compile time.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Receiver did not respond
+    /// - [`SendError::Closed`] - Bus is closed
     pub async fn request_boxed(
         &self,
         req: Box<dyn Message>,
@@ -1221,6 +1706,8 @@ impl Bus {
         }
 
         let tt = req.type_tag();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
@@ -1229,13 +1716,23 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(
+            // Increment group counter for single receiver
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            if let Err(e) = rc.send_boxed(
                 self,
                 mid | 1 << (usize::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tt).await,
-            )?;
+            ) {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -1243,6 +1740,14 @@ impl Bus {
         }
     }
 
+    /// Sends a type-erased boxed request with explicit error type.
+    ///
+    /// Like [`request_boxed()`](Bus::request_boxed) but allows specifying a custom
+    /// error type `E` that the handler may return.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `E` - The error type the handler may return
     pub async fn request_boxed_we<E: StdSyncSendError>(
         &self,
         req: Box<dyn Message>,
@@ -1254,6 +1759,8 @@ impl Bus {
 
         let tt = req.type_tag();
         let eid = E::type_tag_();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, Some(eid), true);
         if let Some(rc) = iter.next() {
@@ -1262,14 +1769,23 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(
+            // Increment group counter for single receiver
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            if let Err(e) = rc.send_boxed(
                 self,
                 mid | 1 << (usize::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tt).await,
-            )
-            .map_err(|x| x.map_err(|_| unimplemented!()))?;
+            ) {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e.map_err(|_| unimplemented!()));
+            }
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -1277,6 +1793,25 @@ impl Bus {
         }
     }
 
+    /// Deserializes and sends a message to a single receiver.
+    ///
+    /// This method is used for remote message transport. It deserializes the message
+    /// from a type-erased deserializer using the registered message type for the
+    /// given type tag.
+    ///
+    /// The message type must be registered with [`register_shared_message`] and
+    /// marked with `#[message(shared)]`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tt` - The type tag identifying the message type
+    /// * `de` - The deserializer to read the message from
+    /// * `options` - Send routing options
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Bus is closed
     pub async fn send_deserialize_one<'a, 'b: 'a, 'c: 'a>(
         &'a self,
         tt: TypeTag,
@@ -1304,6 +1839,25 @@ impl Bus {
         }
     }
 
+    /// Deserializes a request message and waits for a boxed response.
+    ///
+    /// This method is used for remote request/response transport. It deserializes
+    /// the request from a type-erased deserializer and returns the response as a
+    /// boxed message.
+    ///
+    /// The message type must be registered with [`register_shared_message`] and
+    /// marked with `#[message(shared)]`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tt` - The type tag identifying the request message type
+    /// * `de` - The deserializer to read the request from
+    /// * `options` - Send routing options
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NoReceivers`] - No receiver for this message type
+    /// - [`Error::NoResponse`] - Receiver did not respond or bus is closed
     pub async fn request_deserialize<'a, 'b: 'a, 'c: 'a>(
         &'a self,
         tt: TypeTag,

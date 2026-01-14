@@ -18,6 +18,41 @@ Inspired by Actix
   - BatchedBufferUnordered Receiver (sync and async)
   - BatchedSynchronized (sync and async)
 5. Request/response api. There is an example is [demo_req_resp.rs](./examples/demo_req_resp.rs)
+6. Task grouping - assign group IDs to messages and wait for group completion
+
+### Task Grouping
+
+Task grouping allows you to track related messages and wait for all tasks in a group to complete. This is useful for job processing, batch operations, or any scenario where you need to know when a set of related tasks has finished.
+
+```rust
+use messagebus::{Bus, GroupId, derive::Message};
+
+// Define a message with a group_id
+#[derive(Debug, Clone, Message)]
+#[group_id(self.job_id)]
+struct ProcessJob {
+    job_id: i64,
+    task_name: String,
+}
+
+async fn process_job(bus: &Bus) {
+    let job_id: GroupId = 1001;
+
+    // Send multiple messages with the same group_id
+    bus.send(ProcessJob { job_id, task_name: "Task A".into() }).await.unwrap();
+    bus.send(ProcessJob { job_id, task_name: "Task B".into() }).await.unwrap();
+
+    // Wait for all tasks in the group to complete
+    bus.flush_group(job_id).await;
+
+    // Check if group is idle
+    assert!(bus.is_group_idle(job_id));
+}
+```
+
+Group IDs propagate to child messages - when a handler sends new messages, they inherit the parent task's group ID unless the child message has its own `#[group_id]` attribute.
+
+There is an example at [demo_groups.rs](./examples/demo_groups.rs)
 
 Here are the list of implmented handler kinds:
 ```rust

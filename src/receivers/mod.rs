@@ -68,8 +68,11 @@ macro_rules! process_batch_result {
     };
 }
 
+use crate::group::GroupId;
+
 #[derive(Debug)]
 pub(crate) enum Request<M> {
     Action(Action),
-    Request(u64, M, bool),
+    /// Request(mid, message, is_request, group_id)
+    Request(u64, M, bool, Option<GroupId>),
 }

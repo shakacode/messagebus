@@ -62,6 +62,32 @@ fn clone_part(ast: &syn::DeriveInput, has_clone: bool) -> proc_macro2::TokenStre
     }
 }
 
+fn group_id_part(group_id_expr: Option<syn::Expr>, is_optional: bool) -> proc_macro2::TokenStream {
+    if let Some(expr) = group_id_expr {
+        if is_optional {
+            // Expression returns Option<GroupId> directly
+            quote! {
+                fn group_id(&self) -> std::option::Option<messagebus::group::GroupId> {
+                    #expr
+                }
+            }
+        } else {
+            // Expression returns GroupId, wrap in Some
+            quote! {
+                fn group_id(&self) -> std::option::Option<messagebus::group::GroupId> {
+                    Some(#expr)
+                }
+            }
+        }
+    } else {
+        quote! {
+            fn group_id(&self) -> std::option::Option<messagebus::group::GroupId> {
+                None
+            }
+        }
+    }
+}
+
 fn type_tag_part(
     ast: &syn::DeriveInput,
     type_tag: Option<String>,
@@ -162,6 +188,20 @@ impl Parse for TypeTag {
     }
 }
 
+/// Parser for #[group_id(expr)] attribute
+struct GroupIdAttr {
+    pub inner: syn::Expr,
+}
+
+impl Parse for GroupIdAttr {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let content;
+        parenthesized!(content in input);
+        let expr: syn::Expr = content.parse()?;
+        Ok(GroupIdAttr { inner: expr })
+    }
+}
+
 #[derive(Default, Debug)]
 struct Tags {
     has_clone: bool,
@@ -200,11 +240,16 @@ impl Parse for Tags {
     }
 }
 
-#[proc_macro_derive(Message, attributes(type_tag, message, namespace))]
+#[proc_macro_derive(
+    Message,
+    attributes(type_tag, message, namespace, group_id, group_id_opt)
+)]
 pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut tags = Tags::default();
     let mut type_tag = None;
     let mut namespace = None;
+    let mut group_id_expr: Option<syn::Expr> = None;
+    let mut group_id_is_optional = false;
 
     let ast: DeriveInput = syn::parse(input).unwrap();
     let name = &ast.ident;
@@ -213,7 +258,8 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
         if let Some(i) = attr.path.get_ident() {
             match i.to_string().as_str() {
                 "message" => {
-                    let tt: Tags = syn::parse2(attr.tokens.clone()).unwrap();
+                    let tt: Tags = syn::parse2(attr.tokens.clone())
+                        .expect("invalid #[message(...)] attribute: expected #[message(clone)], #[message(shared)], or #[message(clone, shared)]");
                     tags.add(tt);
                 }
 
@@ -225,6 +271,35 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
                 "namespace" => {
                     let tt: TypeTag = syn::parse2(attr.tokens.clone()).unwrap();
                     namespace = Some(tt.inner.value());
+                }
+
+                "group_id" => {
+                    if group_id_expr.is_some() {
+                        panic!(
+                            "cannot use both #[group_id] and #[group_id_opt] on the same type; \
+                             use #[group_id(expr)] when expr returns GroupId, \
+                             or #[group_id_opt(expr)] when expr returns Option<GroupId>"
+                        );
+                    }
+                    // Parse #[group_id(expr)] where expr is a Rust expression
+                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone())
+                        .expect("invalid #[group_id(...)] attribute: expected #[group_id(expr)] where expr returns GroupId");
+                    group_id_expr = Some(expr.inner);
+                }
+
+                "group_id_opt" => {
+                    if group_id_expr.is_some() {
+                        panic!(
+                            "cannot use both #[group_id] and #[group_id_opt] on the same type; \
+                             use #[group_id(expr)] when expr returns GroupId, \
+                             or #[group_id_opt(expr)] when expr returns Option<GroupId>"
+                        );
+                    }
+                    // Parse #[group_id_opt(expr)] where expr returns Option<GroupId>
+                    let expr: GroupIdAttr = syn::parse2(attr.tokens.clone())
+                        .expect("invalid #[group_id_opt(...)] attribute: expected #[group_id_opt(expr)] where expr returns Option<GroupId>");
+                    group_id_expr = Some(expr.inner);
+                    group_id_is_optional = true;
                 }
 
                 _ => (),
@@ -267,6 +342,7 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     let type_tag_part = type_tag_part(&ast, type_tag, namespace);
     let shared_part = shared_part(&ast, tags.has_shared);
     let clone_part = clone_part(&ast, tags.has_clone);
+    let group_id_part = group_id_part(group_id_expr, group_id_is_optional);
 
     let init = Ident::new(
         &format!("__init_{}", hash(ast.clone().into_token_stream())),
@@ -303,6 +379,7 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
 
             #shared_part
             #clone_part
+            #group_id_part
         }
 
         #init_impl

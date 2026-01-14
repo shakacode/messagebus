@@ -93,6 +93,7 @@ pub trait TypeTagged {
 /// - Type erasure via [`Any`] for dynamic dispatch
 /// - Optional cloning for broadcast to multiple receivers
 /// - Optional serialization for remote transport
+/// - Optional group ID for task grouping
 ///
 /// # Implementing Message
 ///
@@ -120,6 +121,11 @@ pub trait TypeTagged {
 ///
 /// Messages marked with `#[message(shared)]` can be serialized for remote transport.
 /// This requires the message to implement `serde::Serialize` and `serde::Deserialize`.
+///
+/// # Task Grouping
+///
+/// Messages can be assigned to a group using `#[group_id(expr)]`. All tasks spawned
+/// for messages in the same group can be managed together using `Bus::flush_group`.
 pub trait Message: MessageBounds {
     /// Returns a reference to the message as `&dyn Any`.
     fn as_any_ref(&self) -> &dyn Any;
@@ -162,6 +168,16 @@ pub trait Message: MessageBounds {
     fn try_clone(&self) -> Option<Self>
     where
         Self: Sized;
+
+    /// Returns the group ID for this message, if any.
+    ///
+    /// Messages can be assigned to a group using `#[group_id(expr)]` on the struct.
+    /// All tasks spawned for messages in the same group can be managed together
+    /// using `Bus::flush_group`.
+    ///
+    /// Returns `None` if the message doesn't have a group ID
+    /// (i.e., not marked with `#[group_id(...)]`).
+    fn group_id(&self) -> Option<crate::group::GroupId>;
 }
 
 macro_rules! gen_impls {
@@ -287,6 +303,10 @@ impl Message for () {
 
     fn try_clone(&self) -> Option<Self> {
         Some(())
+    }
+
+    fn group_id(&self) -> Option<crate::group::GroupId> {
+        None
     }
 }
 
@@ -431,6 +451,10 @@ mod tests {
         fn try_clone(&self) -> Option<Self> {
             None
         }
+
+        fn group_id(&self) -> Option<crate::group::GroupId> {
+            None
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -493,6 +517,10 @@ mod tests {
 
         fn try_clone(&self) -> Option<Self> {
             Some(self.clone())
+        }
+
+        fn group_id(&self) -> Option<crate::group::GroupId> {
+            None
         }
     }
 
@@ -558,6 +586,10 @@ mod tests {
 
         fn try_clone(&self) -> Option<Self> {
             Some(self.clone())
+        }
+
+        fn group_id(&self) -> Option<crate::group::GroupId> {
+            None
         }
     }
 

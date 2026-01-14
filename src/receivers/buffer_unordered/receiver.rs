@@ -67,14 +67,22 @@ async fn buffer_unordered_poller<T, M, R, E, Mode>(
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            Request::Request(mid, msg, _req) => {
+            Request::Request(mid, msg, _req, group_id) => {
                 let permit = semaphore
                     .clone()
                     .acquire_owned()
                     .await
                     .expect("semaphore closed unexpectedly");
 
-                Mode::spawn_handler(handler.clone(), msg, bus.clone(), stx.clone(), mid, permit);
+                Mode::spawn_handler(
+                    handler.clone(),
+                    msg,
+                    bus.clone(),
+                    stx.clone(),
+                    mid,
+                    permit,
+                    group_id,
+                );
             }
 
             Request::Action(Action::Init(..)) => {
@@ -174,8 +182,15 @@ where
     E: StdSyncSendError,
     Mode: Send + Sync + 'static,
 {
-    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, mid, m, req)
+    fn send(
+        &self,
+        mid: u64,
+        m: M,
+        req: bool,
+        _bus: &Bus,
+        group_id: Option<crate::group::GroupId>,
+    ) -> Result<(), Error<M>> {
+        send_typed_message(&self.tx, mid, m, req, group_id)
     }
 }
 

@@ -8,6 +8,7 @@ use tokio::{
 
 use crate::{
     error::{Error, StdSyncSendError},
+    group::{GroupGuard, GroupId},
     receiver::Event,
     AsyncSynchronizedHandler, Bus, Message, SynchronizedHandler,
 };
@@ -23,12 +24,14 @@ where
     E: StdSyncSendError,
 {
     /// Spawn a task to handle the message. Returns a handle to await completion.
+    /// The group_id is propagated via task-local for any nested sends.
     fn spawn_handler(
         handler: Arc<Mutex<T>>,
         msg: M,
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
+        group_id: Option<GroupId>,
     ) -> JoinHandle<()>;
 
     /// Call the handler's sync method.
@@ -57,12 +60,23 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
+        group_id: Option<GroupId>,
     ) -> JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
-            let resp = block_on(handler.lock()).handle(msg, &bus);
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::new(group_id, bus.group_registry());
+
+            // Propagate group_id via task-local for any nested sends
+            let resp = if let Some(gid) = group_id {
+                Bus::with_group_context(gid, || block_on(handler.lock()).handle(msg, &bus))
+            } else {
+                block_on(handler.lock()).handle(msg, &bus)
+            };
             if let Err(err) = &resp {
                 log::error!("SynchronizedHandler error: {err}");
             }
+
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))
@@ -93,12 +107,22 @@ where
         bus: Bus,
         response_tx: UnboundedSender<Event<R, E>>,
         mid: u64,
+        group_id: Option<GroupId>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let resp = handler.lock().await.handle(msg, &bus).await;
+            // Create guard to ensure group counter is decremented even on panic
+            let _group_guard = GroupGuard::new(group_id, bus.group_registry());
+
+            // Propagate group_id via task-local for any nested sends
+            let resp = Bus::with_group_context_async(group_id, async {
+                handler.lock().await.handle(msg, &bus).await
+            })
+            .await;
             if let Err(err) = &resp {
                 log::error!("AsyncSynchronizedHandler error: {err}");
             }
+
+            // Group counter is decremented by _group_guard when it goes out of scope
 
             if response_tx
                 .send(Event::Response(mid, resp.map_err(Error::Other)))

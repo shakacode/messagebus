@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem, pin::Pin};
+use std::{collections::HashMap, marker::PhantomData, pin::Pin};
 
 use futures::{Future, Stream};
 use parking_lot::Mutex as ParkingLotMutex;
@@ -10,12 +10,13 @@ use super::{
 };
 use crate::{
     error::{Error, StdSyncSendError},
+    group::GroupId,
     receiver::{
         Action, Event, ReciveTypedReceiver, SendTypedReceiver, SendUntypedReceiver,
         UntypedPollerCallback,
     },
     receivers::{
-        common::{create_event_stream, send_typed_message, send_untyped_action},
+        common::{create_event_stream, send_typed_message, send_untyped_action, GroupBuffer},
         Request,
     },
     Bus, Message, Untyped,
@@ -38,6 +39,9 @@ pub type SynchronizedBatchedSync<M, R, E> = SynchronizedBatched<M, R, E, SyncExe
 pub type SynchronizedBatchedAsync<M, R, E> = SynchronizedBatched<M, R, E, AsyncExecution>;
 
 /// The poller function that processes messages in batches.
+///
+/// Messages are buffered per group_id, ensuring each batch contains only
+/// messages from the same group for proper group context propagation.
 async fn batch_synchronized_poller<T, M, R, E, Mode>(
     mut rx: mpsc::UnboundedReceiver<Request<M>>,
     bus: Bus,
@@ -55,19 +59,21 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
         .downcast::<Mutex<T>>()
         .expect("handler type mismatch - this is a bug");
 
-    let mut buffer_mid = Vec::with_capacity(cfg.batch_size);
-    let mut buffer = Vec::with_capacity(cfg.batch_size);
+    // Buffer messages by group_id so each batch contains only one group
+    let mut buffers: HashMap<Option<GroupId>, GroupBuffer<M>> = HashMap::new();
     let mut pending_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            Request::Request(mid, msg, req) => {
-                buffer_mid.push((mid, req));
-                buffer.push(msg);
+            Request::Request(mid, msg, req, group_id) => {
+                let buffer = buffers
+                    .entry(group_id)
+                    .or_insert_with(|| GroupBuffer::new(cfg.batch_size));
+                buffer.push(mid, msg, req);
 
-                if buffer_mid.len() >= cfg.batch_size {
-                    let batch_mids = mem::take(&mut buffer_mid);
-                    let batch_msgs = mem::take(&mut buffer);
+                if buffer.len() >= cfg.batch_size {
+                    let (batch_msgs, batch_mids) = buffer.take();
+                    let batch_size = batch_msgs.len();
 
                     let handle = Mode::spawn_batch_handler(
                         handler.clone(),
@@ -75,6 +81,8 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
                         batch_mids,
                         bus.clone(),
                         stx.clone(),
+                        group_id,
+                        batch_size,
                     );
                     pending_tasks.push(handle);
                 }
@@ -93,19 +101,23 @@ async fn batch_synchronized_poller<T, M, R, E, Mode>(
             }
 
             Request::Action(Action::Flush) => {
-                // Process remaining messages in buffer
-                if !buffer_mid.is_empty() {
-                    let batch_mids = mem::take(&mut buffer_mid);
-                    let batch_msgs = mem::take(&mut buffer);
+                // Process remaining messages in all buffers
+                for (group_id, mut buffer) in buffers.drain() {
+                    if !buffer.is_empty() {
+                        let (batch_msgs, batch_mids) = buffer.take();
+                        let batch_size = batch_msgs.len();
 
-                    let handle = Mode::spawn_batch_handler(
-                        handler.clone(),
-                        batch_msgs,
-                        batch_mids,
-                        bus.clone(),
-                        stx.clone(),
-                    );
-                    pending_tasks.push(handle);
+                        let handle = Mode::spawn_batch_handler(
+                            handler.clone(),
+                            batch_msgs,
+                            batch_mids,
+                            bus.clone(),
+                            stx.clone(),
+                            group_id,
+                            batch_size,
+                        );
+                        pending_tasks.push(handle);
+                    }
                 }
 
                 // Wait for all pending batch tasks to complete
@@ -201,8 +213,15 @@ where
     E: StdSyncSendError,
     Mode: Send + Sync + 'static,
 {
-    fn send(&self, mid: u64, m: M, req: bool, _bus: &Bus) -> Result<(), Error<M>> {
-        send_typed_message(&self.tx, mid, m, req)
+    fn send(
+        &self,
+        mid: u64,
+        m: M,
+        req: bool,
+        _bus: &Bus,
+        group_id: Option<crate::group::GroupId>,
+    ) -> Result<(), Error<M>> {
+        send_typed_message(&self.tx, mid, m, req, group_id)
     }
 }
 

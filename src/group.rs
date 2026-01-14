@@ -273,20 +273,23 @@ impl GroupRegistry {
     /// - `Some(false)` if the group exists but is not idle (has in-flight tasks)
     /// - `None` if the group doesn't exist
     pub fn remove_if_idle(&self, group_id: GroupId) -> Option<bool> {
-        // First check if the group exists
-        if !self.groups.contains_key(&group_id) {
-            return None;
-        }
-
         // Atomically check if idle and remove
-        let removed = self
+        if self
             .groups
             .remove_if(&group_id, |_, entry| {
                 entry.processing.load(Ordering::Relaxed) == 0
             })
-            .is_some();
+            .is_some()
+        {
+            return Some(true);
+        }
 
-        Some(removed)
+        // remove_if returned None - either didn't exist or wasn't idle
+        if self.groups.contains_key(&group_id) {
+            Some(false) // exists but not idle
+        } else {
+            None // doesn't exist
+        }
     }
 
     /// Removes a group from the registry unconditionally.

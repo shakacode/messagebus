@@ -190,7 +190,7 @@ use receiver::{Permit, Receiver};
 // public
 pub use builder::{BusBuilder, Module, RegisterEntry, SyncEntry, UnsyncEntry};
 pub use envelop::{IntoBoxedMessage, Message, MessageBounds, SharedMessage, TypeTag, TypeTagged};
-pub use group::GroupId;
+pub use group::{GroupId, GroupRemovalResult};
 pub use handler::*;
 pub use receiver::{
     Action, Event, EventBoxed, ReciveTypedReceiver, ReciveUntypedReceiver, SendTypedReceiver,
@@ -897,22 +897,24 @@ impl Bus {
     /// Use this to safely clean up groups that are no longer needed.
     /// The check and removal are atomic, preventing race conditions.
     ///
-    /// Returns:
-    /// - `Some(true)` if the group was removed (it was idle)
-    /// - `Some(false)` if the group exists but has in-flight tasks
-    /// - `None` if the group doesn't exist
+    /// Returns a [`GroupRemovalResult`] indicating what happened:
+    /// - `Removed` if the group was successfully removed (it was idle)
+    /// - `NotIdle` if the group exists but has in-flight tasks
+    /// - `NotFound` if the group doesn't exist
     ///
     /// # Example
     ///
     /// ```ignore
+    /// use messagebus::GroupRemovalResult;
+    ///
     /// match bus.remove_group(job_id) {
-    ///     Some(true) => println!("Group cleaned up"),
-    ///     Some(false) => println!("Group still has in-flight tasks"),
-    ///     None => println!("Group doesn't exist"),
+    ///     GroupRemovalResult::Removed => println!("Group cleaned up"),
+    ///     GroupRemovalResult::NotIdle => println!("Group still has in-flight tasks"),
+    ///     GroupRemovalResult::NotFound => println!("Group doesn't exist"),
     /// }
     /// ```
     #[inline]
-    pub fn remove_group(&self, group_id: GroupId) -> Option<bool> {
+    pub fn remove_group(&self, group_id: GroupId) -> GroupRemovalResult {
         self.inner.group_registry.remove_if_idle(group_id)
     }
 

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use messagebus::derive::Message;
 use messagebus::error::GenericError;
-use messagebus::{AsyncHandler, Bus, GroupId};
+use messagebus::{AsyncHandler, Bus, GroupId, GroupRemovalResult};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -2093,7 +2093,7 @@ async fn test_group_cleanup() {
         assert!(bus.is_group_idle(group));
         assert_eq!(
             bus.remove_group(group),
-            Some(true),
+            GroupRemovalResult::Removed,
             "Group {} should be removed (idle)",
             group
         );
@@ -2102,8 +2102,8 @@ async fn test_group_cleanup() {
     // All groups cleaned up
     assert_eq!(bus.tracked_group_count(), 0);
 
-    // Removing non-existent group returns None
-    assert_eq!(bus.remove_group(999), None);
+    // Removing non-existent group returns NotFound
+    assert_eq!(bus.remove_group(999), GroupRemovalResult::NotFound);
 
     bus.close().await;
 }
@@ -2168,10 +2168,10 @@ async fn test_remove_group_rejects_active_group() {
     // Group should not be idle
     assert!(!bus.is_group_idle(42));
 
-    // Attempt to remove should fail (returns Some(false))
+    // Attempt to remove should fail (returns NotIdle)
     assert_eq!(
         bus.remove_group(42),
-        Some(false),
+        GroupRemovalResult::NotIdle,
         "Should refuse to remove active group"
     );
 
@@ -2183,7 +2183,7 @@ async fn test_remove_group_rejects_active_group() {
     bus.flush_group(42).await;
 
     // Now removal should succeed
-    assert_eq!(bus.remove_group(42), Some(true));
+    assert_eq!(bus.remove_group(42), GroupRemovalResult::Removed);
     assert_eq!(bus.tracked_group_count(), 0);
 
     bus.close().await;
@@ -2259,7 +2259,7 @@ async fn test_send_boxed_one_group_tracking() {
     assert_eq!(bus.tracked_group_count(), 1);
 
     // Cleanup
-    assert_eq!(bus.remove_group(job_id), Some(true));
+    assert_eq!(bus.remove_group(job_id), GroupRemovalResult::Removed);
 
     bus.close().await;
 }

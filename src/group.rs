@@ -41,6 +41,19 @@ use tokio::sync::Notify;
 /// if a different type is needed.
 pub type GroupId = i64;
 
+/// Result of attempting to remove a group from the registry.
+///
+/// Returned by [`GroupRegistry::remove_if_idle`] and [`Bus::remove_group`](crate::Bus::remove_group).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupRemovalResult {
+    /// The group was successfully removed (it was idle with no in-flight tasks).
+    Removed,
+    /// The group exists but cannot be removed because it has in-flight tasks.
+    NotIdle,
+    /// The group was not found in the registry.
+    NotFound,
+}
+
 /// Internal entry for tracking a single group's state.
 struct GroupEntry {
     /// Count of in-flight tasks for this group.
@@ -268,11 +281,11 @@ impl GroupRegistry {
     /// Use this to safely clean up groups that are no longer needed.
     /// The check and removal are atomic, preventing race conditions.
     ///
-    /// Returns:
-    /// - `Some(true)` if the group was removed (it was idle)
-    /// - `Some(false)` if the group exists but is not idle (has in-flight tasks)
-    /// - `None` if the group doesn't exist
-    pub fn remove_if_idle(&self, group_id: GroupId) -> Option<bool> {
+    /// Returns a [`GroupRemovalResult`] indicating what happened:
+    /// - `Removed` if the group was successfully removed (it was idle)
+    /// - `NotIdle` if the group exists but has in-flight tasks
+    /// - `NotFound` if the group doesn't exist
+    pub fn remove_if_idle(&self, group_id: GroupId) -> GroupRemovalResult {
         // Atomically check if idle and remove
         if self
             .groups
@@ -281,14 +294,14 @@ impl GroupRegistry {
             })
             .is_some()
         {
-            return Some(true);
+            return GroupRemovalResult::Removed;
         }
 
         // remove_if returned None - either didn't exist or wasn't idle
         if self.groups.contains_key(&group_id) {
-            Some(false) // exists but not idle
+            GroupRemovalResult::NotIdle
         } else {
-            None // doesn't exist
+            GroupRemovalResult::NotFound
         }
     }
 

@@ -1180,10 +1180,21 @@ impl Bus {
                 }
 
                 for r in head {
-                    let _ = r.force_send(self, mid, msg.clone(), false, group_id);
+                    if r.force_send(self, mid, msg.clone(), false, group_id)
+                        .is_err()
+                    {
+                        // Decrement counter on send failure since no handler will run
+                        if let Some(gid) = group_id {
+                            self.inner.group_registry.decrement(gid);
+                        }
+                    }
                 }
 
-                let _ = last.force_send(self, mid, msg, false, group_id);
+                if last.force_send(self, mid, msg, false, group_id).is_err() {
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
 
                 return Ok(());
             }
@@ -1235,7 +1246,14 @@ impl Bus {
                 self.inner.group_registry.increment(gid, rs.id());
             }
 
-            Ok(rs.send(self, mid, msg, false, permits, group_id)?)
+            if let Err(e) = rs.send(self, mid, msg, false, permits, group_id) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
+            Ok(())
         } else {
             Err(Error::NoReceivers)
         }
@@ -1271,7 +1289,14 @@ impl Bus {
                 self.inner.group_registry.increment(gid, rs.id());
             }
 
-            Ok(rs.send(self, mid, msg, false, rs.reserve(&tt).await, group_id)?)
+            if let Err(e) = rs.send(self, mid, msg, false, rs.reserve(&tt).await, group_id) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
+            Ok(())
         } else {
             Err(Error::NoReceivers)
         }

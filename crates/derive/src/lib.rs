@@ -258,7 +258,8 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
         if let Some(i) = attr.path.get_ident() {
             match i.to_string().as_str() {
                 "message" => {
-                    let tt: Tags = syn::parse2(attr.tokens.clone()).unwrap();
+                    let tt: Tags = syn::parse2(attr.tokens.clone())
+                        .expect("invalid #[message(...)] attribute: expected #[message(clone)], #[message(shared)], or #[message(clone, shared)]");
                     tags.add(tt);
                 }
 

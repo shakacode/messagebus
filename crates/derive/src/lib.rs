@@ -274,12 +274,26 @@ pub fn derive_message(input: proc_macro::TokenStream) -> proc_macro::TokenStream
                 }
 
                 "group_id" => {
+                    if group_id_expr.is_some() {
+                        panic!(
+                            "cannot use both #[group_id] and #[group_id_opt] on the same type; \
+                             use #[group_id(expr)] when expr returns GroupId, \
+                             or #[group_id_opt(expr)] when expr returns Option<GroupId>"
+                        );
+                    }
                     // Parse #[group_id(expr)] where expr is a Rust expression
                     let expr: GroupIdAttr = syn::parse2(attr.tokens.clone()).unwrap();
                     group_id_expr = Some(expr.inner);
                 }
 
                 "group_id_opt" => {
+                    if group_id_expr.is_some() {
+                        panic!(
+                            "cannot use both #[group_id] and #[group_id_opt] on the same type; \
+                             use #[group_id(expr)] when expr returns GroupId, \
+                             or #[group_id_opt(expr)] when expr returns Option<GroupId>"
+                        );
+                    }
                     // Parse #[group_id_opt(expr)] where expr returns Option<GroupId>
                     let expr: GroupIdAttr = syn::parse2(attr.tokens.clone()).unwrap();
                     group_id_expr = Some(expr.inner);

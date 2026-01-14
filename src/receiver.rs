@@ -426,12 +426,14 @@ where
         req: bool,
         bus: &Bus,
     ) -> Result<(), Error<Box<dyn Message>>> {
+        // Extract group_id before downcasting so untyped dispatch participates in group tracking
+        let group_id = boxed_msg.group_id();
         let boxed = boxed_msg
             .as_any_boxed()
             .downcast::<M>()
             .map_err(|_| Error::MessageCastError)?;
 
-        SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus, None)
+        SendTypedReceiver::send(&self.inner, mid, *boxed, req, bus, group_id)
             .map_err(|err| err.map_msg(|m| m.into_boxed()))
     }
 

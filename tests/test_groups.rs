@@ -1962,3 +1962,79 @@ async fn test_multiple_concurrent_requests_same_group() {
 
     bus.close().await;
 }
+
+/// Test that boxed messages preserve group_id for untyped dispatch.
+/// This verifies fix #4: extract group_id from boxed_msg before downcasting.
+#[tokio::test]
+async fn test_boxed_message_preserves_group_id() {
+    let observed_group_id = Arc::new(Mutex::new(None::<Option<GroupId>>));
+    let observed_group_id_clone = observed_group_id.clone();
+
+    struct BoxedHandler {
+        observed_group_id: Arc<Mutex<Option<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GroupedRequest> for BoxedHandler {
+        type Error = TestError;
+        type Response = GroupedResponse;
+
+        async fn handle(
+            &self,
+            msg: GroupedRequest,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Record the group_id from task-local context
+            *self.observed_group_id.lock() = Some(Bus::current_group_id());
+            Ok(GroupedResponse {
+                result: msg.value * 2,
+            })
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(BoxedHandler {
+            observed_group_id: observed_group_id_clone,
+        })
+        .subscribe_async::<GroupedRequest>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 777;
+
+    // Verify group counter starts at 0
+    assert!(bus.is_group_idle(job_id));
+
+    // Send via request_boxed - this uses the untyped dispatch path
+    let boxed_msg: Box<dyn messagebus::Message> = Box::new(GroupedRequest { job_id, value: 21 });
+
+    let response = bus
+        .request_boxed(boxed_msg, Default::default())
+        .await
+        .unwrap();
+
+    // Verify response
+    let result = response
+        .as_any_ref()
+        .downcast_ref::<GroupedResponse>()
+        .unwrap();
+    assert_eq!(result.result, 42);
+
+    // Verify the handler saw the correct group_id via task-local context
+    {
+        let observed = observed_group_id.lock();
+        assert_eq!(
+            *observed,
+            Some(Some(job_id)),
+            "Boxed message should propagate group_id to handler context"
+        );
+    }
+
+    // Group should be idle after request completes
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}

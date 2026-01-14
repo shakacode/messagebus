@@ -263,10 +263,39 @@ impl GroupRegistry {
         }
     }
 
-    /// Removes a group from the registry.
+    /// Removes a group from the registry only if it's idle (no in-flight tasks).
     ///
-    /// Use this to clean up groups that are no longer needed to prevent
-    /// memory growth in long-running applications.
+    /// Use this to safely clean up groups that are no longer needed.
+    /// The check and removal are atomic, preventing race conditions.
+    ///
+    /// Returns:
+    /// - `Some(true)` if the group was removed (it was idle)
+    /// - `Some(false)` if the group exists but is not idle (has in-flight tasks)
+    /// - `None` if the group doesn't exist
+    pub fn remove_if_idle(&self, group_id: GroupId) -> Option<bool> {
+        // First check if the group exists
+        if !self.groups.contains_key(&group_id) {
+            return None;
+        }
+
+        // Atomically check if idle and remove
+        let removed = self
+            .groups
+            .remove_if(&group_id, |_, entry| {
+                entry.processing.load(Ordering::Relaxed) == 0
+            })
+            .is_some();
+
+        Some(removed)
+    }
+
+    /// Removes a group from the registry unconditionally.
+    ///
+    /// # Warning
+    ///
+    /// This does not check if the group is idle. Removing a group with
+    /// in-flight tasks will cause those tasks to not be tracked.
+    /// Prefer [`remove_if_idle`](Self::remove_if_idle) for safe cleanup.
     ///
     /// Returns `true` if the group was removed, `false` if it didn't exist.
     pub fn remove(&self, group_id: GroupId) -> bool {

@@ -2038,3 +2038,153 @@ async fn test_boxed_message_preserves_group_id() {
 
     bus.close().await;
 }
+
+/// Test that groups can be removed to free memory.
+#[tokio::test]
+async fn test_group_cleanup() {
+    struct SimpleHandler;
+
+    #[async_trait]
+    impl AsyncHandler<JobMessage> for SimpleHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: JobMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(SimpleHandler)
+        .subscribe_async::<JobMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Initially no groups tracked
+    assert_eq!(bus.tracked_group_count(), 0);
+
+    // Send messages to multiple groups
+    for group in 1..=5 {
+        bus.send(JobMessage {
+            job_id: group,
+            data: format!("job {}", group),
+        })
+        .await
+        .unwrap();
+    }
+
+    // Wait for all to complete
+    for group in 1..=5 {
+        bus.flush_group(group).await;
+    }
+
+    // Groups are tracked even after completion
+    assert_eq!(bus.tracked_group_count(), 5);
+
+    // Remove completed groups (should succeed since they're idle)
+    for group in 1..=5 {
+        assert!(bus.is_group_idle(group));
+        assert_eq!(
+            bus.remove_group(group),
+            Some(true),
+            "Group {} should be removed (idle)",
+            group
+        );
+    }
+
+    // All groups cleaned up
+    assert_eq!(bus.tracked_group_count(), 0);
+
+    // Removing non-existent group returns None
+    assert_eq!(bus.remove_group(999), None);
+
+    bus.close().await;
+}
+
+/// Test that remove_group refuses to remove groups with in-flight tasks.
+#[tokio::test]
+async fn test_remove_group_rejects_active_group() {
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_clone = barrier.clone();
+
+    struct SlowHandler {
+        barrier: Arc<Barrier>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<JobMessage> for SlowHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: JobMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Wait for test to try removing the group
+            self.barrier.wait().await;
+            // Give test time to attempt removal
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(SlowHandler {
+            barrier: barrier_clone,
+        })
+        .subscribe_async::<JobMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Send a message that will block in handler
+    let bus_clone = bus.clone();
+    let handle = tokio::spawn(async move {
+        bus_clone
+            .send(JobMessage {
+                job_id: 42,
+                data: "test".into(),
+            })
+            .await
+            .unwrap();
+    });
+
+    // Wait for handler to start
+    barrier.wait().await;
+
+    // Group should not be idle
+    assert!(!bus.is_group_idle(42));
+
+    // Attempt to remove should fail (returns Some(false))
+    assert_eq!(
+        bus.remove_group(42),
+        Some(false),
+        "Should refuse to remove active group"
+    );
+
+    // Group should still be tracked
+    assert_eq!(bus.tracked_group_count(), 1);
+
+    // Wait for handler to complete
+    handle.await.unwrap();
+    bus.flush_group(42).await;
+
+    // Now removal should succeed
+    assert_eq!(bus.remove_group(42), Some(true));
+    assert_eq!(bus.tracked_group_count(), 0);
+
+    bus.close().await;
+}

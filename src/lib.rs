@@ -784,6 +784,52 @@ impl Bus {
         self.inner.group_registry.processing_count(group_id)
     }
 
+    /// Removes a group from the registry only if it's idle.
+    ///
+    /// Use this to safely clean up groups that are no longer needed.
+    /// The check and removal are atomic, preventing race conditions.
+    ///
+    /// Returns:
+    /// - `Some(true)` if the group was removed (it was idle)
+    /// - `Some(false)` if the group exists but has in-flight tasks
+    /// - `None` if the group doesn't exist
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match bus.remove_group(job_id) {
+    ///     Some(true) => println!("Group cleaned up"),
+    ///     Some(false) => println!("Group still has in-flight tasks"),
+    ///     None => println!("Group doesn't exist"),
+    /// }
+    /// ```
+    #[inline]
+    pub fn remove_group(&self, group_id: GroupId) -> Option<bool> {
+        self.inner.group_registry.remove_if_idle(group_id)
+    }
+
+    /// Removes a group from the registry unconditionally.
+    ///
+    /// # Warning
+    ///
+    /// This does not check if the group is idle. Removing a group with
+    /// in-flight tasks will cause those tasks to not be tracked.
+    /// Prefer [`remove_group`](Self::remove_group) for safe cleanup.
+    ///
+    /// Returns `true` if the group was removed, `false` if it didn't exist.
+    #[inline]
+    pub fn force_remove_group(&self, group_id: GroupId) -> bool {
+        self.inner.group_registry.remove(group_id)
+    }
+
+    /// Returns the number of groups currently being tracked.
+    ///
+    /// Useful for monitoring memory usage in long-running applications.
+    #[inline]
+    pub fn tracked_group_count(&self) -> usize {
+        self.inner.group_registry.group_count()
+    }
+
     /// Returns the current task's group ID, if any.
     ///
     /// This reads from task-local storage and returns the group ID

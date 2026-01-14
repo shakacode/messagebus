@@ -927,13 +927,22 @@ impl Bus {
                 let (p, r) = iter
                     .next()
                     .expect("iterator should have more elements based on counter");
-                let _ = r.send(self, mid, msg.clone(), false, p, group_id);
+                if r.send(self, mid, msg.clone(), false, p, group_id).is_err() {
+                    // Decrement counter on send failure since no handler will run
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
 
                 counter += 1;
             }
 
             if let Some((p, r)) = iter.next() {
-                let _ = r.send(self, mid, msg, false, p, group_id);
+                if r.send(self, mid, msg, false, p, group_id).is_err() {
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1047,17 +1056,31 @@ impl Bus {
                 }
 
                 for r in head {
-                    let _ = r.send(
+                    if r.send(
                         self,
                         mid,
                         msg.clone(),
                         false,
                         r.reserve(&tt).await,
                         group_id,
-                    );
+                    )
+                    .is_err()
+                    {
+                        // Decrement counter on send failure since no handler will run
+                        if let Some(gid) = group_id {
+                            self.inner.group_registry.decrement(gid);
+                        }
+                    }
                 }
 
-                let _ = last.send(self, mid, msg, false, last.reserve(&tt).await, group_id);
+                if last
+                    .send(self, mid, msg, false, last.reserve(&tt).await, group_id)
+                    .is_err()
+                {
+                    if let Some(gid) = group_id {
+                        self.inner.group_registry.decrement(gid);
+                    }
+                }
 
                 return Ok(());
             }
@@ -1291,7 +1314,13 @@ impl Bus {
                 self.inner.group_registry.increment(gid, rc.id());
             }
 
-            rc.send(self, mid, req, true, rc.reserve(&tid).await, group_id)?;
+            if let Err(e) = rc.send(self, mid, req, true, rc.reserve(&tid).await, group_id) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
             rx.await.map_err(|x| x.specify::<M>())
         } else {
             Err(Error::NoReceivers)
@@ -1332,15 +1361,20 @@ impl Bus {
                 self.inner.group_registry.increment(gid, rc.id());
             }
 
-            rc.send(
+            if let Err(e) = rc.send(
                 self,
                 mid | 1 << (u64::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tid).await,
                 group_id,
-            )
-            .map_err(|x| x.map_err(|_| unimplemented!()))?;
+            ) {
+                // Decrement counter on send failure since no handler will run
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e.map_err(|_| unimplemented!()));
+            }
 
             rx.await.map_err(|x| x.specify::<M>())
         } else {

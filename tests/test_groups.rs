@@ -243,11 +243,14 @@ struct BatchJobMessage {
     value: i32,
 }
 
+/// Type alias for tracking batches per group for test verification.
+type BatchesByGroup = Arc<Mutex<HashMap<Option<GroupId>, Vec<Vec<i32>>>>>;
+
 /// Handler that tracks which group_ids are seen in each batch.
 /// This verifies that batches contain only messages from the same group.
 struct BatchGroupTrackingHandler {
     /// Maps group_id -> list of batches (each batch is a list of values)
-    batches_by_group: Arc<Mutex<HashMap<Option<GroupId>, Vec<Vec<i32>>>>>,
+    batches_by_group: BatchesByGroup,
     /// Tracks the group_id observed via Bus::current_group_id() for each batch
     observed_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
 }

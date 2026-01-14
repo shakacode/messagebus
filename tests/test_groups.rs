@@ -1638,3 +1638,324 @@ async fn test_multiple_groups_with_errors() {
 
     bus.close().await;
 }
+
+// ============================================================================
+// Request-response group tests
+// ============================================================================
+
+/// Request message with group_id.
+#[derive(Debug, Clone, Message)]
+#[group_id(self.job_id)]
+struct GroupedRequest {
+    job_id: i64,
+    value: i32,
+}
+
+/// Response message.
+#[derive(Debug, Clone, Message)]
+struct GroupedResponse {
+    result: i32,
+}
+
+/// Request message without group_id (for inheritance tests).
+#[derive(Debug, Clone, Message)]
+struct UngroupedRequest {
+    value: i32,
+}
+
+/// Test that request with group_id properly tracks the group.
+#[tokio::test]
+async fn test_request_with_group_id_tracks_group() {
+    struct RequestHandler;
+
+    #[async_trait]
+    impl AsyncHandler<GroupedRequest> for RequestHandler {
+        type Error = TestError;
+        type Response = GroupedResponse;
+
+        async fn handle(
+            &self,
+            msg: GroupedRequest,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Verify group_id is set in task-local
+            assert_eq!(
+                Bus::current_group_id(),
+                Some(msg.job_id),
+                "Request handler should have group_id set"
+            );
+            Ok(GroupedResponse {
+                result: msg.value * 2,
+            })
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(RequestHandler)
+        .subscribe_async::<GroupedRequest>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Initially idle
+    assert!(bus.is_group_idle(job_id));
+
+    // Send request
+    let response = bus
+        .request::<_, GroupedResponse>(GroupedRequest { job_id, value: 21 }, Default::default())
+        .await
+        .unwrap();
+
+    assert_eq!(response.result, 42);
+
+    // After request completes, group should be idle
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}
+
+/// Test that flush_group waits for in-flight requests.
+#[tokio::test]
+async fn test_request_flush_group_waits_for_response() {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    let handler_started = Arc::new(AtomicBool::new(false));
+    let handler_completed = Arc::new(AtomicBool::new(false));
+    let handler_started_clone = handler_started.clone();
+    let handler_completed_clone = handler_completed.clone();
+
+    struct SlowRequestHandler {
+        started: Arc<AtomicBool>,
+        completed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GroupedRequest> for SlowRequestHandler {
+        type Error = TestError;
+        type Response = GroupedResponse;
+
+        async fn handle(
+            &self,
+            msg: GroupedRequest,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.started.store(true, Ordering::SeqCst);
+            // Simulate slow processing
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            self.completed.store(true, Ordering::SeqCst);
+            Ok(GroupedResponse {
+                result: msg.value * 2,
+            })
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(SlowRequestHandler {
+            started: handler_started_clone,
+            completed: handler_completed_clone,
+        })
+        .subscribe_async::<GroupedRequest>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send request without awaiting response (fire and forget via send)
+    bus.send(GroupedRequest { job_id, value: 21 })
+        .await
+        .unwrap();
+
+    // Group should not be idle while request is processing
+    // Give it a moment to start
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+        handler_started.load(Ordering::SeqCst),
+        "Handler should have started"
+    );
+    assert!(
+        !bus.is_group_idle(job_id),
+        "Group should not be idle during processing"
+    );
+
+    // flush_group should wait for the request to complete
+    bus.flush_group(job_id).await;
+
+    assert!(
+        handler_completed.load(Ordering::SeqCst),
+        "Handler should have completed"
+    );
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush"
+    );
+
+    bus.close().await;
+}
+
+/// Test that nested requests inherit group_id from parent context.
+#[tokio::test]
+async fn test_nested_request_inherits_group() {
+    let nested_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let nested_group_ids_clone = nested_group_ids.clone();
+
+    struct OuterHandler;
+
+    struct InnerHandler {
+        nested_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GroupedRequest> for OuterHandler {
+        type Error = TestError;
+        type Response = GroupedResponse;
+
+        async fn handle(
+            &self,
+            msg: GroupedRequest,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Verify outer handler has group_id
+            assert_eq!(Bus::current_group_id(), Some(msg.job_id));
+
+            // Send nested request WITHOUT group_id - should inherit from context
+            let inner_response = bus
+                .request::<_, GroupedResponse>(
+                    UngroupedRequest { value: msg.value },
+                    Default::default(),
+                )
+                .await
+                .map_err(|_| TestError::Handler("Inner request failed".into()))?;
+
+            Ok(GroupedResponse {
+                result: inner_response.result + 1,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<UngroupedRequest> for InnerHandler {
+        type Error = TestError;
+        type Response = GroupedResponse;
+
+        async fn handle(
+            &self,
+            msg: UngroupedRequest,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Record the group_id seen by inner handler
+            let current_group = Bus::current_group_id();
+            self.nested_group_ids.lock().push(current_group);
+
+            Ok(GroupedResponse {
+                result: msg.value * 2,
+            })
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(OuterHandler)
+        .subscribe_async::<GroupedRequest>(8, Default::default())
+        .done()
+        .register(InnerHandler {
+            nested_group_ids: nested_group_ids_clone,
+        })
+        .subscribe_async::<UngroupedRequest>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 999;
+
+    let response = bus
+        .request::<_, GroupedResponse>(GroupedRequest { job_id, value: 10 }, Default::default())
+        .await
+        .unwrap();
+
+    // Outer processes inner (10*2=20), then adds 1 = 21
+    assert_eq!(response.result, 21);
+
+    // Verify inner handler inherited the group_id
+    {
+        let observed = nested_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0],
+            Some(job_id),
+            "Nested request should inherit group_id from parent"
+        );
+    }
+
+    // Group should be idle after all requests complete
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}
+
+/// Test that multiple concurrent requests in same group are tracked correctly.
+#[tokio::test]
+async fn test_multiple_concurrent_requests_same_group() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let request_count = Arc::new(AtomicU64::new(0));
+    let request_count_clone = request_count.clone();
+
+    struct ConcurrentRequestHandler {
+        count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GroupedRequest> for ConcurrentRequestHandler {
+        type Error = TestError;
+        type Response = GroupedResponse;
+
+        async fn handle(
+            &self,
+            msg: GroupedRequest,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            // Small delay to ensure concurrent execution
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(GroupedResponse {
+                result: msg.value * 2,
+            })
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(ConcurrentRequestHandler {
+            count: request_count_clone,
+        })
+        .subscribe_async::<GroupedRequest>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send multiple requests concurrently (don't await individually)
+    for i in 0..5 {
+        bus.send(GroupedRequest { job_id, value: i }).await.unwrap();
+    }
+
+    // flush_group should wait for ALL requests
+    bus.flush_group(job_id).await;
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 5);
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}

@@ -1464,30 +1464,57 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, false);
         let first = iter.next();
 
-        for r in iter {
-            let _ = r.send_boxed(
+        // Collect receivers to count them for group tracking
+        let rest: Vec<_> = iter.collect();
+
+        // Increment group counter for all receivers
+        if let Some(gid) = group_id {
+            if let Some(r) = &first {
+                self.inner.group_registry.increment(gid, r.id());
+            }
+            for r in &rest {
+                self.inner.group_registry.increment(gid, r.id());
+            }
+        }
+
+        for r in rest {
+            if r.send_boxed(
                 self,
                 mid,
                 msg.try_clone_boxed()
                     .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
-            );
+            )
+            .is_err()
+            {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+            }
         }
 
         if let Some(r) = first {
-            let _ = r.send_boxed(
+            if r.send_boxed(
                 self,
                 mid,
                 msg.try_clone_boxed()
                     .expect("message must implement clone for broadcast"),
                 false,
                 r.reserve(&tt).await,
-            );
+            )
+            .is_err()
+            {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+            }
         } else {
             warn!("Unhandled message: no receivers");
         }
@@ -1506,10 +1533,23 @@ impl Bus {
 
         let tt = msg.type_tag();
         let mid = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = msg.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, false);
         if let Some(rs) = iter.next() {
-            Ok(rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await)?)
+            // Increment group counter for single receiver
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rs.id());
+            }
+
+            if let Err(e) = rs.send_boxed(self, mid, msg, false, rs.reserve(&tt).await) {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
+            Ok(())
         } else {
             Err(Error::NoReceivers)
         }
@@ -1525,6 +1565,8 @@ impl Bus {
         }
 
         let tt = req.type_tag();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, None, true);
         if let Some(rc) = iter.next() {
@@ -1533,13 +1575,23 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(
+            // Increment group counter for single receiver
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            if let Err(e) = rc.send_boxed(
                 self,
                 mid | 1 << (usize::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tt).await,
-            )?;
+            ) {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e);
+            }
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {
@@ -1558,6 +1610,8 @@ impl Bus {
 
         let tt = req.type_tag();
         let eid = E::type_tag_();
+        // Resolve group_id: message's group_id takes precedence, otherwise inherit from task-local
+        let group_id = req.group_id().or_else(Bus::current_group_id);
 
         let mut iter = self.select_receivers(tt.clone(), options, None, Some(eid), true);
         if let Some(rc) = iter.next() {
@@ -1566,14 +1620,23 @@ impl Bus {
                     .map_msg(|_| unimplemented!())
             })?;
 
-            rc.send_boxed(
+            // Increment group counter for single receiver
+            if let Some(gid) = group_id {
+                self.inner.group_registry.increment(gid, rc.id());
+            }
+
+            if let Err(e) = rc.send_boxed(
                 self,
                 mid | 1 << (usize::BITS - 1),
                 req,
                 true,
                 rc.reserve(&tt).await,
-            )
-            .map_err(|x| x.map_err(|_| unimplemented!()))?;
+            ) {
+                if let Some(gid) = group_id {
+                    self.inner.group_registry.decrement(gid);
+                }
+                return Err(e.map_err(|_| unimplemented!()));
+            }
 
             rx.await.map_err(|x| x.specify::<Box<dyn Message>>())
         } else {

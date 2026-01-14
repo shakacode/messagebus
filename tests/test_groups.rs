@@ -2188,3 +2188,78 @@ async fn test_remove_group_rejects_active_group() {
 
     bus.close().await;
 }
+
+/// Test that send_boxed_one properly tracks group counters.
+#[tokio::test]
+async fn test_send_boxed_one_group_tracking() {
+    let observed_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let observed_group_ids_clone = observed_group_ids.clone();
+
+    struct BoxedSendHandler {
+        observed_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GroupedRequest> for BoxedSendHandler {
+        type Error = TestError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: GroupedRequest,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.observed_group_ids.lock().push(Bus::current_group_id());
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(BoxedSendHandler {
+            observed_group_ids: observed_group_ids_clone,
+        })
+        .subscribe_async::<GroupedRequest>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 888;
+
+    // Verify no groups tracked initially
+    assert_eq!(bus.tracked_group_count(), 0);
+
+    // Send via send_boxed_one (single receiver, no clone needed)
+    let boxed_msg: Box<dyn messagebus::Message> = Box::new(GroupedRequest { job_id, value: 42 });
+
+    bus.send_boxed_one(boxed_msg, Default::default())
+        .await
+        .unwrap();
+
+    // Group should be tracked while processing
+    // Wait for completion
+    bus.flush_group(job_id).await;
+
+    // Verify handler saw the correct group_id
+    {
+        let observed = observed_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0],
+            Some(job_id),
+            "send_boxed_one should propagate group_id to handler"
+        );
+    }
+
+    // Group should be idle after completion
+    assert!(bus.is_group_idle(job_id));
+
+    // Group should be tracked (counter is 0 but entry exists)
+    assert_eq!(bus.tracked_group_count(), 1);
+
+    // Cleanup
+    assert_eq!(bus.remove_group(job_id), Some(true));
+
+    bus.close().await;
+}

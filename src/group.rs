@@ -156,7 +156,9 @@ impl GroupRegistry {
     /// relevant receivers.
     pub fn increment(&self, group_id: GroupId, receiver_id: u64) {
         let entry = self.groups.entry(group_id).or_insert_with(GroupEntry::new);
-        entry.processing.fetch_add(1, Ordering::SeqCst);
+        // Relaxed is sufficient - we're just incrementing a counter.
+        // Synchronization with waiters is provided by Notify.
+        entry.processing.fetch_add(1, Ordering::Relaxed);
         entry.receivers.insert(receiver_id);
     }
 
@@ -177,11 +179,13 @@ impl GroupRegistry {
     /// In debug builds, an assertion will fire if underflow would occur.
     pub fn decrement_by(&self, group_id: GroupId, count: u64) {
         if let Some(entry) = self.groups.get(&group_id) {
-            // Use fetch_update with saturating_sub to prevent underflow
+            // Use fetch_update with saturating_sub to prevent underflow.
+            // Release ordering ensures handler's work is visible before we signal completion.
+            // Relaxed for failure case - just retrying the CAS loop.
             let result =
                 entry
                     .processing
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
+                    .fetch_update(Ordering::Release, Ordering::Relaxed, |prev| {
                         Some(prev.saturating_sub(count))
                     });
 
@@ -208,7 +212,8 @@ impl GroupRegistry {
     pub fn is_idle(&self, group_id: GroupId) -> bool {
         self.groups
             .get(&group_id)
-            .map(|e| e.processing.load(Ordering::SeqCst) == 0)
+            // Relaxed is sufficient for this observational check.
+            .map(|e| e.processing.load(Ordering::Relaxed) == 0)
             .unwrap_or(true)
     }
 
@@ -218,7 +223,8 @@ impl GroupRegistry {
     pub fn processing_count(&self, group_id: GroupId) -> u64 {
         self.groups
             .get(&group_id)
-            .map(|e| e.processing.load(Ordering::SeqCst))
+            // Relaxed is sufficient for this observational check.
+            .map(|e| e.processing.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
@@ -242,8 +248,9 @@ impl GroupRegistry {
             tokio::pin!(notified);
             notified.as_mut().enable();
 
-            // Now check the condition - if idle, we're done
-            if entry.processing.load(Ordering::SeqCst) == 0 {
+            // Now check the condition - if idle, we're done.
+            // Acquire pairs with Release in decrement_by to ensure we see the final count.
+            if entry.processing.load(Ordering::Acquire) == 0 {
                 return;
             }
 

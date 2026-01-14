@@ -65,58 +65,30 @@ impl AsyncHandler<UngroupedMessage> for GroupTrackingHandler {
     }
 }
 
-/// Handler that sends nested messages to test group propagation.
-#[allow(dead_code)]
-struct NestedSendHandler;
-
 /// A message that triggers nested send.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Message)]
 #[group_id(self.job_id)]
 struct ParentMessage {
     job_id: i64,
 }
 
-/// A child message that inherits group from parent context.
-#[allow(dead_code)]
+/// A child message that inherits group from parent context (no explicit group_id).
 #[derive(Debug, Clone, Message)]
 struct ChildMessage {
-    from_parent: bool,
+    parent_job_id: i64,
 }
 
-#[async_trait]
-impl AsyncHandler<ParentMessage> for NestedSendHandler {
-    type Error = GenericError;
-    type Response = ();
-
-    async fn handle(&self, msg: ParentMessage, bus: &Bus) -> Result<Self::Response, Self::Error> {
-        // Current group_id should be set from the parent message
-        assert_eq!(
-            Bus::current_group_id(),
-            Some(msg.job_id),
-            "Parent handler should have group_id set"
-        );
-
-        // Send a child message - it should inherit the group_id from context
-        // Note: We don't use ? here to avoid complex error conversion
-        let _ = bus.send(ChildMessage { from_parent: true }).await;
-        Ok(())
-    }
+/// A child message with its own explicit group_id.
+#[derive(Debug, Clone, Message)]
+#[group_id(self.child_group_id)]
+struct ChildWithGroupMessage {
+    child_group_id: i64,
 }
 
-#[async_trait]
-impl AsyncHandler<ChildMessage> for NestedSendHandler {
-    type Error = GenericError;
-    type Response = ();
-
-    async fn handle(&self, msg: ChildMessage, _bus: &Bus) -> Result<Self::Response, Self::Error> {
-        if msg.from_parent {
-            // Child message sent from parent handler should inherit group_id
-            // Note: This depends on the task-local propagation working correctly
-            // The child handler runs in its own task, so it should have the group_id propagated
-        }
-        Ok(())
-    }
+/// A grandchild message for multi-level nesting tests.
+#[derive(Debug, Clone, Message)]
+struct GrandchildMessage {
+    original_job_id: i64,
 }
 
 #[tokio::test]
@@ -839,6 +811,830 @@ async fn test_flush_and_sync_group_with_batches() {
 
     // All 6 messages should be processed
     assert_eq!(processed_count.load(Ordering::SeqCst), 6);
+
+    bus.close().await;
+}
+
+// ============================================================================
+// Nested send group propagation tests
+// ============================================================================
+
+/// Test that child messages without explicit group_id inherit from parent's task-local context.
+#[tokio::test]
+async fn test_nested_send_inherits_parent_group_id() {
+    use std::sync::atomic::AtomicU64;
+
+    let parent_received = Arc::new(AtomicU64::new(0));
+    let child_received = Arc::new(AtomicU64::new(0));
+    let child_group_ids = Arc::new(Mutex::new(Vec::new()));
+
+    let parent_received_clone = parent_received.clone();
+    let child_received_clone = child_received.clone();
+    let child_group_ids_clone = child_group_ids.clone();
+
+    struct NestedSendHandler {
+        parent_received: Arc<AtomicU64>,
+        child_received: Arc<AtomicU64>,
+        child_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ParentMessage> for NestedSendHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ParentMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Verify parent has correct group_id in task-local
+            assert_eq!(
+                Bus::current_group_id(),
+                Some(msg.job_id),
+                "Parent handler should have group_id set"
+            );
+
+            self.parent_received.fetch_add(1, Ordering::SeqCst);
+
+            // Send child message WITHOUT explicit group_id - should inherit from context
+            bus.send(ChildMessage {
+                parent_job_id: msg.job_id,
+            })
+            .await
+            .unwrap();
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for NestedSendHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ChildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Record the group_id that the child handler sees
+            let current_group = Bus::current_group_id();
+            self.child_group_ids.lock().push(current_group);
+            self.child_received.fetch_add(1, Ordering::SeqCst);
+
+            // Child should have inherited the parent's group_id
+            assert_eq!(
+                current_group,
+                Some(msg.parent_job_id),
+                "Child should inherit parent's group_id from task-local"
+            );
+
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(NestedSendHandler {
+            parent_received: parent_received_clone,
+            child_received: child_received_clone,
+            child_group_ids: child_group_ids_clone,
+        })
+        .subscribe_async::<ParentMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send parent message
+    bus.send(ParentMessage { job_id }).await.unwrap();
+
+    // Wait for both parent and child to be processed
+    bus.flush_all().await;
+
+    assert_eq!(parent_received.load(Ordering::SeqCst), 1);
+    assert_eq!(child_received.load(Ordering::SeqCst), 1);
+
+    // Verify child received the correct inherited group_id
+    {
+        let observed = child_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0], Some(job_id));
+    }
+
+    bus.close().await;
+}
+
+/// Test that child's explicit group_id takes precedence over inherited parent group_id.
+#[tokio::test]
+async fn test_nested_send_child_explicit_group_id_wins() {
+    let child_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let child_group_ids_clone = child_group_ids.clone();
+
+    struct ExplicitGroupHandler {
+        child_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ParentMessage> for ExplicitGroupHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ParentMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            assert_eq!(Bus::current_group_id(), Some(msg.job_id));
+
+            // Send child WITH explicit group_id that differs from parent
+            let different_group_id = msg.job_id + 1000;
+            bus.send(ChildWithGroupMessage {
+                child_group_id: different_group_id,
+            })
+            .await
+            .unwrap();
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildWithGroupMessage> for ExplicitGroupHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ChildWithGroupMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            let current_group = Bus::current_group_id();
+            self.child_group_ids.lock().push(current_group);
+
+            // Child's explicit group_id should win over parent's context
+            assert_eq!(
+                current_group,
+                Some(msg.child_group_id),
+                "Child's explicit group_id should take precedence over inherited"
+            );
+
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(ExplicitGroupHandler {
+            child_group_ids: child_group_ids_clone,
+        })
+        .subscribe_async::<ParentMessage>(8, Default::default())
+        .subscribe_async::<ChildWithGroupMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let parent_job_id: GroupId = 100;
+    let expected_child_group_id = parent_job_id + 1000; // 1100
+
+    bus.send(ParentMessage {
+        job_id: parent_job_id,
+    })
+    .await
+    .unwrap();
+
+    bus.flush_all().await;
+
+    // Verify child had its own explicit group_id, not the parent's
+    {
+        let observed = child_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0], Some(expected_child_group_id));
+    }
+
+    bus.close().await;
+}
+
+/// Test that group counter tracks both parent and child messages.
+#[tokio::test]
+async fn test_nested_send_group_counter_includes_children() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let processing_started = Arc::new(AtomicU64::new(0));
+    let processing_started_clone = processing_started.clone();
+
+    struct SlowNestedHandler {
+        processing_started: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ParentMessage> for SlowNestedHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ParentMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.processing_started.fetch_add(1, Ordering::SeqCst);
+
+            // Send child message that inherits group
+            bus.send(ChildMessage {
+                parent_job_id: msg.job_id,
+            })
+            .await
+            .unwrap();
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for SlowNestedHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: ChildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.processing_started.fetch_add(1, Ordering::SeqCst);
+            // Simulate slow processing
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(SlowNestedHandler {
+            processing_started: processing_started_clone,
+        })
+        .subscribe_async::<ParentMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send parent
+    bus.send(ParentMessage { job_id }).await.unwrap();
+
+    // flush_group should wait for BOTH parent AND child to complete
+    bus.flush_group(job_id).await;
+
+    // Both parent and child should have been processed
+    assert_eq!(
+        processing_started.load(Ordering::SeqCst),
+        2,
+        "Both parent and child should have been processed"
+    );
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush_group completes"
+    );
+
+    bus.close().await;
+}
+
+/// Test multi-level nesting: parent → child → grandchild all share same group.
+#[tokio::test]
+async fn test_nested_send_multi_level_propagation() {
+    let grandchild_group_ids = Arc::new(Mutex::new(Vec::new()));
+    let grandchild_group_ids_clone = grandchild_group_ids.clone();
+
+    struct MultiLevelHandler {
+        grandchild_group_ids: Arc<Mutex<Vec<Option<GroupId>>>>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ParentMessage> for MultiLevelHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ParentMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            assert_eq!(Bus::current_group_id(), Some(msg.job_id));
+
+            // Send child (which will send grandchild)
+            bus.send(ChildMessage {
+                parent_job_id: msg.job_id,
+            })
+            .await
+            .unwrap();
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for MultiLevelHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ChildMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Child should have inherited parent's group
+            assert_eq!(Bus::current_group_id(), Some(msg.parent_job_id));
+
+            // Send grandchild (no explicit group_id)
+            bus.send(GrandchildMessage {
+                original_job_id: msg.parent_job_id,
+            })
+            .await
+            .unwrap();
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GrandchildMessage> for MultiLevelHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: GrandchildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            let current_group = Bus::current_group_id();
+            self.grandchild_group_ids.lock().push(current_group);
+
+            // Grandchild should have inherited the original parent's group_id
+            assert_eq!(
+                current_group,
+                Some(msg.original_job_id),
+                "Grandchild should inherit original parent's group_id through multi-level nesting"
+            );
+
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(MultiLevelHandler {
+            grandchild_group_ids: grandchild_group_ids_clone,
+        })
+        .subscribe_async::<ParentMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .subscribe_async::<GrandchildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 999;
+
+    bus.send(ParentMessage { job_id }).await.unwrap();
+    bus.flush_all().await;
+
+    // Verify grandchild received the original group_id
+    {
+        let observed = grandchild_group_ids.lock();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0], Some(job_id));
+    }
+
+    // Group should be idle after all three levels processed
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}
+
+// ============================================================================
+// Error handling tests for group_id
+// ============================================================================
+
+/// Error type for error handling tests.
+#[derive(Debug, Clone, Error, MbError)]
+enum TestError {
+    #[error("Test error: {0}")]
+    Handler(String),
+}
+
+/// A message for error handling tests.
+#[derive(Debug, Clone, Message)]
+#[group_id(self.job_id)]
+struct ErrorTestMessage {
+    job_id: i64,
+    should_fail: bool,
+}
+
+/// A message for panic tests.
+#[derive(Debug, Clone, Message)]
+#[group_id(self.job_id)]
+struct PanicTestMessage {
+    job_id: i64,
+    should_panic: bool,
+}
+
+/// Test that group counter is properly decremented when handler returns an error.
+#[tokio::test]
+async fn test_handler_error_decrements_group_counter() {
+    use std::sync::atomic::AtomicU64;
+
+    let success_count = Arc::new(AtomicU64::new(0));
+    let error_count = Arc::new(AtomicU64::new(0));
+    let success_count_clone = success_count.clone();
+    let error_count_clone = error_count.clone();
+
+    struct ErroringHandler {
+        success_count: Arc<AtomicU64>,
+        error_count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ErrorTestMessage> for ErroringHandler {
+        type Error = TestError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ErrorTestMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            if msg.should_fail {
+                self.error_count.fetch_add(1, Ordering::SeqCst);
+                Err(TestError::Handler("Intentional test error".into()))
+            } else {
+                self.success_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(ErroringHandler {
+            success_count: success_count_clone,
+            error_count: error_count_clone,
+        })
+        .subscribe_async::<ErrorTestMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send a mix of succeeding and failing messages
+    bus.send(ErrorTestMessage {
+        job_id,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+
+    bus.send(ErrorTestMessage {
+        job_id,
+        should_fail: true,
+    })
+    .await
+    .unwrap();
+
+    bus.send(ErrorTestMessage {
+        job_id,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+
+    // flush_group should complete even with errors - counter should still decrement
+    bus.flush_group(job_id).await;
+
+    assert_eq!(success_count.load(Ordering::SeqCst), 2);
+    assert_eq!(error_count.load(Ordering::SeqCst), 1);
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush_group, even with errors"
+    );
+
+    bus.close().await;
+}
+
+/// Test that group counter is properly decremented when handler panics.
+///
+/// Note: This test verifies the current behavior. If panics don't decrement
+/// the counter, flush_group would hang - which would indicate a bug to fix.
+#[tokio::test]
+async fn test_handler_panic_decrements_group_counter() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let success_count = Arc::new(AtomicU64::new(0));
+    let success_count_clone = success_count.clone();
+
+    struct PanickingHandler {
+        success_count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<PanicTestMessage> for PanickingHandler {
+        type Error = TestError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: PanicTestMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            if msg.should_panic {
+                panic!("Intentional test panic");
+            }
+            self.success_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(PanickingHandler {
+            success_count: success_count_clone,
+        })
+        .subscribe_async::<PanicTestMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send messages - one will panic, one will succeed
+    bus.send(PanicTestMessage {
+        job_id,
+        should_panic: false,
+    })
+    .await
+    .unwrap();
+
+    bus.send(PanicTestMessage {
+        job_id,
+        should_panic: true,
+    })
+    .await
+    .unwrap();
+
+    bus.send(PanicTestMessage {
+        job_id,
+        should_panic: false,
+    })
+    .await
+    .unwrap();
+
+    // Use flush_all with timeout to detect if counter isn't decremented on panic
+    // If panic doesn't decrement counter, this would hang forever
+    let flush_result = tokio::time::timeout(Duration::from_secs(2), bus.flush_group(job_id)).await;
+
+    // Check if flush completed or timed out
+    match flush_result {
+        Ok(()) => {
+            // Counter was properly decremented even after panic
+            assert!(
+                bus.is_group_idle(job_id),
+                "Group should be idle after flush_group"
+            );
+        }
+        Err(_) => {
+            // Timeout - this indicates the panic didn't decrement the counter
+            // This is the expected behavior based on current implementation
+            // The group counter is stuck because panic prevented decrement
+            panic!(
+                "flush_group timed out - handler panic did not decrement group counter. \
+                 This is a bug: panicking handlers should still decrement the group counter."
+            );
+        }
+    }
+
+    // Non-panicking messages should have succeeded
+    assert_eq!(success_count.load(Ordering::SeqCst), 2);
+
+    bus.close().await;
+}
+
+/// Test that batch handler errors properly decrement group counters.
+#[tokio::test]
+async fn test_batch_handler_error_decrements_group_counter() {
+    use std::sync::atomic::AtomicU64;
+
+    let batch_count = Arc::new(AtomicU64::new(0));
+    let error_batch_count = Arc::new(AtomicU64::new(0));
+    let batch_count_clone = batch_count.clone();
+    let error_batch_count_clone = error_batch_count.clone();
+
+    /// A message for batch error tests.
+    #[derive(Debug, Clone, Message)]
+    #[message(clone)]
+    #[group_id(self.job_id)]
+    struct BatchErrorMessage {
+        job_id: i64,
+        should_fail: bool,
+    }
+
+    struct ErroringBatchHandler {
+        batch_count: Arc<AtomicU64>,
+        error_batch_count: Arc<AtomicU64>,
+    }
+
+    impl BatchHandler<BatchErrorMessage> for ErroringBatchHandler {
+        type Error = BatchError;
+        type Response = ();
+        type InBatch = Vec<BatchErrorMessage>;
+        type OutBatch = Vec<()>;
+
+        fn handle(
+            &self,
+            msgs: Vec<BatchErrorMessage>,
+            _bus: &Bus,
+        ) -> Result<Vec<Self::Response>, Self::Error> {
+            // Check if any message in batch should trigger error
+            let has_error = msgs.iter().any(|m| m.should_fail);
+
+            if has_error {
+                self.error_batch_count.fetch_add(1, Ordering::SeqCst);
+                Err(BatchError::Error("Intentional batch error".into()))
+            } else {
+                self.batch_count.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![(); msgs.len()])
+            }
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(ErroringBatchHandler {
+            batch_count: batch_count_clone,
+            error_batch_count: error_batch_count_clone,
+        })
+        .subscribe_batch_sync::<BatchErrorMessage>(
+            32,
+            BufferUnorderedBatchedConfig {
+                batch_size: 2,
+                ..Default::default()
+            },
+        )
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send 4 messages - 2 batches of 2
+    // First batch: both succeed
+    bus.send(BatchErrorMessage {
+        job_id,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+    bus.send(BatchErrorMessage {
+        job_id,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+
+    // Second batch: one fails, triggering batch error
+    bus.send(BatchErrorMessage {
+        job_id,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+    bus.send(BatchErrorMessage {
+        job_id,
+        should_fail: true,
+    })
+    .await
+    .unwrap();
+
+    // flush_group should complete even with batch errors
+    bus.flush_group(job_id).await;
+
+    assert_eq!(
+        batch_count.load(Ordering::SeqCst),
+        1,
+        "One batch should succeed"
+    );
+    assert_eq!(
+        error_batch_count.load(Ordering::SeqCst),
+        1,
+        "One batch should error"
+    );
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush_group, even with batch errors"
+    );
+
+    bus.close().await;
+}
+
+/// Test multiple groups with mixed success/error handling.
+#[tokio::test]
+async fn test_multiple_groups_with_errors() {
+    use std::sync::atomic::AtomicU64;
+
+    let processed = Arc::new(AtomicU64::new(0));
+    let processed_clone = processed.clone();
+
+    struct MixedHandler {
+        processed: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ErrorTestMessage> for MixedHandler {
+        type Error = TestError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ErrorTestMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.processed.fetch_add(1, Ordering::SeqCst);
+            if msg.should_fail {
+                Err(TestError::Handler("Error in handler".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(MixedHandler {
+            processed: processed_clone,
+        })
+        .subscribe_async::<ErrorTestMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let group_1: GroupId = 100;
+    let group_2: GroupId = 200;
+
+    // Group 1: 2 success, 1 error
+    bus.send(ErrorTestMessage {
+        job_id: group_1,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+    bus.send(ErrorTestMessage {
+        job_id: group_1,
+        should_fail: true,
+    })
+    .await
+    .unwrap();
+    bus.send(ErrorTestMessage {
+        job_id: group_1,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+
+    // Group 2: all success
+    bus.send(ErrorTestMessage {
+        job_id: group_2,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+    bus.send(ErrorTestMessage {
+        job_id: group_2,
+        should_fail: false,
+    })
+    .await
+    .unwrap();
+
+    // Flush each group independently
+    bus.flush_group(group_1).await;
+    assert!(bus.is_group_idle(group_1), "Group 1 should be idle");
+
+    bus.flush_group(group_2).await;
+    assert!(bus.is_group_idle(group_2), "Group 2 should be idle");
+
+    // All 5 messages should have been processed
+    assert_eq!(processed.load(Ordering::SeqCst), 5);
 
     bus.close().await;
 }

@@ -3405,3 +3405,245 @@ async fn test_flush_and_sync_group_no_messages() {
 
     bus.close().await;
 }
+
+/// Test that reproduces the vrbp pattern:
+/// 1. Parent sends multiple child messages
+/// 2. Each child sends messages to a BATCHED handler
+/// 3. Each child calls flush_current_group()
+/// 4. Outer flush_and_sync_group should complete without hanging
+///
+/// This is the exact pattern causing hangs in vrbp's FetchPendingListingUrls.
+#[tokio::test]
+async fn test_vrbp_pattern_with_batched_handlers() {
+    use messagebus::receivers::BufferUnorderedBatchedConfig;
+    use messagebus::AsyncBatchHandler;
+    use std::sync::atomic::AtomicU32;
+    use std::time::Duration;
+
+    /// Simulates PrepareFetchListings - spawns multiple provider handlers
+    #[derive(Debug, Clone, Message)]
+    #[group_id(self.job_id)]
+    struct PrepareWork {
+        job_id: i64,
+        provider_count: u32,
+    }
+
+    /// Simulates FetchPendingListingUrls - sends Fetch messages and calls flush_current_group
+    #[derive(Debug, Clone, Message)]
+    #[group_id(self.job_id)]
+    struct ProviderWork {
+        job_id: i64,
+        provider_id: u32,
+        message_count: u32,
+    }
+
+    /// Simulates Fetch message
+    #[derive(Debug, Clone, Message)]
+    #[group_id(self.job_id)]
+    struct FetchWork {
+        job_id: i64,
+        #[allow(dead_code)]
+        item_id: u32,
+    }
+
+    /// Simulates CollectBatch* - gets batched
+    #[derive(Debug, Clone, Message)]
+    #[group_id(self.job_id)]
+    struct BatchableWork {
+        job_id: i64,
+    }
+
+    struct TestHandler {
+        prepare_count: Arc<AtomicU32>,
+        provider_count: Arc<AtomicU32>,
+        fetch_count: Arc<AtomicU32>,
+        batch_count: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<PrepareWork> for TestHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(&self, msg: PrepareWork, bus: &Bus) -> Result<Self::Response, Self::Error> {
+            println!("[PrepareWork] START job_id={}", msg.job_id);
+            self.prepare_count.fetch_add(1, Ordering::SeqCst);
+
+            // Spawn provider handlers (like vrbo, airbnb, booking)
+            for i in 0..msg.provider_count {
+                bus.send(ProviderWork {
+                    job_id: msg.job_id,
+                    provider_id: i,
+                    // Vary message counts: some providers have few, some have many
+                    message_count: if i == 0 { 22 } else { 0 },
+                })
+                .await
+                .unwrap();
+            }
+
+            println!("[PrepareWork] END job_id={}", msg.job_id);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ProviderWork> for TestHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ProviderWork,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            println!(
+                "[ProviderWork] START provider_id={} message_count={}",
+                msg.provider_id, msg.message_count
+            );
+            self.provider_count.fetch_add(1, Ordering::SeqCst);
+
+            // Send Fetch messages
+            for i in 0..msg.message_count {
+                bus.send(FetchWork {
+                    job_id: msg.job_id,
+                    item_id: i,
+                })
+                .await
+                .unwrap();
+            }
+
+            println!(
+                "[ProviderWork] provider_id={} sent {} messages, calling flush_current_group",
+                msg.provider_id, msg.message_count
+            );
+
+            // This is the key call that was causing issues
+            bus.flush_current_group().await;
+
+            println!("[ProviderWork] END provider_id={}", msg.provider_id);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<FetchWork> for TestHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(&self, msg: FetchWork, bus: &Bus) -> Result<Self::Response, Self::Error> {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
+
+            // Send to batched handler (like CollectBatchBooking)
+            bus.send(BatchableWork { job_id: msg.job_id })
+                .await
+                .unwrap();
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncBatchHandler<BatchableWork> for TestHandler {
+        type Error = BatchError;
+        type Response = ();
+        type InBatch = Vec<BatchableWork>;
+        type OutBatch = Vec<()>;
+
+        async fn handle(
+            &self,
+            msgs: Self::InBatch,
+            _bus: &Bus,
+        ) -> Result<Self::OutBatch, Self::Error> {
+            println!(
+                "[BatchableWork] processing batch of {} messages",
+                msgs.len()
+            );
+            // Simulate some work
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.batch_count
+                .fetch_add(msgs.len() as u32, Ordering::SeqCst);
+            Ok(vec![(); msgs.len()])
+        }
+    }
+
+    let prepare_count = Arc::new(AtomicU32::new(0));
+    let provider_count = Arc::new(AtomicU32::new(0));
+    let fetch_count = Arc::new(AtomicU32::new(0));
+    let batch_count = Arc::new(AtomicU32::new(0));
+
+    let handler = TestHandler {
+        prepare_count: prepare_count.clone(),
+        provider_count: provider_count.clone(),
+        fetch_count: fetch_count.clone(),
+        batch_count: batch_count.clone(),
+    };
+
+    let (bus, poller) = Bus::build()
+        .register(handler)
+        .subscribe_async::<PrepareWork>(8, Default::default())
+        .subscribe_async::<ProviderWork>(8, Default::default())
+        .subscribe_async::<FetchWork>(8, Default::default())
+        .subscribe_batch_async::<BatchableWork>(
+            8,
+            BufferUnorderedBatchedConfig {
+                batch_size: 30, // Same as vrbp
+                ..Default::default()
+            },
+        )
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id = 42i64;
+
+    println!("=== Sending PrepareWork ===");
+    bus.send(PrepareWork {
+        job_id,
+        provider_count: 3, // vrbo, airbnb, booking
+    })
+    .await
+    .unwrap();
+
+    println!("=== Calling flush_and_sync_group ===");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        bus.flush_and_sync_group(job_id, false),
+    )
+    .await;
+
+    println!("=== flush_and_sync_group returned ===");
+    println!("prepare_count: {}", prepare_count.load(Ordering::SeqCst));
+    println!("provider_count: {}", provider_count.load(Ordering::SeqCst));
+    println!("fetch_count: {}", fetch_count.load(Ordering::SeqCst));
+    println!("batch_count: {}", batch_count.load(Ordering::SeqCst));
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group should not timeout (deadlock!)"
+    );
+
+    assert_eq!(
+        prepare_count.load(Ordering::SeqCst),
+        1,
+        "PrepareWork should run once"
+    );
+    assert_eq!(
+        provider_count.load(Ordering::SeqCst),
+        3,
+        "All 3 providers should run"
+    );
+    assert_eq!(
+        fetch_count.load(Ordering::SeqCst),
+        22,
+        "All 22 Fetch messages should be processed"
+    );
+    assert_eq!(
+        batch_count.load(Ordering::SeqCst),
+        22,
+        "All 22 batched messages should be processed"
+    );
+
+    bus.close().await;
+}

@@ -877,8 +877,11 @@ impl Bus {
         );
 
         if !force {
-            // Loop until no receivers need flushing - this handles cascading messages
-            // where flushing one receiver causes messages to be sent to others.
+            // Two-pass flush to handle backpressure correctly:
+            // 1. First pass: non-blocking flush to trigger all receivers to start processing
+            //    This prevents deadlock where upstream handlers are blocked waiting for
+            //    downstream buffers to have space.
+            // 2. Second pass: blocking flush to wait for processing to complete
             let fuse_count = 32i32;
             let mut iters = 0;
 
@@ -893,7 +896,6 @@ impl Bus {
                     break;
                 }
 
-                // Re-fetch receiver_ids each iteration in case new receivers joined the group
                 let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
                 if receiver_ids.is_empty() {
                     log::debug!(
@@ -903,11 +905,24 @@ impl Bus {
                     break;
                 }
 
+                // First pass: trigger all receivers to start processing (non-blocking)
+                for r in self.inner.receivers.iter() {
+                    if receiver_ids.contains(&r.id()) && !r.is_idling() {
+                        log::debug!(
+                            "flush_and_sync_group: group={} triggering flush on receiver id={}",
+                            group_id,
+                            r.id()
+                        );
+                        r.flush_nowait(self);
+                    }
+                }
+
+                // Second pass: wait for processing to complete (blocking)
                 let mut any_flushed = false;
                 for r in self.inner.receivers.iter() {
                     if receiver_ids.contains(&r.id()) && !r.is_idling() {
                         log::debug!(
-                            "flush_and_sync_group: group={} flushing receiver id={}",
+                            "flush_and_sync_group: group={} waiting for receiver id={}",
                             group_id,
                             r.id()
                         );
@@ -928,8 +943,6 @@ impl Bus {
         }
 
         // Final flush to ensure any partial batches are processed.
-        // This is needed because batched receivers may have buffered messages
-        // that haven't reached batch_size yet.
         log::info!(
             "flush_and_sync_group: group={} final flush for partial batches",
             group_id
@@ -940,6 +953,13 @@ impl Bus {
                 r.flush(self).await;
             }
         }
+
+        // Wait for any remaining tasks to complete
+        log::info!(
+            "flush_and_sync_group: group={} waiting for group idle",
+            group_id
+        );
+        self.inner.group_registry.wait_idle(group_id).await;
 
         // Sync only receivers that handled messages from this group
         log::info!(

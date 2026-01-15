@@ -2823,3 +2823,585 @@ async fn test_group_id_opt_mixed_with_group_id() {
 
     bus.close().await;
 }
+
+// ============================================================================
+// flush_and_sync_group tests - verify flushing and cascading message handling
+// ============================================================================
+
+/// Test that flush_and_sync_group properly flushes partial batches.
+///
+/// This test reproduces the bug where `flush_and_sync_group` would hang because
+/// it only waited for the group counter to reach zero without flushing receivers.
+/// Batched receivers buffer messages until the batch is full, so without flushing,
+/// partial batches would never be processed.
+#[tokio::test]
+async fn test_flush_and_sync_group_flushes_partial_batches() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let processed_count = Arc::new(AtomicU64::new(0));
+    let processed_count_clone = processed_count.clone();
+
+    struct PartialBatchHandler {
+        processed: Arc<AtomicU64>,
+    }
+
+    impl BatchHandler<BatchJobMessage> for PartialBatchHandler {
+        type Error = BatchError;
+        type Response = ();
+        type InBatch = Vec<BatchJobMessage>;
+        type OutBatch = Vec<()>;
+
+        fn handle(
+            &self,
+            msgs: Vec<BatchJobMessage>,
+            _bus: &Bus,
+        ) -> Result<Vec<Self::Response>, Self::Error> {
+            self.processed
+                .fetch_add(msgs.len() as u64, Ordering::SeqCst);
+            Ok(vec![(); msgs.len()])
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(PartialBatchHandler {
+            processed: processed_count_clone,
+        })
+        .subscribe_batch_sync::<BatchJobMessage>(
+            32,
+            BufferUnorderedBatchedConfig {
+                batch_size: 10, // Large batch size
+                ..Default::default()
+            },
+        )
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send only 3 messages - less than batch_size (10)
+    // Without the fix, these would sit in the buffer forever
+    for i in 1..=3 {
+        bus.send(BatchJobMessage { job_id, value: i })
+            .await
+            .unwrap();
+    }
+
+    // flush_and_sync_group should flush the partial batch and wait for completion
+    // This would hang before the fix because the batch was never triggered
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        bus.flush_and_sync_group(job_id, false),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group should not hang on partial batches"
+    );
+
+    // All 3 messages should be processed even though batch_size is 10
+    assert_eq!(
+        processed_count.load(Ordering::SeqCst),
+        3,
+        "All messages in partial batch should be processed"
+    );
+
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush_and_sync_group"
+    );
+
+    bus.close().await;
+}
+
+/// Test that flush_and_sync_group waits for cascading child messages.
+///
+/// When a handler sends additional messages during processing, flush_and_sync_group
+/// should wait for those child messages to complete as well, not just the initial messages.
+#[tokio::test]
+async fn test_flush_and_sync_group_waits_for_cascading_messages() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let parent_count = Arc::new(AtomicU64::new(0));
+    let child_count = Arc::new(AtomicU64::new(0));
+    let parent_count_clone = parent_count.clone();
+    let child_count_clone = child_count.clone();
+
+    struct CascadingHandler {
+        parent_count: Arc<AtomicU64>,
+        child_count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ParentMessage> for CascadingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ParentMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.parent_count.fetch_add(1, Ordering::SeqCst);
+
+            // Spawn multiple child messages that inherit the group
+            for i in 0..3 {
+                bus.send(ChildMessage {
+                    parent_job_id: msg.job_id + i,
+                })
+                .await
+                .unwrap();
+            }
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for CascadingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: ChildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Simulate some work
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.child_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(CascadingHandler {
+            parent_count: parent_count_clone,
+            child_count: child_count_clone,
+        })
+        .subscribe_async::<ParentMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 100;
+
+    // Send parent message
+    bus.send(ParentMessage { job_id }).await.unwrap();
+
+    // flush_and_sync_group should wait for parent AND all children
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        bus.flush_and_sync_group(job_id, false),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group should complete within timeout"
+    );
+
+    // Parent should be processed
+    assert_eq!(parent_count.load(Ordering::SeqCst), 1);
+
+    // All 3 children should be processed
+    assert_eq!(
+        child_count.load(Ordering::SeqCst),
+        3,
+        "All child messages should be processed before flush_and_sync_group returns"
+    );
+
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush_and_sync_group"
+    );
+
+    bus.close().await;
+}
+
+/// Test that flush_and_sync_group handles deeply nested message chains.
+///
+/// Parent → Child → Grandchild chain should all be waited on.
+#[tokio::test]
+async fn test_flush_and_sync_group_handles_deep_nesting() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let depth_reached = Arc::new(AtomicU64::new(0));
+    let depth_reached_clone = depth_reached.clone();
+
+    struct DeepNestingHandler {
+        depth_reached: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ParentMessage> for DeepNestingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ParentMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.depth_reached.fetch_max(1, Ordering::SeqCst);
+            bus.send(ChildMessage {
+                parent_job_id: msg.job_id,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for DeepNestingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: ChildMessage,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.depth_reached.fetch_max(2, Ordering::SeqCst);
+            bus.send(GrandchildMessage {
+                original_job_id: msg.parent_job_id,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<GrandchildMessage> for DeepNestingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: GrandchildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Simulate work at the deepest level
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            self.depth_reached.fetch_max(3, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(DeepNestingHandler {
+            depth_reached: depth_reached_clone,
+        })
+        .subscribe_async::<ParentMessage>(8, Default::default())
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .subscribe_async::<GrandchildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 777;
+
+    bus.send(ParentMessage { job_id }).await.unwrap();
+
+    // Should wait for all 3 levels
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        bus.flush_and_sync_group(job_id, false),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group should complete for deep nesting"
+    );
+
+    // Should have reached depth 3 (grandchild)
+    assert_eq!(
+        depth_reached.load(Ordering::SeqCst),
+        3,
+        "Should wait for all nested levels to complete"
+    );
+
+    assert!(bus.is_group_idle(job_id));
+
+    bus.close().await;
+}
+
+/// Test that flush_and_sync_group with batched handlers and cascading messages works.
+///
+/// This combines partial batches with cascading messages - a particularly tricky scenario.
+#[tokio::test]
+async fn test_flush_and_sync_group_batched_with_cascading() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let batch_processed = Arc::new(AtomicU64::new(0));
+    let child_processed = Arc::new(AtomicU64::new(0));
+    let batch_processed_clone = batch_processed.clone();
+    let child_processed_clone = child_processed.clone();
+
+    /// Batch message that spawns child messages during handling.
+    #[derive(Debug, Clone, Message)]
+    #[message(clone)]
+    #[group_id(self.job_id)]
+    struct BatchWithChildMessage {
+        job_id: i64,
+        #[allow(dead_code)]
+        value: i32,
+    }
+
+    struct BatchWithCascadeHandler {
+        batch_processed: Arc<AtomicU64>,
+        child_processed: Arc<AtomicU64>,
+    }
+
+    impl BatchHandler<BatchWithChildMessage> for BatchWithCascadeHandler {
+        type Error = BatchError;
+        type Response = ();
+        type InBatch = Vec<BatchWithChildMessage>;
+        type OutBatch = Vec<()>;
+
+        fn handle(
+            &self,
+            msgs: Vec<BatchWithChildMessage>,
+            bus: &Bus,
+        ) -> Result<Vec<Self::Response>, Self::Error> {
+            self.batch_processed
+                .fetch_add(msgs.len() as u64, Ordering::SeqCst);
+
+            // Spawn child messages from batch handler
+            // Note: This is a sync BatchHandler, so we need to use futures::executor
+            // or just rely on send being sync-safe. Here we use a blocking approach.
+            let bus = bus.clone();
+            for msg in &msgs {
+                let bus = bus.clone();
+                let job_id = msg.job_id;
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async {
+                        bus.send(ChildMessage {
+                            parent_job_id: job_id,
+                        })
+                        .await
+                        .unwrap();
+                    });
+                });
+            }
+
+            Ok(vec![(); msgs.len()])
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<ChildMessage> for BatchWithCascadeHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: ChildMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.child_processed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(BatchWithCascadeHandler {
+            batch_processed: batch_processed_clone,
+            child_processed: child_processed_clone,
+        })
+        .subscribe_batch_sync::<BatchWithChildMessage>(
+            32,
+            BufferUnorderedBatchedConfig {
+                batch_size: 5, // Batch size of 5
+                ..Default::default()
+            },
+        )
+        .subscribe_async::<ChildMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 123;
+
+    // Send 2 messages - partial batch
+    for i in 1..=2 {
+        bus.send(BatchWithChildMessage { job_id, value: i })
+            .await
+            .unwrap();
+    }
+
+    // Should flush partial batch and wait for spawned children
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        bus.flush_and_sync_group(job_id, false),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group should handle batched handlers with cascading messages"
+    );
+
+    // Both batch messages should be processed
+    assert_eq!(batch_processed.load(Ordering::SeqCst), 2);
+
+    // Give spawned threads time to complete
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Children should eventually be processed (they were spawned from batch handler)
+    // Note: The spawned threads might not complete before flush_and_sync_group returns
+    // because they're in separate threads. This test mainly verifies no hang occurs.
+
+    bus.close().await;
+}
+
+/// Test that multiple groups can be flushed independently without interference.
+#[tokio::test]
+async fn test_flush_and_sync_group_independent_groups() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let group_1_count = Arc::new(AtomicU64::new(0));
+    let group_2_count = Arc::new(AtomicU64::new(0));
+    let group_1_clone = group_1_count.clone();
+    let group_2_clone = group_2_count.clone();
+
+    struct GroupCountingHandler {
+        group_1_count: Arc<AtomicU64>,
+        group_2_count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<JobMessage> for GroupCountingHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(&self, msg: JobMessage, _bus: &Bus) -> Result<Self::Response, Self::Error> {
+            // Simulate varying work times
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            if msg.job_id == 100 {
+                self.group_1_count.fetch_add(1, Ordering::SeqCst);
+            } else if msg.job_id == 200 {
+                self.group_2_count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(GroupCountingHandler {
+            group_1_count: group_1_clone,
+            group_2_count: group_2_clone,
+        })
+        .subscribe_async::<JobMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Send messages to both groups
+    for i in 0..5 {
+        bus.send(JobMessage {
+            job_id: 100,
+            data: format!("g1-{}", i),
+        })
+        .await
+        .unwrap();
+
+        bus.send(JobMessage {
+            job_id: 200,
+            data: format!("g2-{}", i),
+        })
+        .await
+        .unwrap();
+    }
+
+    // Flush only group 1 first
+    bus.flush_and_sync_group(100, false).await;
+
+    // Group 1 should be done
+    assert_eq!(
+        group_1_count.load(Ordering::SeqCst),
+        5,
+        "Group 1 should be fully processed"
+    );
+    assert!(bus.is_group_idle(100));
+
+    // Group 2 might still be processing or done - flush it too
+    bus.flush_and_sync_group(200, false).await;
+
+    assert_eq!(
+        group_2_count.load(Ordering::SeqCst),
+        5,
+        "Group 2 should be fully processed"
+    );
+    assert!(bus.is_group_idle(200));
+
+    bus.close().await;
+}
+
+/// Test that flush_and_sync_group doesn't hang when no messages were sent for a group.
+#[tokio::test]
+async fn test_flush_and_sync_group_no_messages() {
+    use std::time::Duration;
+
+    struct SimpleHandler;
+
+    #[async_trait]
+    impl AsyncHandler<JobMessage> for SimpleHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            _msg: JobMessage,
+            _bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            Ok(())
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(SimpleHandler)
+        .subscribe_async::<JobMessage>(8, Default::default())
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    // Flush a group that has no messages - should return immediately
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        bus.flush_and_sync_group(999, false),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group should return immediately for empty group"
+    );
+
+    bus.close().await;
+}

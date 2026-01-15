@@ -870,7 +870,60 @@ impl Bus {
     /// * `force` - If true, skips waiting for idle and proceeds directly to sync
     pub async fn flush_and_sync_group(&self, group_id: GroupId, force: bool) {
         if !force {
-            self.flush_group(group_id).await;
+            // For batched receivers, messages can sit in buffers until a batch is full
+            // or a Flush action is sent. For non-batched receivers, messages can sit
+            // in the queue waiting for semaphore permits.
+            //
+            // We need to flush receivers that have handled messages from this group
+            // to ensure all queued/buffered messages are processed. We loop until
+            // the group counter reaches zero, flushing on each iteration to handle
+            // the case where handlers send additional messages.
+            let fuse_count = 64i32;
+            let mut iters = 0;
+
+            loop {
+                iters += 1;
+                if iters > fuse_count {
+                    log::warn!(
+                        "flush_and_sync_group: group {} did not become idle after {} iterations",
+                        group_id,
+                        fuse_count
+                    );
+                    break;
+                }
+
+                // Check if group is already idle
+                if self.inner.group_registry.is_idle(group_id) {
+                    log::debug!(
+                        "flush_and_sync_group: group {} became idle after {} iterations",
+                        group_id,
+                        iters
+                    );
+                    break;
+                }
+
+                // Get receivers that have handled messages from this group
+                let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+
+                if receiver_ids.is_empty() {
+                    // No receivers have handled messages from this group yet.
+                    // This can happen if we're called before any messages are processed.
+                    // Wait briefly and check again.
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+
+                // Flush all receivers that have handled messages from this group.
+                // This ensures:
+                // 1. Batched receivers process any buffered messages
+                // 2. Non-batched receivers process all queued messages
+                // 3. All in-flight handlers complete before flush returns
+                for r in self.inner.receivers.iter() {
+                    if receiver_ids.contains(&r.id()) {
+                        r.flush(self).await;
+                    }
+                }
+            }
         }
         // Sync only receivers that handled messages from this group
         self.sync_group(group_id).await;

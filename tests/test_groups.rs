@@ -2918,6 +2918,89 @@ async fn test_flush_and_sync_group_flushes_partial_batches() {
     bus.close().await;
 }
 
+/// Test that flush_group also handles partial batches correctly.
+///
+/// This verifies the fix where flush_group now flushes receivers before waiting,
+/// so partial batches (fewer messages than batch_size) don't cause hangs.
+#[tokio::test]
+async fn test_flush_group_flushes_partial_batches() {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    let processed_count = Arc::new(AtomicU64::new(0));
+    let processed_count_clone = processed_count.clone();
+
+    struct PartialBatchHandler {
+        processed: Arc<AtomicU64>,
+    }
+
+    impl BatchHandler<BatchJobMessage> for PartialBatchHandler {
+        type Error = BatchError;
+        type Response = ();
+        type InBatch = Vec<BatchJobMessage>;
+        type OutBatch = Vec<()>;
+
+        fn handle(
+            &self,
+            msgs: Vec<BatchJobMessage>,
+            _bus: &Bus,
+        ) -> Result<Vec<Self::Response>, Self::Error> {
+            self.processed
+                .fetch_add(msgs.len() as u64, Ordering::SeqCst);
+            Ok(vec![(); msgs.len()])
+        }
+    }
+
+    let (bus, poller) = Bus::build()
+        .register(PartialBatchHandler {
+            processed: processed_count_clone,
+        })
+        .subscribe_batch_sync::<BatchJobMessage>(
+            32,
+            BufferUnorderedBatchedConfig {
+                batch_size: 10, // Large batch size
+                ..Default::default()
+            },
+        )
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Send only 3 messages - less than batch_size (10)
+    for i in 1..=3 {
+        bus.send(BatchJobMessage { job_id, value: i })
+            .await
+            .unwrap();
+    }
+
+    // flush_group should now flush partial batches and wait for completion
+    // Before the fix, this would hang indefinitely
+    let result = tokio::time::timeout(Duration::from_secs(2), bus.flush_group(job_id)).await;
+
+    assert!(
+        result.is_ok(),
+        "flush_group should not hang on partial batches"
+    );
+
+    // All 3 messages should be processed even though batch_size is 10
+    assert_eq!(
+        processed_count.load(Ordering::SeqCst),
+        3,
+        "All messages in partial batch should be processed"
+    );
+
+    assert!(
+        bus.is_group_idle(job_id),
+        "Group should be idle after flush_group"
+    );
+
+    bus.close().await;
+}
+
 /// Test that flush_and_sync_group waits for cascading child messages.
 ///
 /// When a handler sends additional messages during processing, flush_and_sync_group

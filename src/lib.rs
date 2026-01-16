@@ -821,8 +821,12 @@ impl Bus {
 
     /// Waits for all tasks belonging to a specific group to complete.
     ///
-    /// This is useful for tracking progress of related tasks, such as all
-    /// chunks of a file processing job.
+    /// This flushes any partial batches for the group's receivers before waiting,
+    /// ensuring that buffered messages are processed even if the batch isn't full.
+    ///
+    /// For complex scenarios with cascading messages (handlers that send other messages),
+    /// consider using [`flush_and_sync_group`](Self::flush_and_sync_group) which handles
+    /// those cases more robustly.
     ///
     /// # Example
     ///
@@ -837,6 +841,14 @@ impl Bus {
     /// }
     /// ```
     pub async fn flush_group(&self, group_id: GroupId) {
+        // Flush receivers that have messages from this group to handle partial batches
+        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+        for r in self.inner.receivers.iter() {
+            if receiver_ids.contains(&r.id()) {
+                r.flush(self).await;
+            }
+        }
+
         self.inner.group_registry.wait_idle(group_id).await;
     }
 

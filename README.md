@@ -79,9 +79,9 @@ bus.flush_and_sync_group(job_id, false).await;
 bus.flush_and_sync_group(job_id, true).await;  // Use when you know group is already idle
 ```
 
-#### Flushing Child Messages from Within Handlers
+#### Triggering Child Message Processing from Within Handlers
 
-When a handler sends child messages and needs to wait for them before continuing, use `flush_current_group()`:
+When a handler sends child messages to batched receivers, those messages may sit in a buffer until the batch is full. Use `flush_current_group()` to trigger processing of buffered child messages:
 
 ```rust
 #[async_trait]
@@ -92,16 +92,15 @@ impl AsyncHandler<ParentMessage> for MyHandler {
             bus.send(ChildMessage { data: item }).await?;
         }
 
-        // Flush child messages without blocking (non-blocking to avoid deadlock)
+        // Trigger flush of child messages (non-blocking)
         bus.flush_current_group().await;
 
-        // Now safe to do cleanup or send final notifications
         Ok(())
     }
 }
 ```
 
-**Note:** `flush_current_group()` uses non-blocking flushes internally to prevent deadlocks when called from within a handler.
+**Important:** `flush_current_group()` triggers non-blocking flushes via `flush_nowait()` - it does **not** wait for child messages to complete. This is intentional to prevent deadlocks (the calling handler is itself counted in `processing_count`). The actual waiting for all group messages to complete happens when the caller uses `flush_group()` or `flush_and_sync_group()` after sending the initial messages.
 
 #### Batch Handler Behavior
 

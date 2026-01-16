@@ -3249,6 +3249,7 @@ async fn test_flush_and_sync_group_batched_with_cascading() {
     struct BatchWithCascadeHandler {
         batch_processed: Arc<AtomicU64>,
         child_processed: Arc<AtomicU64>,
+        runtime: tokio::runtime::Handle,
     }
 
     impl BatchHandler<BatchWithChildMessage> for BatchWithCascadeHandler {
@@ -3265,22 +3266,19 @@ async fn test_flush_and_sync_group_batched_with_cascading() {
             self.batch_processed
                 .fetch_add(msgs.len() as u64, Ordering::SeqCst);
 
-            // Spawn child messages from batch handler
-            // Note: This is a sync BatchHandler, so we need to use futures::executor
-            // or just rely on send being sync-safe. Here we use a blocking approach.
-            let bus = bus.clone();
+            // Spawn child sends on the runtime handle captured from the test thread.
+            // This avoids issues with std::thread::spawn + Handle::current() which
+            // can panic or silently drop sends.
+            let rt = self.runtime.clone();
             for msg in &msgs {
                 let bus = bus.clone();
                 let job_id = msg.job_id;
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        bus.send(ChildMessage {
-                            parent_job_id: job_id,
-                        })
-                        .await
-                        .unwrap();
-                    });
+                rt.spawn(async move {
+                    bus.send(ChildMessage {
+                        parent_job_id: job_id,
+                    })
+                    .await
+                    .unwrap();
                 });
             }
 
@@ -3304,10 +3302,12 @@ async fn test_flush_and_sync_group_batched_with_cascading() {
         }
     }
 
+    let rt = tokio::runtime::Handle::current();
     let (bus, poller) = Bus::build()
         .register(BatchWithCascadeHandler {
             batch_processed: batch_processed_clone,
             child_processed: child_processed_clone,
+            runtime: rt,
         })
         .subscribe_batch_sync::<BatchWithChildMessage>(
             32,
@@ -3347,12 +3347,17 @@ async fn test_flush_and_sync_group_batched_with_cascading() {
     // Both batch messages should be processed
     assert_eq!(batch_processed.load(Ordering::SeqCst), 2);
 
-    // Give spawned threads time to complete
+    // Note: Child messages spawned from batch handlers are NOT tracked by the group
+    // because batch handlers don't propagate group context. This is by design since
+    // batches may contain messages from different groups.
+    // We need to wait separately for the children to complete.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Children should eventually be processed (they were spawned from batch handler)
-    // Note: The spawned threads might not complete before flush_and_sync_group returns
-    // because they're in separate threads. This test mainly verifies no hang occurs.
+    assert_eq!(
+        child_processed.load(Ordering::SeqCst),
+        2,
+        "All child messages should eventually be processed"
+    );
 
     bus.close().await;
 }

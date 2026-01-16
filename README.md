@@ -24,6 +24,8 @@ Inspired by Actix
 
 Task grouping allows you to track related messages and wait for all tasks in a group to complete. This is useful for job processing, batch operations, or any scenario where you need to know when a set of related tasks has finished.
 
+#### Basic Usage
+
 ```rust
 use messagebus::{Bus, GroupId, derive::Message};
 
@@ -50,7 +52,97 @@ async fn process_job(bus: &Bus) {
 }
 ```
 
+#### Group ID Propagation
+
 Group IDs propagate to child messages - when a handler sends new messages, they inherit the parent task's group ID unless the child message has its own `#[group_id]` attribute.
+
+#### Flush Methods
+
+There are three flush methods for groups, each with different use cases:
+
+| Method | Use Case |
+|--------|----------|
+| `flush_group(id)` | Flushes partial batches and waits for completion. Simple and sufficient for most cases. |
+| `flush_and_sync_group(id, force)` | Flushes, waits, then syncs receivers. Use for cascading messages or when you need sync. |
+| `flush_current_group()` | For use within handlers to flush child messages without blocking. |
+
+Use `flush_and_sync_group()` when handlers send cascading messages (handler A sends to handler B) that need the two-pass flush strategy to avoid deadlocks.
+
+```rust
+// Simple case - works for all handler types including batched:
+bus.flush_group(job_id).await;
+
+// For cascading messages or when you need sync:
+bus.flush_and_sync_group(job_id, false).await;
+
+// The `force` parameter skips waiting and proceeds directly to sync:
+bus.flush_and_sync_group(job_id, true).await;  // Use when you know group is already idle
+```
+
+#### Flushing Child Messages from Within Handlers
+
+When a handler sends child messages and needs to wait for them before continuing, use `flush_current_group()`:
+
+```rust
+#[async_trait]
+impl AsyncHandler<ParentMessage> for MyHandler {
+    async fn handle(&self, msg: ParentMessage, bus: &Bus) -> Result<(), Error> {
+        // Send child messages (they inherit the parent's group_id)
+        for item in msg.items {
+            bus.send(ChildMessage { data: item }).await?;
+        }
+
+        // Flush child messages without blocking (non-blocking to avoid deadlock)
+        bus.flush_current_group().await;
+
+        // Now safe to do cleanup or send final notifications
+        Ok(())
+    }
+}
+```
+
+**Note:** `flush_current_group()` uses non-blocking flushes internally to prevent deadlocks when called from within a handler.
+
+#### Batch Handler Behavior
+
+Batched handlers have special group handling:
+- Messages are batched **per group_id** - messages from different groups are never mixed in the same batch
+- Each message's group counter is properly decremented after batch processing
+- Batch handlers don't propagate group context to child messages (since batches may contain messages from different groups)
+
+#### Group Cleanup
+
+Groups remain in memory until explicitly removed. For long-running applications, clean up completed groups:
+
+```rust
+use messagebus::GroupRemovalResult;
+
+// Safe removal - only removes if idle
+match bus.remove_group(job_id) {
+    GroupRemovalResult::Removed => println!("Group cleaned up"),
+    GroupRemovalResult::NotIdle => println!("Group still has in-flight tasks"),
+    GroupRemovalResult::NotFound => println!("Group doesn't exist"),
+}
+
+// Force removal (use with caution - can cause tracking issues)
+bus.force_remove_group(job_id);
+
+// Monitor tracked groups
+let count = bus.tracked_group_count();
+```
+
+#### Utility Methods
+
+```rust
+// Check if a group has no in-flight tasks
+bus.is_group_idle(group_id);
+
+// Get current in-flight task count for a group
+bus.group_processing_count(group_id);
+
+// Get the current task's group ID from within a handler
+Bus::current_group_id();
+```
 
 There is an example at [demo_groups.rs](./examples/demo_groups.rs)
 

@@ -821,8 +821,12 @@ impl Bus {
 
     /// Waits for all tasks belonging to a specific group to complete.
     ///
-    /// This is useful for tracking progress of related tasks, such as all
-    /// chunks of a file processing job.
+    /// This flushes any partial batches for the group's receivers before waiting,
+    /// ensuring that buffered messages are processed even if the batch isn't full.
+    ///
+    /// For complex scenarios with cascading messages (handlers that send other messages),
+    /// consider using [`flush_and_sync_group`](Self::flush_and_sync_group) which handles
+    /// those cases more robustly.
     ///
     /// # Example
     ///
@@ -837,6 +841,14 @@ impl Bus {
     /// }
     /// ```
     pub async fn flush_group(&self, group_id: GroupId) {
+        // Flush receivers that have messages from this group to handle partial batches
+        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+        for r in self.inner.receivers.iter() {
+            if receiver_ids.contains(&r.id()) {
+                r.flush(self).await;
+            }
+        }
+
         self.inner.group_registry.wait_idle(group_id).await;
     }
 
@@ -869,11 +881,169 @@ impl Bus {
     /// * `group_id` - The group ID to flush and sync
     /// * `force` - If true, skips waiting for idle and proceeds directly to sync
     pub async fn flush_and_sync_group(&self, group_id: GroupId, force: bool) {
+        log::debug!(
+            "flush_and_sync_group: START group={} force={} processing_count={}",
+            group_id,
+            force,
+            self.inner.group_registry.processing_count(group_id)
+        );
+
         if !force {
-            self.flush_group(group_id).await;
+            // Two-pass flush to handle backpressure correctly:
+            // 1. First pass: non-blocking flush to trigger all receivers to start processing
+            //    This prevents deadlock where upstream handlers are blocked waiting for
+            //    downstream buffers to have space.
+            // 2. Second pass: blocking flush to wait for processing to complete
+            let fuse_count = 32i32;
+            let mut iters = 0;
+
+            loop {
+                iters += 1;
+                if iters > fuse_count {
+                    log::warn!(
+                        "flush_and_sync_group: group {} did not stabilize after {} iterations",
+                        group_id,
+                        fuse_count
+                    );
+                    break;
+                }
+
+                let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+                if receiver_ids.is_empty() {
+                    log::debug!(
+                        "flush_and_sync_group: group={} no receivers, done",
+                        group_id
+                    );
+                    break;
+                }
+
+                // First pass: trigger all receivers to start processing (non-blocking)
+                for r in self.inner.receivers.iter() {
+                    if receiver_ids.contains(&r.id()) && !r.is_idling() {
+                        log::debug!(
+                            "flush_and_sync_group: group={} triggering flush on receiver id={}",
+                            group_id,
+                            r.id()
+                        );
+                        r.flush_nowait(self);
+                    }
+                }
+
+                // Second pass: wait for processing to complete (blocking)
+                let mut any_flushed = false;
+                for r in self.inner.receivers.iter() {
+                    if receiver_ids.contains(&r.id()) && !r.is_idling() {
+                        log::debug!(
+                            "flush_and_sync_group: group={} waiting for receiver id={}",
+                            group_id,
+                            r.id()
+                        );
+                        r.flush(self).await;
+                        any_flushed = true;
+                    }
+                }
+
+                if !any_flushed {
+                    log::debug!(
+                        "flush_and_sync_group: group={} all receivers idle after {} iterations",
+                        group_id,
+                        iters
+                    );
+                    break;
+                }
+            }
         }
+
+        // Final flush to ensure any partial batches are processed.
+        log::debug!(
+            "flush_and_sync_group: group={} final flush for partial batches",
+            group_id
+        );
+        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+        for r in self.inner.receivers.iter() {
+            if receiver_ids.contains(&r.id()) {
+                r.flush(self).await;
+            }
+        }
+
+        // Wait for any remaining tasks to complete
+        log::debug!(
+            "flush_and_sync_group: group={} waiting for group idle",
+            group_id
+        );
+        self.inner.group_registry.wait_idle(group_id).await;
+
         // Sync only receivers that handled messages from this group
+        log::debug!(
+            "flush_and_sync_group: group={} starting sync_group",
+            group_id
+        );
         self.sync_group(group_id).await;
+        log::debug!("flush_and_sync_group: END group={}", group_id);
+    }
+
+    /// Flushes all receivers that have messages from the current group.
+    ///
+    /// This is designed to be called from within a handler to wait for all
+    /// child messages (sent during this handler's execution) to complete.
+    /// It automatically uses the group_id from task-local storage.
+    ///
+    /// Unlike type-specific `flush_and_sync::<T>` methods, this flushes ALL
+    /// receivers that have messages from the current group, including intermediate
+    /// batched receivers. This prevents hangs caused by unflushed batch buffers.
+    ///
+    /// If called outside a group context (no group_id in task-local storage),
+    /// this method does nothing and returns immediately.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// async fn handle(&self, msg: MyMessage, bus: &Bus) -> Result<(), Error> {
+    ///     // Send child messages
+    ///     for item in items {
+    ///         bus.send(ChildMessage { ... }).await?;
+    ///     }
+    ///
+    ///     // Wait for all child messages to complete
+    ///     bus.flush_current_group().await;
+    ///
+    ///     // Now safe to do cleanup or send final notifications
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn flush_current_group(&self) {
+        let Some(group_id) = Self::current_group_id() else {
+            log::trace!("flush_current_group: no group_id in task-local storage, skipping");
+            return;
+        };
+
+        log::debug!(
+            "flush_current_group: group={} processing_count={}",
+            group_id,
+            self.inner.group_registry.processing_count(group_id)
+        );
+
+        // Flush all receivers that have messages from this group.
+        // This triggers batched receivers to process their buffered messages.
+        //
+        // IMPORTANT: We use flush_nowait (non-blocking) because:
+        // 1. The calling handler is itself counted in processing_count
+        // 2. Sibling handlers may be running concurrently
+        // 3. Blocking flush can cause deadlock when called from within a handler
+        // The outer flush_and_sync_group will wait for all handlers to complete.
+        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+
+        for r in self.inner.receivers.iter() {
+            if receiver_ids.contains(&r.id()) {
+                r.flush_nowait(self);
+            }
+        }
+
+        log::debug!(
+            "flush_current_group: group={} complete, processing_count={}",
+            group_id,
+            self.inner.group_registry.processing_count(group_id)
+        );
     }
 
     /// Returns `true` if the group has no in-flight tasks.

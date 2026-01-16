@@ -3,7 +3,7 @@
 //! This example shows how to:
 //! - Define messages with group IDs using the `#[group_id]` attribute
 //! - Track tasks by group
-//! - Wait for all tasks in a group to complete
+//! - Wait for all tasks in a group to complete using `flush_group`
 
 use async_trait::async_trait;
 use messagebus::derive::Message;

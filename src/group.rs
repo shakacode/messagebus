@@ -171,7 +171,14 @@ impl GroupRegistry {
         let entry = self.groups.entry(group_id).or_insert_with(GroupEntry::new);
         // Relaxed is sufficient - we're just incrementing a counter.
         // Synchronization with waiters is provided by Notify.
-        entry.processing.fetch_add(1, Ordering::Relaxed);
+        let prev = entry.processing.fetch_add(1, Ordering::Relaxed);
+        log::trace!(
+            "GroupRegistry::increment group_id={} receiver_id={} count: {} -> {}",
+            group_id,
+            receiver_id,
+            prev,
+            prev + 1
+        );
         entry.receivers.insert(receiver_id);
     }
 
@@ -205,6 +212,14 @@ impl GroupRegistry {
             // fetch_update always succeeds when closure returns Some
             let prev = result.expect("fetch_update should always succeed");
 
+            log::trace!(
+                "GroupRegistry::decrement_by group_id={} count={} prev={} new={}",
+                group_id,
+                count,
+                prev,
+                prev.saturating_sub(count)
+            );
+
             debug_assert!(
                 prev >= count,
                 "decrement_by underflow: count ({}) > previous value ({})",
@@ -214,8 +229,18 @@ impl GroupRegistry {
 
             if prev <= count {
                 // Count reached zero, notify waiters
+                log::trace!(
+                    "GroupRegistry: group {} reached zero, notifying waiters",
+                    group_id
+                );
                 entry.idle_notify.notify_waiters();
             }
+        } else {
+            log::warn!(
+                "GroupRegistry::decrement_by called for unknown group_id={} count={}",
+                group_id,
+                count
+            );
         }
     }
 
@@ -245,9 +270,14 @@ impl GroupRegistry {
     ///
     /// Returns immediately if the group is already idle or doesn't exist.
     pub async fn wait_idle(&self, group_id: GroupId) {
+        log::debug!("GroupRegistry::wait_idle group_id={} starting", group_id);
         loop {
             let Some(entry) = self.groups.get(&group_id) else {
                 // Group doesn't exist, so it's idle by definition
+                log::debug!(
+                    "GroupRegistry::wait_idle group_id={} not found, returning",
+                    group_id
+                );
                 return;
             };
 
@@ -263,9 +293,20 @@ impl GroupRegistry {
 
             // Now check the condition - if idle, we're done.
             // Acquire pairs with Release in decrement_by to ensure we see the final count.
-            if entry.processing.load(Ordering::Acquire) == 0 {
+            let count = entry.processing.load(Ordering::Acquire);
+            if count == 0 {
+                log::debug!(
+                    "GroupRegistry::wait_idle group_id={} already idle, returning",
+                    group_id
+                );
                 return;
             }
+
+            log::debug!(
+                "GroupRegistry::wait_idle group_id={} count={}, waiting for notification...",
+                group_id,
+                count
+            );
 
             // Drop the entry to release the DashMap lock before awaiting
             drop(entry);
@@ -273,6 +314,10 @@ impl GroupRegistry {
             // Wait for notification - we won't miss it because we registered
             // interest before checking the condition
             notified.await;
+            log::trace!(
+                "GroupRegistry::wait_idle group_id={} received notification, checking again",
+                group_id
+            );
         }
     }
 

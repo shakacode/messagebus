@@ -1097,6 +1097,18 @@ impl Receiver {
         }
     }
 
+    /// Triggers a flush without waiting for completion.
+    ///
+    /// This sends the Flush action to the receiver but returns immediately
+    /// without waiting for the flush to complete. Use this when you need
+    /// to trigger flushing from within a handler without risking deadlock.
+    #[inline]
+    pub fn flush_nowait(&self, bus: &Bus) {
+        if self.inner.send_action(bus, Action::Flush).is_err() {
+            warn!("flush_nowait failed!");
+        }
+    }
+
     #[inline]
     pub fn iter_types(&self) -> impl Iterator<Item = (TypeTag, Option<(TypeTag, TypeTag)>)> + '_ {
         self.inner.iter_types()

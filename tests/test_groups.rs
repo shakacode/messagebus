@@ -3347,17 +3347,20 @@ async fn test_flush_and_sync_group_batched_with_cascading() {
     // Both batch messages should be processed
     assert_eq!(batch_processed.load(Ordering::SeqCst), 2);
 
-    // Note: Child messages spawned from batch handlers are NOT tracked by the group
-    // because batch handlers don't propagate group context. This is by design since
-    // batches may contain messages from different groups.
-    // We need to wait separately for the children to complete.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    assert_eq!(
-        child_processed.load(Ordering::SeqCst),
-        2,
-        "All child messages should eventually be processed"
-    );
+    // Note: Child messages spawned via rt.spawn() don't inherit task-local storage,
+    // so they aren't tracked by the group even though batch handlers do set up
+    // group context. We need to wait separately for the children to complete.
+    // Use bounded polling instead of fixed sleep for determinism under load.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if child_processed.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("All child messages should eventually be processed");
 
     bus.close().await;
 }

@@ -107,7 +107,7 @@ impl AsyncHandler<ParentMessage> for MyHandler {
 Batched handlers have special group handling:
 - Messages are batched **per group_id** - messages from different groups are never mixed in the same batch
 - Each message's group counter is properly decremented after batch processing
-- Batch handlers don't propagate group context to child messages (since batches may contain messages from different groups)
+- Child messages sent via `bus.send()` from within a batch handler inherit the batch's group_id (unless they define their own `#[group_id]`)
 
 #### Group Cleanup
 

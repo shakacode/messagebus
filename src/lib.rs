@@ -881,7 +881,7 @@ impl Bus {
     /// * `group_id` - The group ID to flush and sync
     /// * `force` - If true, skips waiting for idle and proceeds directly to sync
     pub async fn flush_and_sync_group(&self, group_id: GroupId, force: bool) {
-        log::info!(
+        log::debug!(
             "flush_and_sync_group: START group={} force={} processing_count={}",
             group_id,
             force,
@@ -955,7 +955,7 @@ impl Bus {
         }
 
         // Final flush to ensure any partial batches are processed.
-        log::info!(
+        log::debug!(
             "flush_and_sync_group: group={} final flush for partial batches",
             group_id
         );
@@ -967,19 +967,19 @@ impl Bus {
         }
 
         // Wait for any remaining tasks to complete
-        log::info!(
+        log::debug!(
             "flush_and_sync_group: group={} waiting for group idle",
             group_id
         );
         self.inner.group_registry.wait_idle(group_id).await;
 
         // Sync only receivers that handled messages from this group
-        log::info!(
+        log::debug!(
             "flush_and_sync_group: group={} starting sync_group",
             group_id
         );
         self.sync_group(group_id).await;
-        log::info!("flush_and_sync_group: END group={}", group_id);
+        log::debug!("flush_and_sync_group: END group={}", group_id);
     }
 
     /// Flushes all receivers that have messages from the current group.

@@ -954,24 +954,54 @@ impl Bus {
             }
         }
 
-        // Final flush to ensure any partial batches are processed.
-        log::debug!(
-            "flush_and_sync_group: group={} final flush for partial batches",
-            group_id
-        );
-        let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
-        for r in self.inner.receivers.iter() {
-            if receiver_ids.contains(&r.id()) {
-                r.flush(self).await;
-            }
-        }
+        // Flush-then-idle loop: repeatedly flush partial batches and wait for
+        // the group to become idle. A single flush is not sufficient because
+        // handlers completing after the flush can send new messages to batched
+        // receivers, creating new partial batches that keep the group counter
+        // elevated. We loop until the group truly converges.
+        let drain_fuse_count = 64i32;
+        let mut drain_iters = 0;
 
-        // Wait for any remaining tasks to complete
-        log::debug!(
-            "flush_and_sync_group: group={} waiting for group idle",
-            group_id
-        );
-        self.inner.group_registry.wait_idle(group_id).await;
+        loop {
+            drain_iters += 1;
+            if drain_iters > drain_fuse_count {
+                log::warn!(
+                    "flush_and_sync_group: group {} drain loop did not converge after {} iterations, processing_count={}",
+                    group_id,
+                    drain_fuse_count,
+                    self.inner.group_registry.processing_count(group_id)
+                );
+                break;
+            }
+
+            // Flush all receivers in the group to process any partial batches
+            log::debug!(
+                "flush_and_sync_group: group={} drain iteration {} flush, processing_count={}",
+                group_id,
+                drain_iters,
+                self.inner.group_registry.processing_count(group_id)
+            );
+            let receiver_ids = self.inner.group_registry.receivers_for_group(group_id);
+            for r in self.inner.receivers.iter() {
+                if receiver_ids.contains(&r.id()) {
+                    r.flush(self).await;
+                }
+            }
+
+            // Check if the group is now idle (all handlers completed, all batches flushed)
+            if self.inner.group_registry.is_idle(group_id) {
+                log::debug!(
+                    "flush_and_sync_group: group={} idle after {} drain iterations",
+                    group_id,
+                    drain_iters
+                );
+                break;
+            }
+
+            // Not yet idle — handlers are still in flight. Yield to let them
+            // make progress, then flush again to catch any new partial batches.
+            tokio::task::yield_now().await;
+        }
 
         // Sync only receivers that handled messages from this group
         log::debug!(

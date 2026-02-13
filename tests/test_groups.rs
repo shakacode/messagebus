@@ -3738,3 +3738,214 @@ async fn test_vrbp_pattern_with_batched_handlers() {
 
     bus.close().await;
 }
+
+/// Test that reproduces the scrape_urls hang: recursive handlers with async delays
+/// send messages to a batched receiver with a large batch_size. The race condition is:
+///
+/// 1. flush_and_sync_group starts, runs stabilization loop, does ONE final flush
+/// 2. Slow recursive handlers complete AFTER the final flush
+/// 3. Each handler sends DbUpsert-like messages to a batched receiver
+/// 4. These form a partial batch (< batch_size) that is never flushed
+/// 5. Group counter stays > 0 because the batch handler never runs
+/// 6. wait_idle blocks forever
+///
+/// The fix: loop flush + is_idle until the group truly converges.
+#[tokio::test]
+async fn test_flush_and_sync_group_late_partial_batch_after_recursive_handlers() {
+    use messagebus::receivers::{BufferUnorderedBatchedConfig, BufferUnorderedConfig};
+    use messagebus::AsyncBatchHandler;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    /// Root message that kicks off recursive work (like PrepareScrapeUrls).
+    #[derive(Debug, Clone, Message)]
+    #[group_id(self.job_id)]
+    struct StartRecursive {
+        job_id: i64,
+        depth: u32,
+    }
+
+    /// Recursive worker message (like ScrapeRegionUrls). Each handler:
+    /// - Spawns 2 children if depth > 0 (region split)
+    /// - Sends N DbWrite messages (like DbUpsert<NewListingUrl>)
+    /// - Sleeps to simulate HTTP latency, ensuring handlers complete AFTER flush starts
+    #[derive(Debug, Clone, Message)]
+    #[group_id(self.job_id)]
+    struct RecursiveWork {
+        job_id: i64,
+        depth: u32,
+        id: u32,
+    }
+
+    /// Message sent to a batched receiver (like DbUpsert<NewListingUrl>).
+    /// Has NO explicit group_id — inherits from parent handler's task-local context.
+    #[derive(Debug, Clone, Message)]
+    struct DbWrite {
+        #[allow(dead_code)]
+        value: u32,
+    }
+
+    struct RaceConditionHandler {
+        recursive_count: Arc<AtomicU64>,
+        db_write_count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler<StartRecursive> for RaceConditionHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: StartRecursive,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            // Spawn initial recursive work
+            bus.send(RecursiveWork {
+                job_id: msg.job_id,
+                depth: msg.depth,
+                id: 0,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncHandler<RecursiveWork> for RaceConditionHandler {
+        type Error = GenericError;
+        type Response = ();
+
+        async fn handle(
+            &self,
+            msg: RecursiveWork,
+            bus: &Bus,
+        ) -> Result<Self::Response, Self::Error> {
+            self.recursive_count.fetch_add(1, Ordering::SeqCst);
+
+            // Simulate HTTP latency — this is key to the race condition.
+            // The delay ensures some handlers complete AFTER flush_and_sync_group's
+            // final flush, creating new partial batches that the old code never flushed.
+            tokio::time::sleep(Duration::from_millis(5 + (msg.id as u64 % 10))).await;
+
+            if msg.depth > 0 {
+                // Region split: spawn 2 children (like ScrapeRegionUrls recursion)
+                for i in 0..2 {
+                    bus.send(RecursiveWork {
+                        job_id: msg.job_id,
+                        depth: msg.depth - 1,
+                        id: msg.id * 2 + i + 1,
+                    })
+                    .await
+                    .unwrap();
+                }
+            }
+
+            // Every handler sends a few DbWrite messages (like DbUpsert<NewListingUrl>).
+            // These inherit group_id from task-local context and go to a batched receiver
+            // with a large batch_size, so they form partial batches.
+            for i in 0..3 {
+                bus.send(DbWrite {
+                    value: msg.id * 100 + i,
+                })
+                .await
+                .unwrap();
+            }
+
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncBatchHandler<DbWrite> for RaceConditionHandler {
+        type Error = BatchError;
+        type Response = ();
+        type InBatch = Vec<DbWrite>;
+        type OutBatch = Vec<()>;
+
+        async fn handle(
+            &self,
+            msgs: Self::InBatch,
+            _bus: &Bus,
+        ) -> Result<Self::OutBatch, Self::Error> {
+            self.db_write_count
+                .fetch_add(msgs.len() as u64, Ordering::SeqCst);
+            Ok(vec![(); msgs.len()])
+        }
+    }
+
+    let recursive_count = Arc::new(AtomicU64::new(0));
+    let db_write_count = Arc::new(AtomicU64::new(0));
+
+    let handler = RaceConditionHandler {
+        recursive_count: recursive_count.clone(),
+        db_write_count: db_write_count.clone(),
+    };
+
+    let (bus, poller) = Bus::build()
+        .register(handler)
+        .subscribe_async::<StartRecursive>(8, Default::default())
+        .subscribe_async::<RecursiveWork>(
+            64,
+            BufferUnorderedConfig {
+                buffer_size: 64,
+                max_parallel: 8,
+            },
+        )
+        .subscribe_batch_async::<DbWrite>(
+            4096,
+            BufferUnorderedBatchedConfig {
+                // Large batch_size ensures partial batches form — this is the
+                // crux of the race condition. The recursive tree produces
+                // 3 * (2^(depth+1) - 1) = 3 * 31 = 93 messages total, well
+                // under 1024, so no batch auto-triggers.
+                batch_size: 1024,
+                max_parallel: 2,
+                buffer_size: 4096,
+                when_ready: false,
+            },
+        )
+        .done()
+        .build();
+
+    tokio::spawn(poller);
+    bus.ready().await;
+
+    let job_id: GroupId = 42;
+
+    // Kick off recursive work: depth=4 creates 2^5 - 1 = 31 handlers,
+    // each sending 3 DbWrite messages = 93 total DbWrite messages.
+    bus.send(StartRecursive { job_id, depth: 4 }).await.unwrap();
+
+    // This is where the hang occurred: flush_and_sync_group would do one final
+    // flush then wait_idle, but slow recursive handlers completing after the
+    // flush would send new DbWrite messages into partial batches, keeping the
+    // group counter > 0 forever.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        bus.flush_and_sync_group(job_id, false),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "flush_and_sync_group must not hang — late partial batches must be flushed"
+    );
+
+    // depth=4 binary tree: 1 + 2 + 4 + 8 + 16 = 31 recursive handlers
+    assert_eq!(
+        recursive_count.load(Ordering::SeqCst),
+        31,
+        "All recursive handlers should have completed"
+    );
+
+    // 31 handlers * 3 DbWrite messages each = 93
+    assert_eq!(
+        db_write_count.load(Ordering::SeqCst),
+        93,
+        "All DbWrite messages should be processed (partial batches must be flushed)"
+    );
+
+    bus.close().await;
+}

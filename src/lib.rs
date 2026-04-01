@@ -959,22 +959,20 @@ impl Bus {
         // handlers completing after the flush can send new messages to batched
         // receivers, creating new partial batches that keep the group counter
         // elevated. We loop until the group truly converges.
-        let drain_fuse_count = 64i32;
-        let mut drain_iters = 0;
+        //
+        // We use wait_idle() with a timeout instead of yield_now(). Plain
+        // yield_now() barely advances the runtime and requires an arbitrary
+        // fuse limit, while unbounded wait_idle() can deadlock when handlers
+        // block on full channels that need flushing. The timeout lets us
+        // periodically flush to relieve backpressure while still waiting
+        // efficiently for long-running workloads.
+        let mut drain_iters = 0u32;
 
         loop {
             drain_iters += 1;
-            if drain_iters > drain_fuse_count {
-                log::warn!(
-                    "flush_and_sync_group: group {} drain loop did not converge after {} iterations, processing_count={}",
-                    group_id,
-                    drain_fuse_count,
-                    self.inner.group_registry.processing_count(group_id)
-                );
-                break;
-            }
 
             // Flush all receivers in the group to process any partial batches
+            // and relieve backpressure on full channels.
             log::debug!(
                 "flush_and_sync_group: group={} drain iteration {} flush, processing_count={}",
                 group_id,
@@ -998,9 +996,21 @@ impl Bus {
                 break;
             }
 
-            // Not yet idle — handlers are still in flight. Yield to let them
-            // make progress, then flush again to catch any new partial batches.
-            tokio::task::yield_now().await;
+            // Not yet idle — handlers are still in flight. Wait for the group
+            // to become idle, but with a timeout so we periodically flush
+            // receivers. Without this, handlers blocked on full channels would
+            // deadlock (they can't complete, so wait_idle never returns, and
+            // nobody flushes to free channel space).
+            log::debug!(
+                "flush_and_sync_group: group={} waiting for idle, processing_count={}",
+                group_id,
+                self.inner.group_registry.processing_count(group_id)
+            );
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                self.inner.group_registry.wait_idle(group_id),
+            )
+            .await;
         }
 
         // Sync only receivers that handled messages from this group

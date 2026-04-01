@@ -967,9 +967,21 @@ impl Bus {
         // periodically flush to relieve backpressure while still waiting
         // efficiently for long-running workloads.
         let mut drain_iters = 0u32;
+        // Short enough to periodically flush full bounded channels and relieve backpressure,
+        // long enough to avoid busy-looping on large workloads (~thousands of concurrent tasks).
+        const DRAIN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+        const DRAIN_WARN_INTERVAL: u32 = 100; // warn every ~10s (100 * DRAIN_IDLE_TIMEOUT)
 
         loop {
             drain_iters += 1;
+            if drain_iters > 1 && drain_iters % DRAIN_WARN_INTERVAL == 0 {
+                log::warn!(
+                    "flush_and_sync_group: group {} drain loop still running after {} iterations, processing_count={}",
+                    group_id,
+                    drain_iters,
+                    self.inner.group_registry.processing_count(group_id)
+                );
+            }
 
             // Flush all receivers in the group to process any partial batches
             // and relieve backpressure on full channels.
@@ -1007,7 +1019,7 @@ impl Bus {
                 self.inner.group_registry.processing_count(group_id)
             );
             let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
+                DRAIN_IDLE_TIMEOUT,
                 self.inner.group_registry.wait_idle(group_id),
             )
             .await;

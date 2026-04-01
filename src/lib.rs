@@ -966,11 +966,11 @@ impl Bus {
         // block on full channels that need flushing. The timeout lets us
         // periodically flush to relieve backpressure while still waiting
         // efficiently for long-running workloads.
-        let mut drain_iters = 0u32;
+        let mut drain_iters = 0u64;
         // Short enough to periodically flush full bounded channels and relieve backpressure,
         // long enough to avoid busy-looping on large workloads (~thousands of concurrent tasks).
         const DRAIN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-        const DRAIN_WARN_INTERVAL: u32 = 100; // warn every ~10s (100 * DRAIN_IDLE_TIMEOUT)
+        const DRAIN_WARN_INTERVAL: u64 = 100; // warn every ~10s (100 * DRAIN_IDLE_TIMEOUT)
 
         loop {
             drain_iters += 1;

@@ -974,7 +974,7 @@ impl Bus {
 
         loop {
             drain_iters += 1;
-            if drain_iters > 1 && drain_iters % DRAIN_WARN_INTERVAL == 0 {
+            if drain_iters % DRAIN_WARN_INTERVAL == 0 {
                 log::warn!(
                     "flush_and_sync_group: group {} drain loop still running after {} iterations, processing_count={}",
                     group_id,
